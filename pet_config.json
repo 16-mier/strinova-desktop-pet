@@ -1,0 +1,7 @@
+{
+  "bind_device": "Voicemeeter Input (VB-Audio Voicemeeter VAIO)",
+  "auto_ptt": true,
+  "self_device": "扬声器 (USB Audio and HID)",
+  "ptt_key": "V",
+  "hotkeys_enabled": true
+}
