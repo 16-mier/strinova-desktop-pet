@@ -78,6 +78,25 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-05（傻瓜化 UI：拖放导入角色/音频 + 修复小键盘抢键打出V的 bug）
+- **需求**：优化 UI 简化添加角色/语音——直接拖文件进来；修复"开桌宠后按小键盘1打出V"的 bug
+- **bug 根因（双重）**：
+  1. 小键盘 1-9 被注册为**全局无修饰热键**（RegisterHotKey）→ 系统级抢键，打字时按小键盘数字不输入、被桌宠截获触发语音
+  2. 触发语音时若开「自动按开麦键V」，桌宠用 SendInput 注入一个 V 到前台窗口 → 正在打字的地方出现"v"
+- **修复**（`pet.py`）：
+  1. 新增配置 `numpad_hotkeys`（默认 **False**）：小键盘 1-9 快捷播放改为**默认关闭**，需在面板/菜单显式开启（开启时提示"占用小键盘数字输入，适合游戏内"）；关闭时小键盘数字恢复正常打字
+  2. `set_numpad_enabled`：开→注册 1-9（含重注册），关→注销；注册逻辑按开关控制
+  3. `play_audio(path, ptt_override=None)` 新增覆盖参数；点击桌宠本体播放与面板试听**强制 ptt_override=False**——不再注入开麦键字母，杜绝在打字/聊天时被打断
+  4. 原来全局热键 `set_hotkeys_enabled` 语义保留（只管自定义绑定键与小键盘总开关之间的联动）
+- **实现**（`settings_panel.py`）：热键区拆为两个开关：①启用自定义语音快捷键（F1 等绑定键）②小键盘1-9快捷播放（默认关+占用提示）；refresh_all 同步勾选；`_on_numpad_toggled` handler
+- **傻瓜化（拖放导入）**（`settings_panel.py`）：
+  1. 面板 `setAcceptDrops(True)` + `dragEnter/Move/Leave/Drop` 事件；拖入时金色虚线高亮边框（paintEvent 叠加）
+  2. `_handle_drop(urls)`：音频文件 mp3/wav/ogg/flac/m4a → 当前语音来源目录；文件夹（含 image.png/.gif）→ 复制为新角色；单张 png/jpg/gif → 以文件名新建角色目录（gif 保留原名动图，其它存 image.png）
+  3. 「导入新形象」按钮升级为可**多选图片文件**导入（每张=新角色）；「打开角色文件夹」改为打开**当前语音来源**目录（通用语音→common_voice）
+  4. 提示文案改傻瓜化：「直接拖进本窗口即可添加角色/导入音频」
+- **验证**：py_compile ✅；逻辑脚本：默认 numpad 关→无热键；开→注册9个；关→注销；ptt_override 语义 ✅；拖放导入测试：png 建角色/文件夹建角色/音频入角色目录/通用来源导入 common_voice/目录按来源切换 + 清理 ✅；GUI 脚本：拖放高亮绘制、切换新角色加载图片不崩 ✅
+- 涉及：`pet.py`（_numpad_enabled/set_numpad_enabled/play_audio ptt_override/play_click_voice/菜单加小键盘开关）、`settings_panel.py`（chk_numpad/_on_numpad_toggled/拖放事件/_handle_drop/_import_character 多图导入/_open_characters_folder 按来源/提示文案）
+
 ### 2026-09-05（新增通用语音：所有角色共用一套语音，可切回角色专属）
 - **需求**：加一个「通用语音」选项——不管选哪个角色都用这套语音；可切回角色自己的语音
 - **资源**：`assets/common_voice/`（与 characters 平级）存放通用语音；桌面「艾卡语音」里挑了 2 条（06_奈斯！、20_let's go gogooooooo）放入
@@ -109,6 +128,28 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 - **实现**（`settings_panel.py`）：角色导入校验放宽为「含 image.png **或 .gif**」；提示文案同步更新
 - **验证**：py_compile ✅；QMovie 实测 18 帧逐帧触发、每帧 120×122 带透明 ✅；临时加载脚本确认艾卡被识别、pixmap cacheKey 随时间变化（动画推进）✅
 - 涉及：`pet.py`（role_image/list_roles/_stop_movie/_set_role_frame/load_role/closeEvent）、`settings_panel.py`（_import_character/提示文案）
+
+### 2026-09-05（设置面板架构：新建独立设置窗口替代弹出菜单 + 逐项修复）
+- **背景**：弹出菜单点击选项不稳定（反复重开/闪没），用户拍板改用**独立设置面板窗口**
+- **实现**（`settings_panel.py` 新建 + `pet.py` 联动）：
+  1. `SettingsPanel`：无边框、置顶、可拖动标题栏；QGroupBox 四大模块：形象角色 / 语音音频 / 播放设备 / 快捷键开麦
+  2. 角色列表：单击即切换当前角色、导入新形象（含角色图文件夹）、删除角色（当前角色禁删）；`QFileSystemWatcher` 监视当前角色目录，改动 250ms 防抖自动刷新音频列表
+  3. 音频列表：单击仅选中、双击试听、导入音频、删除所选、🔑 绑定快捷键按钮（显式进入录制，避免误绑）；绑定键金色显示
+  4. 播放设备：绑定麦克风（队友听）+ 自己监听（耳机），NoWheelComboBox 防滚轮误触
+  5. 快捷键开麦：启用快捷键发话总开关、自动按开麦键、开麦键选择（V/B/C/X/Z/F1-5/自定义录制）
+  6. 底部：刷新 / 打开角色文件夹 / 退出桌宠（红色）
+  7. pet.py：`open_settings_panel()` 创建单例面板（注入 `_panel_mod.bind_pet_module` 避免循环导入）；三横按钮与托盘左键都打开面板；`set_bind_device` 等 setter 同步刷新面板
+- **验证**：脚本验证面板创建/刷新/切换角色/绑定链路；用户实测
+- 涉及：`settings_panel.py`（新建）、`pet.py`（open_settings_panel/_bind_pet_module/各 setter 同步面板）
+
+### 2026-09-05（修复合辑：SendInput 按键 / 录制忽略注入键 / 绑定流程 / 无边框面板 / NoWheel 下拉）
+- **SendInput 替代 keybd_event**：旧 API 部分游戏不识别 → 定义 KEYBDINPUT/MOUSEINPUT/_INPUTUNION 结构，`_send_key(vk, keyup)` 显式 argtypes/restype 防 64 位截断
+- **录制误绑注入键**：音频试听触发 auto_ptt 会 SendInput 注入 V，被 KeyCapture 当成用户按键绑定 → `LLKHF_INJECTED(0x10)` 标志检测，注入键放行且不录制
+- **音频单击不绑定**：单击仅选中提示，需再点「🔑 绑定/修改快捷键」才进入录制；绑定完成/取消后 `on_capture_finished` 恢复按钮 + 即时刷新列表显示键名
+- **无边框面板**：settings_panel 去掉系统标题栏，无多余的 最小化/关闭 与自定义 ✕ 混叠
+- **NoWheelComboBox**：滚轮悬停下拉框不切换选项（防误触）
+- **验证**：脚本链路验证 + 用户实测
+- 涉及：`pet.py`（_send_key/KeyCapture 注入过滤/绑定流程）、`settings_panel.py`（面板/NoWheel/按钮文字）
 
 ### 2026-09-05（菜单点选项后自动重开，支持连续操作）
 - **现象**：点菜单里一个选项后菜单关闭，要重新打开才能点下一个选项

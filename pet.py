@@ -739,6 +739,8 @@ class PetWindow(QWidget):
         self._ptt_vk = key_name_to_vk(self._ptt_key_name) or VK_V
         # 「启用快捷键发话」总开关
         self._hotkeys_enabled = bool(_cfg.get('hotkeys_enabled', True))
+        # 小键盘 1-9 快捷播放开关（默认关！全局抢键会占用打字的小键盘数字输入）
+        self._numpad_enabled = bool(_cfg.get('numpad_hotkeys', False))
         # 语音自定义快捷键: { 音频key(角色/文件名): 键名 }
         self._audio_hotkeys = dict(_cfg.get('audio_hotkeys', {}))
         # 语音来源：'role'=角色专属语音（默认）/ 'common'=通用语音（任何角色共用一套）
@@ -839,13 +841,17 @@ class PetWindow(QWidget):
                     _dbg('hk: winId 0, use queue (%d)' % self._hk_tries)
         except Exception as e:
             _dbg('hotkey winId fail (%d): %r' % (self._hk_tries, e))
-        # 先注销旧的，再全新注册（防残留/重复）
+        # 先注销旧的，再全新注册（防残留/重复：numpad + custom 都需先注销，
+        # 否则绑定删除/更换后旧 custom 热键仍占用系统）
         try:
             unregister_numpad_hotkeys(hwnd, getattr(self, '_hotkey_ids', {}))
+            for hid in list(getattr(self, '_custom_hk_map', {}).keys()):
+                unregister_hotkey(hwnd, hid)
         except Exception:
             pass
-        # 注册小键盘 1-9 默认映射（数字作为回退）
-        self._hotkey_ids = register_numpad_hotkeys(hwnd)
+        # 注册小键盘 1-9 默认映射（仅当用户显式开启 numpad 快捷播放；
+        # 否则不抢系统小键盘数字键，避免打字/输入时按小键盘数字被截获）
+        self._hotkey_ids = register_numpad_hotkeys(hwnd) if self._numpad_enabled else {}
         # 注册自定义键（音频快捷键）
         # 自定义键: hid → audio_key；跳过与默认小键盘1-9重复的键名（Num1~Num9）
         default_numpad_names = {'Num%d' % i for i in range(1, 10)}
@@ -865,8 +871,9 @@ class PetWindow(QWidget):
             _dbg('hotkeys registered: num=%s custom=%s hwnd=%s' % (
                 sorted(self._hotkey_ids), sorted(self._custom_hk_map), hwnd))
         else:
-            _dbg('hotkey register all failed, retry (%d)' % self._hk_tries)
-            QTimer.singleShot(1000, self._register_hotkeys_now)
+            # 只有 numpad 关着且没自定义键 → 也算"注册完成"（无热键是正常态）
+            self._hotkey_pending = False
+            _dbg('hotkeys: no numpad (off) + no custom, idle')
 
     def _resolve_vk(self, key_name):
         """键名/原始VK → 虚拟码。兼容 'VK<数字>' 格式（捕获未知名键时存储）"""
@@ -1037,24 +1044,27 @@ class PetWindow(QWidget):
             devs.append(self._self_device)
         return devs
 
-    def play_audio(self, path):
+    def play_audio(self, path, ptt_override=None):
         """播放指定音频文件：
         - 有绑定/监听设备 → sounddevice 并行直出到这些设备
           （绑定麦给队友 + 自己耳机自己听），期间按需触发 auto_ptt
         - 都没有 → QMediaPlayer 走系统默认输出，期间同样按需触发 auto_ptt
+        ptt_override: True/False 强制开启/关闭自动开麦键（默认 None=跟随设置）；
+        点击桌宠本体播放传 False —— 防止在打字/聊天时注入开麦键字母污染输入
         """
         if not os.path.exists(path):
             return
+        ptt_on = self._auto_ptt if ptt_override is None else bool(ptt_override)
         targets = self._target_devices()
         if targets and HAS_SD:
             threading.Thread(target=self._play_direct_worker,
-                             args=(path, targets), daemon=True).start()
+                             args=(path, targets, ptt_on), daemon=True).start()
             return
         # 默认模式：QMediaPlayer（auto_ptt 也要生效）
         if self.player is None:
             return
         try:
-            if self._auto_ptt:
+            if ptt_on:
                 ptt_key_down(self._ptt_vk)
             self.player.stop()
             self.player.setSource(QUrl.fromLocalFile(path))
@@ -1064,17 +1074,18 @@ class PetWindow(QWidget):
             print("play error:", e)
 
         # 音频播完（按时长估算）后松开开麦键
-        if self._auto_ptt:
+        if ptt_on:
             dur = audio_duration_seconds(path)
             def _release_ptt():
                 time.sleep(dur + PTT_HOLD_EXTRA_S)
                 ptt_key_up(self._ptt_vk)
             threading.Thread(target=_release_ptt, daemon=True).start()
 
-    def _play_direct_worker(self, path, targets):
-        """后台线程：向多个设备并行播放；若开启 auto_ptt，播放开始即按住开麦键，
+    def _play_direct_worker(self, path, targets, ptt_on=None):
+        """后台线程：向多个设备并行播放；若 ptt_on，播放开始即按住开麦键，
         音频播完后再多按 0.5 秒松开（防尾部被切）。全部失败回主线程回退 QMediaPlayer"""
-        ptt_on = self._auto_ptt
+        if ptt_on is None:
+            ptt_on = self._auto_ptt
         if ptt_on:
             ptt_key_down(self._ptt_vk)  # 按住开麦键（队友听得到）
         try:
@@ -1106,7 +1117,8 @@ class PetWindow(QWidget):
             click = os.path.join(d, "click.mp3")
             f = click if os.path.exists(click) else os.path.join(d, "morning.mp3")
         if os.path.exists(f):
-            self.play_audio(f)
+            # 点击语音：强制不开 auto_ptt（避免打字时误注入开麦键）
+            self.play_audio(f, ptt_override=False)
 
     @staticmethod
     def greeting_for_now():
@@ -1247,6 +1259,7 @@ class PetWindow(QWidget):
         # 松开：从压扁态弹性回弹到 1.0，时长 ~520ms（慢、带明显回弹），不位移
         self.animate_scale(1.0, 1.0, duration_ms=520, ease="bounce")
         if was_click:
+            # 点击桌宠本体播放的"点击语音"：不开 auto_ptt（避免在打字/聊天时误注入开麦键打出字母）
             self.play_click_voice()
 
     # ------------- 窗口交互 -------------
@@ -1349,6 +1362,14 @@ class PetWindow(QWidget):
         act_hken.setChecked(self._hotkeys_enabled)
         act_hken.triggered.connect(lambda checked: self.set_hotkeys_enabled(checked))
         menu.addAction(act_hken)
+
+        # ⑦ 小键盘 1-9 快捷播放（默认关：全局抢键会占用打字时的小键盘数字输入）
+        act_numpad = QAction("小键盘1-9快捷播放", menu)
+        act_numpad.setCheckable(True)
+        act_numpad.setChecked(self._numpad_enabled)
+        act_numpad.setToolTip("开启会全局占用小键盘数字键（打字时按小键盘1-9不再输入数字），适合游戏内使用")
+        act_numpad.triggered.connect(lambda checked: self.set_numpad_enabled(checked))
+        menu.addAction(act_numpad)
 
         menu.addSeparator()
 
@@ -1538,9 +1559,13 @@ class PetWindow(QWidget):
         self.load_role(role)
         self.refresh_tray_menu()
         self._schedule_menu_refresh()
-        # 同步打开的面板
+        # 同步打开的面板：刷新列表 + 重新监视新角色的目录
         if getattr(self, '_settings_panel', None) is not None:
-            self._settings_panel.refresh_all()
+            try:
+                self._settings_panel.refresh_all()
+                self._settings_panel._watch_current_dir()
+            except Exception:
+                pass
 
     # ------------- 设置面板 -------------
     def open_settings_panel(self):
@@ -1570,6 +1595,13 @@ class PetWindow(QWidget):
         if self.role not in self.roles:
             self.role = self.roles[0] if self.roles else DEFAULT_ROLE
             self.load_role(self.role)
+        # 同步打开的面板（角色列表/当前角色显示/音频列表）
+        if getattr(self, '_settings_panel', None) is not None:
+            try:
+                self._settings_panel.refresh_all()
+                self._settings_panel._watch_current_dir()
+            except Exception:
+                pass
 
     # 供设置面板调用的便捷方法（委托模块级函数）
     def base_dir(self):
@@ -1656,6 +1688,29 @@ class PetWindow(QWidget):
             self._hotkey_pending = False
             _dbg('hotkeys disabled')
         print('hotkeys_enabled ->', self._hotkeys_enabled)
+
+    def set_numpad_enabled(self, enabled):
+        """小键盘 1-9 快捷播放开关（默认关）。
+        开=注册全局裸数字键（会占用打字时的小键盘数字输入，适合游戏内用）；
+        关=注销，小键盘数字恢复正常输入"""
+        self._numpad_enabled = bool(enabled)
+        cfg = load_config()
+        cfg['numpad_hotkeys'] = self._numpad_enabled
+        save_config(cfg)
+        self._hotkey_pending = True
+        if self._numpad_enabled:
+            self._register_hotkeys_now()
+        else:
+            try:
+                hwnd = int(self.winId())
+                unregister_numpad_hotkeys(hwnd, self._hotkey_ids)
+            except Exception:
+                pass
+            self._hotkey_ids = {}
+            self._hotkey_pending = False
+            _dbg('numpad hotkeys off')
+        self.refresh_tray_menu()
+        print('numpad_hotkeys ->', self._numpad_enabled)
 
     def set_ptt_key(self, key_name):
         """设置开麦键（键名）。持久化并更新 ptt_vk"""

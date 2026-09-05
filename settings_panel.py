@@ -161,8 +161,10 @@ class SettingsPanel(QWidget):
             w, h = 720, 860
         self.resize(w, h)
         self.setMouseTracking(True)  # 边缘悬停 → 更新缩放光标
+        self.setAcceptDrops(True)    # 支持把音频/图片/文件夹拖入面板导入
         self.setStyleSheet(PANEL_QSS)
         self._drag_offset = None  # 拖动标题栏移动窗口
+        self._drop_armed = False  # 拖入文件悬停中（高亮）
         self._fs_watcher = QFileSystemWatcher(self)
         self._fs_watcher.directoryChanged.connect(self._on_dir_changed)
         self._auto_refresh_timer = QTimer(self)
@@ -230,7 +232,7 @@ class SettingsPanel(QWidget):
         btn_col.addStretch(1)
         row.addLayout(btn_col)
         rl.addLayout(row)
-        tip = QLabel("提示：可把含 image.png 或 .gif 动图+音频 的文件夹放到 assets/characters/ 下，点下方\"刷新\"")
+        tip = QLabel("💡 直接把 图片/角色文件夹 拖进本窗口即可添加角色，或点「导入新形象」选择图片")
         tip.setStyleSheet("color:#7a8099; font-size:11px;")
         rl.addWidget(tip)
         bl.addWidget(gb_role)
@@ -269,7 +271,7 @@ class SettingsPanel(QWidget):
         arow.addWidget(self.btn_bind)
         arow.addStretch(1)
         al.addLayout(arow)
-        self.lbl_bind_tip = QLabel("先选中一条语音，再点「🔑 绑定/修改快捷键」，然后按一个键完成绑定（Esc 取消）")
+        self.lbl_bind_tip = QLabel("💡 选中语音后可试听/绑定快捷键；也可直接拖 mp3/文件夹 进本窗口导入")
         self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
         al.addWidget(self.lbl_bind_tip)
         bl.addWidget(gb_audio)
@@ -296,9 +298,13 @@ class SettingsPanel(QWidget):
         # ---- 模块4：热键 / PTT ----
         gb_hk = QGroupBox("快捷键 / 开麦")
         hl = QVBoxLayout(gb_hk)
-        self.chk_hotkeys = QCheckBox("启用快捷键发话（小键盘1-9 及自定义键）")
+        self.chk_hotkeys = QCheckBox("启用自定义语音快捷键（F1 等绑定键）")
         self.chk_hotkeys.toggled.connect(self._on_hotkeys_toggled)
         hl.addWidget(self.chk_hotkeys)
+        # 小键盘 1-9 快捷播放（默认关：全局抢键会占用打字时小键盘数字）
+        self.chk_numpad = QCheckBox("小键盘1-9快捷播放（占用小键盘数字输入，游戏内用）")
+        self.chk_numpad.toggled.connect(self._on_numpad_toggled)
+        hl.addWidget(self.chk_numpad)
         self.chk_ptt = QCheckBox("自动按住开麦键（播语音时队友才听得到）")
         self.chk_ptt.toggled.connect(self._on_ptt_toggled)
         hl.addWidget(self.chk_ptt)
@@ -310,7 +316,7 @@ class SettingsPanel(QWidget):
         self.cmb_pttkey.currentIndexChanged.connect(self._on_pttkey_changed)
         r3.addWidget(self.cmb_pttkey, 1)
         hl.addLayout(r3)
-        tip3 = QLabel("小键盘1-9 默认播放当前角色第1-9条音频；点音频列表可自定义按键")
+        tip3 = QLabel("小键盘1-9 默认播放当前语音来源的第1-9条音频；点音频列表可自定义按键")
         tip3.setStyleSheet("color:#7a8099; font-size:11px;")
         hl.addWidget(tip3)
         bl.addWidget(gb_hk)
@@ -393,6 +399,136 @@ class SettingsPanel(QWidget):
         self._drag_offset = None
         super().mouseReleaseEvent(e)
 
+    # ---------------- 拖放导入（傻瓜化）----------------
+    def _handle_drop(self, urls):
+        """处理拖入的路径：音频→当前语音来源；png/gif/文件夹→新角色"""
+        if not urls:
+            return
+        pet = self._current_pet()
+        if pet is None:
+            return
+        # 分类
+        audios = []
+        char_dirs = []   # 文件夹（含 image.png/gif → 当角色目录）
+        char_imgs = []   # 单张 png/gif 图 → 以文件名建角色
+        for u in urls:
+            path = u
+            if not os.path.exists(path):
+                continue
+            low = path.lower()
+            if os.path.isdir(path):
+                # 文件夹：若含角色图则作为新角色；否则当作音频来源递归?（只支持含角色图目录）
+                has_img = os.path.exists(os.path.join(path, 'image.png')) or \
+                    any(f.lower().endswith('.gif') for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)))
+                if has_img:
+                    char_dirs.append(path)
+                else:
+                    # 不含角色图 → 把目录内音频全部导入
+                    for f in os.listdir(path):
+                        fp = os.path.join(path, f)
+                        if os.path.isfile(fp) and f.lower().endswith(('.mp3', '.wav', '.ogg', '.flac', '.m4a')):
+                            audios.append(fp)
+            elif low.endswith(('.mp3', '.wav', '.ogg', '.flac', '.m4a')):
+                audios.append(path)
+            elif low.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')):
+                char_imgs.append(path)
+        imported_any = False
+        # 1) 导入音频到当前语音来源
+        if audios:
+            d = self._current_audio_dir()
+            if d:
+                os.makedirs(d, exist_ok=True)
+                for f in audios:
+                    name = os.path.basename(f)
+                    dst = os.path.join(d, name)
+                    i = 1
+                    base, ext = os.path.splitext(name)
+                    while os.path.exists(dst):
+                        dst = os.path.join(d, "%s(%d)%s" % (base, i, ext))
+                        i += 1
+                    try:
+                        shutil.copy2(f, dst)
+                        imported_any = True
+                    except Exception as e:
+                        print('drop audio fail:', f, e)
+                self._refresh_audio_list()
+                self._watch_current_dir()
+        # 2) 导入文件夹作为新角色
+        if char_dirs:
+            chars = os.path.join(pet.base_dir(), 'assets', 'characters')
+            os.makedirs(chars, exist_ok=True)
+            for d in char_dirs:
+                name = os.path.basename(d)
+                dst = os.path.join(chars, name)
+                try:
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(d, dst)
+                    imported_any = True
+                except Exception as e:
+                    print('drop char dir fail:', d, e)
+        # 3) 导入单张角色图
+        if char_imgs:
+            chars = os.path.join(pet.base_dir(), 'assets', 'characters')
+            os.makedirs(chars, exist_ok=True)
+            for img in char_imgs:
+                name = os.path.splitext(os.path.basename(img))[0]
+                ext = os.path.splitext(img)[1].lower()
+                dst = os.path.join(chars, name)
+                os.makedirs(dst, exist_ok=True)
+                # 角色图统一叫 image.png（GIF 保留原名动画）
+                if ext == '.gif':
+                    target = os.path.join(dst, os.path.basename(img))
+                else:
+                    target = os.path.join(dst, 'image.png')
+                try:
+                    if os.path.exists(target):
+                        os.remove(target)
+                    shutil.copy2(img, target)
+                    imported_any = True
+                except Exception as e:
+                    print('drop char img fail:', img, e)
+        if imported_any:
+            if hasattr(pet, 'rescan_roles'):
+                pet.rescan_roles()
+            self.refresh_all()
+            self._watch_current_dir()
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            self._drop_armed = True
+            self.update()
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):
+        self._drop_armed = False
+        self.update()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        self._drop_armed = False
+        self.update()
+        if e.mimeData().hasUrls():
+            urls = [u.toLocalFile() for u in e.mimeData().urls()]
+            self._handle_drop(urls)
+            e.acceptProposedAction()
+
+    def paintEvent(self, e):
+        # 保持默认绘制 + 拖入高亮边框
+        super().paintEvent(e)
+        if self._drop_armed:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = QPen(QColor(255, 215, 110, 230), 2, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(QColor(255, 215, 110, 26))
+            p.drawRoundedRect(self.rect().adjusted(3, 3, -3, -3), 10, 10)
+            p.end()
+
     def _quit_app(self):
         """退出整个桌宠程序"""
         pet = self._current_pet()
@@ -428,6 +564,9 @@ class SettingsPanel(QWidget):
         self.chk_hotkeys.blockSignals(True)
         self.chk_hotkeys.setChecked(bool(getattr(pet, '_hotkeys_enabled', True)))
         self.chk_hotkeys.blockSignals(False)
+        self.chk_numpad.blockSignals(True)
+        self.chk_numpad.setChecked(bool(getattr(pet, '_numpad_enabled', False)))
+        self.chk_numpad.blockSignals(False)
         self.chk_ptt.blockSignals(True)
         self.chk_ptt.setChecked(bool(getattr(pet, '_auto_ptt', False)))
         self.chk_ptt.blockSignals(False)
@@ -536,33 +675,46 @@ class SettingsPanel(QWidget):
         self._watch_current_dir()  # 切换后重设监视目录（新角色的音频文件夹）
 
     def _import_character(self):
-        """导入新形象：选文件夹（含 image.png 或 .gif 动图），复制到 assets/characters/"""
+        """导入新形象：可多选 png/jpg/gif 图片（每张=新角色），或选含角色图的文件夹"""
         pet = self._current_pet()
         if pet is None:
             return
-        folder = QFileDialog.getExistingDirectory(self, "选择角色文件夹（需含 image.png 或 .gif）")
-        if not folder:
+        # 让用户选择：文件 或 文件夹（用 file dialog 允许目录 + 图片文件）
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择角色图片（png/jpg/gif，每张=新角色）\n也可整个含 image.png/.gif 的文件夹拖入窗口",
+            "", "图片 (*.png *.jpg *.jpeg *.gif *.webp *.bmp)")
+        if not files:
             return
-        if not os.path.exists(os.path.join(folder, 'image.png')):
-            gifs = [f for f in os.listdir(folder) if f.lower().endswith('.gif')]
-            if not gifs:
-                QMessageBox.warning(self, "提示", "所选文件夹里没有 image.png 或 .gif 动图，无法作为角色。")
-                return
-        name = os.path.basename(folder)
         chars = os.path.join(pet.base_dir(), 'assets', 'characters')
         os.makedirs(chars, exist_ok=True)
-        dst = os.path.join(chars, name)
-        try:
-            if os.path.exists(dst):
-                shutil.rmtree(dst)
-            shutil.copytree(folder, dst)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", "导入失败: %s" % e)
-            return
-        if hasattr(pet, 'rescan_roles'):
-            pet.rescan_roles()
-        self.refresh_all()
-        self.sig_character_added.emit(name)
+        imported = []
+        for img in files:
+            name = os.path.splitext(os.path.basename(img))[0]
+            ext = os.path.splitext(img)[1].lower()
+            if not name:
+                continue
+            dst = os.path.join(chars, name)
+            try:
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)  # 覆盖同名的旧角色目录
+                os.makedirs(dst, exist_ok=True)
+                # GIF 动图保留原名（load_role 会找目录内 .gif）；其它统一存 image.png
+                if ext == '.gif':
+                    target = os.path.join(dst, os.path.basename(img))
+                else:
+                    target = os.path.join(dst, 'image.png')
+                if os.path.exists(target):
+                    os.remove(target)
+                shutil.copy2(img, target)
+                imported.append(name)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", "导入 %s 失败: %s" % (img, e))
+        if imported:
+            if hasattr(pet, 'rescan_roles'):
+                pet.rescan_roles()
+            self.refresh_all()
+            self.sig_character_added.emit(','.join(imported))
+            self._watch_current_dir()
 
     def _delete_selected_role(self):
         pet = self._current_pet()
@@ -623,7 +775,7 @@ class SettingsPanel(QWidget):
         self.btn_bind.setChecked(False)
         self.btn_bind.setText("🔑 绑定/修改快捷键")
         self.lbl_bind_tip.setText(
-            "先选中一条语音，再点「🔑 绑定/修改快捷键」，然后按一个键完成绑定（Esc 取消）")
+            "💡 选中语音后可试听/绑定快捷键；也可直接拖 mp3/文件夹 进本窗口导入")
         self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
         self._refresh_audio_list()  # 立即刷新显示绑定的快捷键
 
@@ -689,7 +841,8 @@ class SettingsPanel(QWidget):
             return
         path = item.data(Qt.ItemDataRole.UserRole)
         if path and hasattr(pet, 'play_audio'):
-            pet.play_audio(path)
+            # 试听：强制不开 auto_ptt（避免试听时在聊天窗口注入开麦键字母）
+            pet.play_audio(path, ptt_override=False)
 
     # ---------------- 设备 / 热键操作 ----------------
     def _on_bind_changed(self, idx):
@@ -711,6 +864,14 @@ class SettingsPanel(QWidget):
         if pet is not None and hasattr(pet, 'set_hotkeys_enabled'):
             pet.set_hotkeys_enabled(on)
             self.sig_hotkeys_enabled.emit(on)
+
+    def _on_numpad_toggled(self, on):
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'set_numpad_enabled'):
+            if on:
+                # 开启前提示会占用小键盘输入（仅第一次）
+                pass
+            pet.set_numpad_enabled(on)
 
     def _on_ptt_toggled(self, on):
         pet = self._current_pet()
@@ -785,12 +946,15 @@ class SettingsPanel(QWidget):
         self.lbl_cur_role.setText(getattr(pet, 'role', '-') or '-')
 
     def _open_characters_folder(self):
+        """打开当前语音来源所在目录（通用语音→common_voice；角色→角色目录）"""
         pet = self._current_pet()
         if pet is None:
             return
-        chars = os.path.join(pet.base_dir(), 'assets', 'characters')
-        os.makedirs(chars, exist_ok=True)
-        os.startfile(chars)
+        d = self._current_audio_dir()
+        if not d:
+            d = os.path.join(pet.base_dir(), 'assets', 'characters')
+        os.makedirs(d, exist_ok=True)
+        os.startfile(d)
 
     def toast_hotkey_bound(self, audio_key, key_name):
         """录制完成回调：更新列表显示"""
