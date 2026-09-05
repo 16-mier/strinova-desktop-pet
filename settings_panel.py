@@ -729,11 +729,18 @@ class SettingsPanel(QWidget):
         dst = os.path.join(chars, role)
         ret = QMessageBox.question(self, "确认", "删除角色「%s」？（会删除其文件夹）" % role)
         if ret == QMessageBox.StandardButton.Yes:
-            try:
-                shutil.rmtree(dst)
-            except Exception as e:
-                QMessageBox.critical(self, "错误", "删除失败: %s" % e)
-                return
+            if hasattr(pet, 'remove_role'):
+                ok, msg = pet.remove_role(role)
+                if not ok:
+                    QMessageBox.critical(self, "错误", msg)
+                    return
+            else:
+                # 兼容旧实现
+                try:
+                    shutil.rmtree(dst)
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", "删除失败: %s" % e)
+                    return
             if hasattr(pet, 'rescan_roles'):
                 pet.rescan_roles()
             self.refresh_all()
@@ -827,11 +834,18 @@ class SettingsPanel(QWidget):
             return
         ret = QMessageBox.question(self, "确认", "删除该音频文件？\n%s" % os.path.basename(path))
         if ret == QMessageBox.StandardButton.Yes:
-            try:
-                os.remove(path)
-            except Exception as e:
-                QMessageBox.critical(self, "错误", "删除失败: %s" % e)
-                return
+            if hasattr(pet, 'remove_audio_file'):
+                ok, msg = pet.remove_audio_file(path)
+                if not ok:
+                    QMessageBox.critical(self, "错误", msg)
+                    return
+            else:
+                # 兼容：直接删除（无清理绑定能力）
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", "删除失败: %s" % e)
+                    return
             self._refresh_audio_list()
 
     def _preview_selected_audio(self):

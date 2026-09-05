@@ -16,6 +16,7 @@ import os
 import math
 import json
 import time
+import shutil
 import threading
 import ctypes
 from datetime import datetime
@@ -1615,6 +1616,75 @@ class PetWindow(QWidget):
 
     def list_role_audio(self, role):
         return list_role_audio(role)
+
+    def unbind_audio_key(self, audio_key):
+        """移除某音频的快捷键绑定（删除音频/清绑定时调用），持久化并注销热键"""
+        if audio_key in self._audio_hotkeys:
+            del self._audio_hotkeys[audio_key]
+            cfg = load_config()
+            cfg['audio_hotkeys'] = self._audio_hotkeys
+            save_config(cfg)
+            # 注销该 key 对应的热键（若已注册）
+            try:
+                hwnd = int(self.winId())
+                for hid, ak in list(self._custom_hk_map.items()):
+                    if ak == audio_key:
+                        unregister_hotkey(hwnd, hid)
+                        del self._custom_hk_map[hid]
+            except Exception:
+                pass
+            # 同步打开的面板
+            if getattr(self, '_settings_panel', None) is not None:
+                try:
+                    self._settings_panel.on_capture_finished()
+                except Exception:
+                    pass
+
+    def remove_audio_file(self, path):
+        """删除音频文件并清理其绑定（面板删除音频调用）。
+        返回 (成功?, 提示)"""
+        akey = self._audio_key_for_path(path) if hasattr(self, '_audio_key_for_path') \
+            else self._audio_key(self.role, path)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            return False, "删除失败: %s" % e
+        # 清理该音频绑定（若有）
+        self.unbind_audio_key(akey)
+        return True, ""
+
+    def remove_role(self, role):
+        """删除角色目录并清理该角色全部音频快捷键绑定（面板删除角色调用）。
+        返回 (成功?, 提示)。不能删当前角色"""
+        if role == self.role:
+            return False, "不能删除正在使用的角色"
+        d = role_dir(role)
+        try:
+            if os.path.isdir(d):
+                shutil.rmtree(d)
+        except Exception as e:
+            return False, "删除失败: %s" % e
+        # 清理该角色所有音频绑定（前缀 "<role>/"）
+        changed = False
+        for k in list(self._audio_hotkeys.keys()):
+            if k.startswith(role + '/'):
+                del self._audio_hotkeys[k]
+                changed = True
+        if changed:
+            cfg = load_config()
+            cfg['audio_hotkeys'] = self._audio_hotkeys
+            save_config(cfg)
+        # 注销属于该角色的已注册热键
+        try:
+            hwnd = int(self.winId())
+            for hid, ak in list(self._custom_hk_map.items()):
+                if ak.startswith(role + '/'):
+                    unregister_hotkey(hwnd, hid)
+                    del self._custom_hk_map[hid]
+        except Exception:
+            pass
+        return True, ""
 
     # ------------- 绑定麦克风/输出 -------------
     def _schedule_menu_refresh(self):

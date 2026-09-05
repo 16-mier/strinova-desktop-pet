@@ -78,6 +78,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-05（删除音频/角色时自动清理快捷键绑定）
+- **问题**：删除音频或整个角色后，`pet_config.json` 的 `audio_hotkeys` 仍残留其绑定 → 下次启动尝试注册已不存在文件的热键，浪费且行为不一致
+- **修复**（`pet.py`）：
+  1. `unbind_audio_key(audio_key)`：移除指定绑定 + 持久化 + 注销已注册的对应热键
+  2. `remove_audio_file(path)`：删除音频文件并清理其绑定（面板删除音频改用）
+  3. `remove_role(role)`：删除角色目录 + 清理该角色所有绑定（前缀 `role/`）+ 注销热键；当前角色拒绝删除（保护）
+- **实现**（`settings_panel.py`）：`_delete_selected_audio` / `_delete_selected_role` 改调 pet 方法
+- **验证**：py_compile ✅；测试：删单音频只清自己的绑定、删角色清全部绑定、删当前角色被拒 ✅
+- 涉及：`pet.py`（unbind_audio_key/remove_audio_file/remove_role/import shutil）、`settings_panel.py`（_delete_selected_audio/_delete_selected_role）
+
 ### 2026-09-05（傻瓜化 UI：拖放导入角色/音频 + 修复小键盘抢键打出V的 bug）
 - **需求**：优化 UI 简化添加角色/语音——直接拖文件进来；修复"开桌宠后按小键盘1打出V"的 bug
 - **bug 根因（双重）**：
