@@ -78,6 +78,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-05（小键盘快捷播放升级为"智能模式"：聚焦输入框自动放行，不打扰打字）
+- **需求**：开启小键盘 1-9 快捷播放时，聚焦输入框/打字场景应自动不占用（放行数字输入），只有游戏/桌面等非输入场景才触发语音
+- **方案**：废弃 `RegisterHotKey` 全局裸数字键（无条件抢键），改用 **WH_KEYBOARD_LL 常驻低级钩子 + 前台焦点智能判定**
+- **实现**（`pet.py`）：
+  1. `GUITHREADINFO` 自定义结构 + Win32 API 原型声明（GetForegroundWindow/GetWindowThreadProcessId/GetGUIThreadInfo/GetClassNameW 防 64 位截断）
+  2. `foreground_is_input()`：三判据任中即放行——①前台线程 `hwndCaret` 非空（正在输入，最精确）②前台窗口类名命中输入控件（Edit/RichEdit/Console 等）③前台**进程名白名单**（浏览器 chrome/msedge/firefox、聊天 QQ/微信/钉钉/飞书、编辑器 vscode/notepad/idea、终端、Office 等）；进程名用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `QueryFullProcessImageNameW`（无需管理员）
+  3. `NumpadPlayHook`：常驻低级钩子（独立线程 + GetMessage 循环，模式同 KeyCapture）；小键盘 1-9 按下 → 输入态则 `CallNextHookEx` 放行，非输入态则吞键（返回 1）+ 主线程轮询回调播放；注入键（LLKHF_INJECTED）始终放行
+  4. `_numpad_hook_start/_stop`：启停钩子；`set_numpad_enabled` 改为启停钩子（不再 RegisterHotKey）；`set_hotkeys_enabled` 总开关关→停钩子、开→恢复；启动时若配置开启则自动启钩子；`closeEvent` 停钩子
+  5. `_register_hotkeys_now` 只负责自定义键（F1 等），小键盘不再注册
+- **面板/菜单**：文案改为「小键盘1-9快捷播放（智能：打字/输入框时自动放行）」
+- **验证**：py_compile ✅；前台 Edge（msedge.exe 白名单）→ 判定 True 放行 ✅；钩子启停不崩、线程存活 ✅；端到端 mock：非输入态 Num1→吞键触发播放、输入态 Num2→放行不触发 ✅；面板开关联动（勾选启钩子/取消停/总开关关也停）✅
+- 涉及：`pet.py`（GUITHREADINFO/foreground_is_input/NumpadPlayHook/_numpad_hook_start/_stop/set_numpad_enabled/set_hotkeys_enabled/_register_hotkeys_now/closeEvent/菜单文案）、`settings_panel.py`（chk_numpad 文案）
+
 ### 2026-09-05（删除音频/角色时自动清理快捷键绑定）
 - **问题**：删除音频或整个角色后，`pet_config.json` 的 `audio_hotkeys` 仍残留其绑定 → 下次启动尝试注册已不存在文件的热键，浪费且行为不一致
 - **修复**（`pet.py`）：

@@ -626,6 +626,215 @@ class KeyCapture:
             self._hook = None
 
 
+# ------- 智能小键盘播放（聚焦输入框自动放行）-------
+# 用 WH_KEYBOARD_LL 常驻钩子替代 RegisterHotKey：
+# 按下小键盘 1-9 时，若前台窗口处于"文本输入态"（有光标/输入控件）→ 放行按键正常输入；
+# 否则（如游戏、桌面、桌宠本体）→ 吞掉该键并触发对应语音。这样开着快捷播放也不影响打字。
+
+
+class GUITHREADINFO(ctypes.Structure):
+    """GUI 线程信息（wintypes 无内置，需自定义；与 Win32 GUITHREADINFO 对齐）"""
+    _fields_ = [
+        ('cbSize', wintypes.DWORD),
+        ('flags', wintypes.DWORD),
+        ('hwndActive', wintypes.HWND),
+        ('hwndFocus', wintypes.HWND),
+        ('hwndCapture', wintypes.HWND),
+        ('hwndMenuOwner', wintypes.HWND),
+        ('hwndMoveSize', wintypes.HWND),
+        ('hwndCaret', wintypes.HWND),
+        ('rcCaret', wintypes.RECT),
+    ]
+
+
+# 智能钩子使用的 Win32 API 原型（防 64 位截断 + HWND 指针正确）
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+_user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)]
+_user32.GetGUIThreadInfo.restype = wintypes.BOOL
+_user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetClassNameW.restype = ctypes.c_int
+
+
+_TEXT_INPUT_CN = {
+    "edit", "richedit", "rhedit", "tkinter", "scintilla", "chrome_edit", "editwrapper",
+    "consolewindowclass", "cmdline", "notepad", "tb_browser", "osinputbox", "webbrowser",
+    "ime",
+}
+# 注意：不把通用 "qwidget"/"metawindow" 当输入控件（误伤所有 Qt 程序）；
+# Qt 应用是否在输入靠 hwndCaret 精确判定。
+# 前台进程白名单：这些程序聚焦时大概率正在输入（浏览器/聊天/编辑器/终端等）。
+# 注意：QQ/微信/浏览器等即使没聚焦输入框也可能要打字，故放行数字（避免聊天打不出数字）。
+# 游戏、桌宠本体、资源管理器等不在名单 → 按小键盘触发语音。
+_TEXT_INPUT_EXE = {
+    "chrome", "msedge", "firefox", "qq", "wechat", "weixin", "dingtalk", "feishu",
+    "notepad", "notepad++", "code", "cursor", "idea64", "pycharm64", "explorer",
+    "winword", "excel", "powerpnt", "wps", "obsidian", "typora",
+    "windowsTerminal", "cmd", "powershell", "mintty", "alacritty",
+    "telegram", "discord", "slack", "tim", "wxwork",
+    "outlook", "foxmail", "thunderbird",
+}
+
+
+def foreground_is_input():
+    """检测前台窗口当前是否处于"文本输入"状态（应放行小键盘数字）。
+    判据（任一命中即放行）：
+    ① 前台线程有 caret（光标在输入框内，最精确）
+    ② 前台窗口类名是已知输入控件
+    ③ 前台进程名是常见"可输入应用"（浏览器/聊天/编辑器等，聚焦多半在输入）
+    失败时保守返回 True（放行输入，避免误吞打字）"""
+    try:
+        fg = _user32.GetForegroundWindow()
+        if not fg:
+            return True
+        pid = wintypes.DWORD()
+        tid = _user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+        if not tid:
+            return True
+        # ① caret 检测
+        gti = GUITHREADINFO()
+        gti.cbSize = ctypes.sizeof(GUITHREADINFO)
+        if _user32.GetGUIThreadInfo(tid, ctypes.byref(gti)) and gti.hwndCaret:
+            return True  # 有闪烁光标 → 正在输入
+        # ② 窗口类名
+        cls = ctypes.create_unicode_buffer(256)
+        _user32.GetClassNameW(fg, cls, 256)
+        cn = cls.value.lower()
+        for pat in _TEXT_INPUT_CN:
+            if pat in cn:
+                return True
+        # ③ 进程名白名单
+        if pid.value:
+            pname = ''
+            try:
+                # PROCESS_QUERY_LIMITED_INFORMATION(0x1000) + QueryFullProcessImageNameW 即可
+                # （无需管理员，比 OpenProcess+GetModuleBaseNameW 更可靠）
+                hProc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+                if hProc:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    sz = wintypes.DWORD(len(buf))
+                    ctypes.windll.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+                    ctypes.windll.kernel32.QueryFullProcessImageNameW.argtypes = [
+                        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                        ctypes.POINTER(wintypes.DWORD)]
+                    if ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                            hProc, 0, buf, ctypes.byref(sz)):
+                        pname = os.path.basename(buf.value).lower()
+                    ctypes.windll.kernel32.CloseHandle(hProc)
+            except Exception:
+                pname = ''
+            for exe in _TEXT_INPUT_EXE:
+                if pname and exe in pname:
+                    return True
+        return False
+    except Exception:
+        return True  # 出错保守放行
+
+
+class NumpadPlayHook:
+    """常驻低层键盘钩子：智能拦截小键盘 1-9。
+    前台为输入态 → 放行；否则 → 吞掉按键 + 主线程回调播放。
+    与 KeyCapture 一样：独立线程 GetMessage 循环，_poll 轮询，GUI 安全回调"""
+
+    def __init__(self, on_play):
+        self._on_play = on_play        # 回调 func(num) 播放音频
+        self._hook = None
+        self._thread = None
+        self._running = False
+        self._num_pressed = None       # 线程安全槽：最近按下的数字
+        self._lock = threading.Lock()
+        self._poll_timer = None
+        self._last = None               # 防重复回调
+        self._down_keys = set()         # 当前按住的数字（keyup 时清）
+
+    def _proc(self, nCode, wParam, lParam):
+        if nCode >= 0:
+            kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk = int(kbd.vkCode)
+            flags = int(kbd.flags)
+            # 程序注入的键（auto_ptt 等）：放行
+            if flags & LLKHF_INJECTED:
+                return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                              ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+            is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if vk in NUMPAD_VK.values():
+                num = next(n for n, v in NUMPAD_VK.items() if v == vk)
+                if is_down:
+                    if not foreground_is_input():
+                        # 非输入态：吞掉按键
+                        with self._lock:
+                            self._num_pressed = num
+                        return 1  # 吞掉
+                    else:
+                        return _user32.CallNextHookEx(  # 输入态放行
+                            self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+                else:
+                    # keyup 放行（若 down 被吞则 keyup 也吞保持配对，但这里简单放行）
+                    return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                                  ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+        return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                      ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+
+    def _message_loop(self):
+        try:
+            self._proc_ref = _LLKBD_ProcType(self._proc)
+            self._hook = _user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL, self._proc_ref, None, 0)
+        except Exception as e:
+            print('numpad hook install fail:', e)
+            return
+        if not self._hook:
+            print('numpad hook install failed (hook=0)')
+            return
+        msg = wintypes.MSG()
+        while self._running:
+            r = _user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
+            if r == 0 or r == -1:
+                break
+            _user32.TranslateMessage(ctypes.byref(msg))
+            _user32.DispatchMessageW(ctypes.byref(msg))
+        if self._hook:
+            _user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._message_loop, daemon=True)
+        self._thread.start()
+        self._poll_timer = QTimer()
+        self._poll_timer.setInterval(50)
+        self._poll_timer.timeout.connect(self._poll)
+        self._poll_timer.start()
+
+    def _poll(self):
+        if not self._running:
+            return
+        with self._lock:
+            n = self._num_pressed
+            self._num_pressed = None
+        if n is not None and n != self._last:
+            self._last = n
+            try:
+                self._on_play(n)
+            except Exception as e:
+                print('numpad play cb err:', e)
+
+    def stop(self):
+        self._running = False
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        if self._hook:
+            try:
+                _user32.UnhookWindowsHookEx(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+
+
 # ------- 自动按住开麦键（Auto PTT）-------
 # 游戏多为"按住 V 说话"：播放音频时自动按住 V，音频播完再延后 0.5s 松开 → 队友完整听到
 VK_V = 0x56  # V 键虚拟码
@@ -742,6 +951,8 @@ class PetWindow(QWidget):
         self._hotkeys_enabled = bool(_cfg.get('hotkeys_enabled', True))
         # 小键盘 1-9 快捷播放开关（默认关！全局抢键会占用打字的小键盘数字输入）
         self._numpad_enabled = bool(_cfg.get('numpad_hotkeys', False))
+        # 智能小键盘钩子（开时用低层钩子拦截 1-9，聚焦输入框自动放行）
+        self._numpad_hook = None
         # 语音自定义快捷键: { 音频key(角色/文件名): 键名 }
         self._audio_hotkeys = dict(_cfg.get('audio_hotkeys', {}))
         # 语音来源：'role'=角色专属语音（默认）/ 'common'=通用语音（任何角色共用一套）
@@ -814,6 +1025,9 @@ class PetWindow(QWidget):
         self._toast_until = 0.0
         # 窗口显示后自动注册（show 的时机由 main() 控制，这里延后到事件循环就绪）
         QTimer.singleShot(300, self._register_hotkeys_now)
+        # 若配置开启小键盘智能播放 → 启动钩子
+        if self._numpad_enabled:
+            QTimer.singleShot(350, self._numpad_hook_start)
 
     def _register_hotkeys_now(self):
         """窗口已显示后调用：注册所有热键（小键盘1-9默认 + 自定义键）；可重试直到成功。
@@ -842,17 +1056,16 @@ class PetWindow(QWidget):
                     _dbg('hk: winId 0, use queue (%d)' % self._hk_tries)
         except Exception as e:
             _dbg('hotkey winId fail (%d): %r' % (self._hk_tries, e))
-        # 先注销旧的，再全新注册（防残留/重复：numpad + custom 都需先注销，
+        # 先注销旧的，再全新注册（防残留/重复：custom 需先注销，
         # 否则绑定删除/更换后旧 custom 热键仍占用系统）
         try:
-            unregister_numpad_hotkeys(hwnd, getattr(self, '_hotkey_ids', {}))
             for hid in list(getattr(self, '_custom_hk_map', {}).keys()):
                 unregister_hotkey(hwnd, hid)
         except Exception:
             pass
-        # 注册小键盘 1-9 默认映射（仅当用户显式开启 numpad 快捷播放；
-        # 否则不抢系统小键盘数字键，避免打字/输入时按小键盘数字被截获）
-        self._hotkey_ids = register_numpad_hotkeys(hwnd) if self._numpad_enabled else {}
+        # 小键盘 1-9：不再用 RegisterHotKey（避免全局抢键），改由 NumpadPlayHook
+        # 低层钩子智能拦截（聚焦输入框自动放行）。注册只负责自定义键。
+        self._hotkey_ids = {}
         # 注册自定义键（音频快捷键）
         # 自定义键: hid → audio_key；跳过与默认小键盘1-9重复的键名（Num1~Num9）
         default_numpad_names = {'Num%d' % i for i in range(1, 10)}
@@ -860,21 +1073,21 @@ class PetWindow(QWidget):
         hid_base = CUSTOM_HK_BASE
         for audio_key, key_name in self._audio_hotkeys.items():
             if key_name in default_numpad_names:
-                continue  # 由默认数字映射处理
+                continue  # 由小键盘钩子处理
             vk = self._resolve_vk(key_name)
             if vk is None:
                 continue
             hid = hid_base + len(self._custom_hk_map)
             if register_single_hotkey(hwnd, hid, vk):
                 self._custom_hk_map[hid] = audio_key
-        if self._hotkey_ids or self._custom_hk_map:
+        if self._custom_hk_map:
             self._hotkey_pending = False
-            _dbg('hotkeys registered: num=%s custom=%s hwnd=%s' % (
-                sorted(self._hotkey_ids), sorted(self._custom_hk_map), hwnd))
+            _dbg('hotkeys registered: numpad(hook)=%s custom=%s hwnd=%s' % (
+                self._numpad_enabled, sorted(self._custom_hk_map), hwnd))
         else:
-            # 只有 numpad 关着且没自定义键 → 也算"注册完成"（无热键是正常态）
+            # 无自定义键（numpad 走钩子）→ 也算注册完成
             self._hotkey_pending = False
-            _dbg('hotkeys: no numpad (off) + no custom, idle')
+            _dbg('hotkeys: numpad(hook)=%s + no custom, idle' % self._numpad_enabled)
 
     def _resolve_vk(self, key_name):
         """键名/原始VK → 虚拟码。兼容 'VK<数字>' 格式（捕获未知名键时存储）"""
@@ -948,14 +1161,17 @@ class PetWindow(QWidget):
             QTimer.singleShot(200, self._register_hotkeys_now)
 
     def closeEvent(self, e):
-        """退出前注销热键、停止动图"""
+        """退出前注销热键、停止动图与钩子"""
         try:
             self._stop_movie()
         except Exception:
             pass
         try:
+            self._numpad_hook_stop()
+        except Exception:
+            pass
+        try:
             hwnd = int(self.winId())
-            unregister_numpad_hotkeys(hwnd, self._hotkey_ids)
             for hid in list(getattr(self, '_custom_hk_map', {}).keys()):
                 unregister_hotkey(hwnd, hid)
         except Exception:
@@ -1364,11 +1580,11 @@ class PetWindow(QWidget):
         act_hken.triggered.connect(lambda checked: self.set_hotkeys_enabled(checked))
         menu.addAction(act_hken)
 
-        # ⑦ 小键盘 1-9 快捷播放（默认关：全局抢键会占用打字时的小键盘数字输入）
+        # ⑦ 小键盘 1-9 快捷播放（智能：聚焦输入框自动放行，正常打字不打扰）
         act_numpad = QAction("小键盘1-9快捷播放", menu)
         act_numpad.setCheckable(True)
         act_numpad.setChecked(self._numpad_enabled)
-        act_numpad.setToolTip("开启会全局占用小键盘数字键（打字时按小键盘1-9不再输入数字），适合游戏内使用")
+        act_numpad.setToolTip("智能模式：在游戏/桌面按小键盘1-9播放语音；聚焦输入框打字时自动放行数字输入")
         act_numpad.triggered.connect(lambda checked: self.set_numpad_enabled(checked))
         menu.addAction(act_numpad)
 
@@ -1732,7 +1948,7 @@ class PetWindow(QWidget):
 
     # ------------- 快捷键设置 -------------
     def set_hotkeys_enabled(self, enabled):
-        """「启用快捷键发话」总开关：关闭时注销全部热键并禁用录制。
+        """「启用快捷键发话」总开关：关闭时注销全部热键（含小键盘钩子）并禁用录制。
         触发菜单自动重开，保证勾选后可连续点其它选项"""
         self._hotkeys_enabled = bool(enabled)
         cfg = load_config()
@@ -1740,47 +1956,62 @@ class PetWindow(QWidget):
         save_config(cfg)
         self.refresh_tray_menu()
         self._schedule_menu_refresh()
-        # 重注册（开=注册，关=注销）
-        self._hotkey_pending = True
-        if self._hotkeys_enabled:
-            self._register_hotkeys_now()
-        else:
-            # 全部注销
+        if not self._hotkeys_enabled:
+            # 总开关关：注销全部（custom 热键 + 小键盘钩子）
+            self._numpad_hook_stop()
             try:
                 hwnd = int(self.winId())
-                unregister_numpad_hotkeys(hwnd, self._hotkey_ids)
                 for hid in list(self._custom_hk_map.keys()):
                     unregister_hotkey(hwnd, hid)
             except Exception:
                 pass
-            self._hotkey_ids = {}
             self._custom_hk_map = {}
             self._hotkey_pending = False
             _dbg('hotkeys disabled')
+        else:
+            # 重注册自定义键 + 按需恢复小键盘钩子
+            self._hotkey_pending = True
+            self._register_hotkeys_now()
+            if self._numpad_enabled:
+                self._numpad_hook_start()
         print('hotkeys_enabled ->', self._hotkeys_enabled)
+
+    def _numpad_hook_start(self):
+        """启动智能小键盘钩子（前台非输入态才吞键触发语音）"""
+        if self._numpad_hook is not None:
+            return
+        try:
+            self._numpad_hook = NumpadPlayHook(self._hotkey_slot_audio)
+            self._numpad_hook.start()
+            _dbg('numpad smart hook started')
+        except Exception as e:
+            print('numpad hook start fail:', e)
+            self._numpad_hook = None
+
+    def _numpad_hook_stop(self):
+        """停止智能小键盘钩子"""
+        if self._numpad_hook is not None:
+            try:
+                self._numpad_hook.stop()
+            except Exception:
+                pass
+            self._numpad_hook = None
+            _dbg('numpad smart hook stopped')
 
     def set_numpad_enabled(self, enabled):
         """小键盘 1-9 快捷播放开关（默认关）。
-        开=注册全局裸数字键（会占用打字时的小键盘数字输入，适合游戏内用）；
-        关=注销，小键盘数字恢复正常输入"""
+        开=启动智能钩子：非输入场景（游戏/桌面）小键盘1-9播放语音，聚焦输入框时自动放行正常打字；
+        关=停钩子，小键盘完全恢复原样"""
         self._numpad_enabled = bool(enabled)
         cfg = load_config()
         cfg['numpad_hotkeys'] = self._numpad_enabled
         save_config(cfg)
-        self._hotkey_pending = True
         if self._numpad_enabled:
-            self._register_hotkeys_now()
+            self._numpad_hook_start()
         else:
-            try:
-                hwnd = int(self.winId())
-                unregister_numpad_hotkeys(hwnd, self._hotkey_ids)
-            except Exception:
-                pass
-            self._hotkey_ids = {}
-            self._hotkey_pending = False
-            _dbg('numpad hotkeys off')
+            self._numpad_hook_stop()
         self.refresh_tray_menu()
-        print('numpad_hotkeys ->', self._numpad_enabled)
+        print('numpad_hotkeys(smart) ->', self._numpad_enabled)
 
     def set_ptt_key(self, key_name):
         """设置开麦键（键名）。持久化并更新 ptt_vk"""

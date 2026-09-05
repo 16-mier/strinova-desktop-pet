@@ -301,8 +301,8 @@ class SettingsPanel(QWidget):
         self.chk_hotkeys = QCheckBox("启用自定义语音快捷键（F1 等绑定键）")
         self.chk_hotkeys.toggled.connect(self._on_hotkeys_toggled)
         hl.addWidget(self.chk_hotkeys)
-        # 小键盘 1-9 快捷播放（默认关：全局抢键会占用打字时小键盘数字）
-        self.chk_numpad = QCheckBox("小键盘1-9快捷播放（占用小键盘数字输入，游戏内用）")
+        # 小键盘 1-9 快捷播放（智能：聚焦输入框/打字时自动放行，不打扰输入）
+        self.chk_numpad = QCheckBox("小键盘1-9快捷播放（智能：打字/输入框时自动放行）")
         self.chk_numpad.toggled.connect(self._on_numpad_toggled)
         hl.addWidget(self.chk_numpad)
         self.chk_ptt = QCheckBox("自动按住开麦键（播语音时队友才听得到）")

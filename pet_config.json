@@ -10,5 +10,5 @@
     "星绘/morning.mp3": "Num2"
   },
   "voice_source": "role",
-  "numpad_hotkeys": false
+  "numpad_hotkeys": true
 }
