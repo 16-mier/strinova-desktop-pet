@@ -78,6 +78,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（修复打包后资源目录只读：base_dir 改为 exe 同目录 + 首次运行 seed 默认资源；重新打包 exe）
+- **问题**：`base_dir()` 打包后返回 `sys._MEIPASS`（PyInstaller 临时解压目录，**只读、每次启动重建**）；而新版设置面板的导入角色、拖放导入、通用语音、删除操作全部基于 `base_dir()` 写 assets → 打包成 exe 后这些功能会写入临时目录、**退出即丢甚至写失败**。v1.4.0 时代只有内置只读角色（读 _MEIPASS 没问题），加了用户导入功能后必须区分「内置资源（只读）」与「用户数据（可写持久）」
+- **修复**（`pet.py`）：
+  1. `bundle_dir()`：内置资源目录，打包后 = `_MEIPASS`（只读）；未打包 = 脚本目录
+  2. `base_dir()`：**用户数据目录**，打包后 = exe 同目录（与 pet_config.json 一致），未打包 = 脚本目录；带写入测试（失败回落 home）
+  3. `_seed_default_assets()`：打包首次运行把默认角色（星绘/白墨/艾卡）与 common_voice 复制到 exe 旁 assets（已有则不覆盖，只补缺失角色）；模块级 `_seeded` 标志保证只播一次
+  4. `assets_dir()` 现在指向 base_dir()（可写持久）；`_dbg` 日志也写到 base_dir()
+  5. `_relaunch_as_admin()`：打包态直接提权 exe 自己（不再提权 python 脚本）
+- **打包**：`pyinstaller --onefile --windowed --name "卡丘简易桌宠" --icon assets/app.ico --add-data "assets;assets" --collect-submodules sounddevice/soundfile/numpy --hidden-import ... --exclude-module PyQt6.QtQml/WebEngine/Quick/QmlModels pet.py` → `dist\卡丘简易桌宠.exe`（66MB）
+- **验证**：打包路径测试（模拟 _MEIPASS：bundle_dir/base_dir/seed 复制默认角色到 exe 旁）✅；隔离目录实测 exe 首次运行自动 seed 星绘/白墨/艾卡 + 2 条通用语音 + pet_debug.log ✅；桌面 exe 提权启动、`numpad smart hook started` 智能钩子运行 ✅；进程结构单实例（bootloader 12476 无窗口 + 桌宠 44392 有窗口）✅
+- 注意：exe 首次运行会在**exe 所在目录**生成 assets/ 与 pet_config.json（用户数据持久化于此）
+- 涉及：`pet.py`（bundle_dir/base_dir/_seed_default_assets/_seeded/assets_dir/_dbg/_relaunch_as_admin）
+
 ### 2026-09-05（小键盘快捷播放升级为"智能模式"：聚焦输入框自动放行，不打扰打字）
 - **需求**：开启小键盘 1-9 快捷播放时，聚焦输入框/打字场景应自动不占用（放行数字输入），只有游戏/桌面等非输入场景才触发语音
 - **方案**：废弃 `RegisterHotKey` 全局裸数字键（无条件抢键），改用 **WH_KEYBOARD_LL 常驻低级钩子 + 前台焦点智能判定**

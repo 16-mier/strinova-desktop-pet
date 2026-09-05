@@ -131,23 +131,80 @@ def _log(*args):
 def _dbg(msg):
     """调试日志：写 pet_debug.log（GUI 无控制台，print 不可见）"""
     try:
-        logpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pet_debug.log')
+        logpath = os.path.join(base_dir(), 'pet_debug.log')
         with open(logpath, 'a', encoding='utf-8') as f:
             f.write(str(msg) + '\n')
     except Exception:
         pass
 
 
-def base_dir():
-    """exe 所在目录（打包后为 _MEIPASS，未打包为脚本目录）"""
+def bundle_dir():
+    """内置资源目录（只读，打包后=_MEIPASS 临时解压；未打包=脚本目录）"""
     if hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def base_dir():
+    """用户数据目录（可写持久）：打包后=exe 同目录（与 pet_config.json 一致），
+    未打包=脚本目录。用户导入的角色/音频/通用语音都在此，重启不丢"""
+    if hasattr(sys, "_MEIPASS"):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    try:
+        os.makedirs(base, exist_ok=True)
+        test = os.path.join(base, '.pet_write_test')
+        with open(test, 'w') as f:
+            f.write('1')
+        os.remove(test)
+        return base
+    except Exception:
+        return os.path.expanduser('~')
+
+
+_seeded = False
+
+
+def _seed_default_assets():
+    """打包运行首次启动：把内置默认资源（characters/common_voice）复制到
+    用户数据目录 assets（若还没有），保证开箱即有默认角色/通用语音，且之后可写"""
+    global _seeded
+    if _seeded:
+        return
+    _seeded = True
+    if not hasattr(sys, "_MEIPASS"):
+        return  # 未打包：数据目录就是脚本目录，资源本来就在
+    try:
+        src_a = os.path.join(bundle_dir(), 'assets')
+        dst_a = os.path.join(base_dir(), 'assets')
+        os.makedirs(dst_a, exist_ok=True)
+        # characters
+        src_c = os.path.join(src_a, 'characters')
+        dst_c = os.path.join(dst_a, 'characters')
+        if os.path.isdir(src_c) and not os.path.isdir(dst_c):
+            shutil.copytree(src_c, dst_c)
+        # common_voice
+        src_v = os.path.join(src_a, 'common_voice')
+        dst_v = os.path.join(dst_a, 'common_voice')
+        if os.path.isdir(src_v) and not os.path.isdir(dst_v):
+            shutil.copytree(src_v, dst_v)
+        # 旧版本可能拷过角色 → 补充缺失的默认角色
+        if os.path.isdir(src_c) and os.path.isdir(dst_c):
+            for name in os.listdir(src_c):
+                if not os.path.exists(os.path.join(dst_c, name)):
+                    try:
+                        shutil.copytree(os.path.join(src_c, name), os.path.join(dst_c, name))
+                    except Exception:
+                        pass
+    except Exception as e:
+        print('seed default assets fail:', e)
+
+
 def assets_dir():
     d = os.path.join(base_dir(), "assets")
     os.makedirs(d, exist_ok=True)
+    _seed_default_assets()
     return d
 
 
@@ -2220,6 +2277,13 @@ def _relaunch_as_admin():
     """以管理员权限重新启动自己（UAC 弹窗）；带 --elevated 防二次提权。
     ShellExecuteW 返回值 >32 表示成功启动；否则（用户取消/失败）返回 False"""
     try:
+        if hasattr(sys, "_MEIPASS"):
+            # 打包态：直接提权 exe 自己
+            exe = sys.executable
+            params = '--elevated'
+            r = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+            return r > 32
+        # 未打包：提权 python 解释器 + 脚本
         exe = sys.executable
         script = os.path.abspath(__file__)
         params = '"%s" --elevated' % script
