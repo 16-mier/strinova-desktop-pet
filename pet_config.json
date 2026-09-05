@@ -3,5 +3,9 @@
   "auto_ptt": true,
   "self_device": "扬声器 (USB Audio and HID)",
   "ptt_key": "V",
-  "hotkeys_enabled": true
+  "hotkeys_enabled": true,
+  "audio_hotkeys": {
+    "星绘/noon.mp3": "Num3",
+    "白墨/sprint.mp3": "Num1"
+  }
 }

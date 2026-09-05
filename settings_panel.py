@@ -6,7 +6,7 @@ import os
 import sys
 import shutil
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QFileSystemWatcher
 from PyQt6.QtGui import QFont, QPixmap, QIcon, QColor, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -61,6 +61,14 @@ QScrollBar::handle:vertical { background: #3a4057; border-radius: 4px; min-heigh
 """
 
 
+class NoWheelComboBox(QComboBox):
+    """禁用滚轮切换的下拉框（鼠标悬停滚动滚轮不改变选中项，防误触）"""
+
+    def wheelEvent(self, event):
+        # 忽略滚轮事件：悬停滚动不切换选项
+        event.ignore()
+
+
 class SettingsPanel(QWidget):
     """桌宠设置面板窗口（置顶、可拖动标题栏关闭）"""
 
@@ -81,12 +89,25 @@ class SettingsPanel(QWidget):
     def __init__(self, pet_window=None):
         super().__init__()
         self._pet = pet_window  # 弱引用持有 pet 实例（读当前状态用）
+        # 无边框窗口：去掉系统标题栏（避免出现多余的 系统 最小化/关闭 按钮与自定义 ✕ 混叠）
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.FramelessWindowHint
+        )
         self.setWindowTitle("卡丘简易桌宠 · 设置")
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.resize(560, 640)
         self.setStyleSheet(PANEL_QSS)
+        self._drag_offset = None  # 拖动标题栏移动窗口
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_dir_changed)
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setSingleShot(True)
+        self._auto_refresh_timer.setInterval(250)
+        self._auto_refresh_timer.timeout.connect(self._delayed_refresh)
         self._build_ui()
         self.refresh_all()
+        self._watch_current_dir()
 
     # ---------------- UI 构建 ----------------
     def _build_ui(self):
@@ -158,6 +179,7 @@ class SettingsPanel(QWidget):
         self.audio_list = QListWidget()
         self.audio_list.setMinimumHeight(110)
         self.audio_list.itemClicked.connect(self._on_audio_clicked)
+        self.audio_list.itemDoubleClicked.connect(self._preview_selected_audio)
         al.addWidget(self.audio_list)
         arow = QHBoxLayout()
         btn_import_audio = QPushButton("导入音频…")
@@ -169,11 +191,16 @@ class SettingsPanel(QWidget):
         btn_play = QPushButton("▶ 试听")
         btn_play.clicked.connect(self._preview_selected_audio)
         arow.addWidget(btn_play)
+        # 绑定快捷键模式按钮（点它才进入录制，避免误绑）
+        self.btn_bind = QPushButton("🔑 绑定/修改快捷键")
+        self.btn_bind.setCheckable(True)
+        self.btn_bind.toggled.connect(self._on_bind_mode_toggled)
+        arow.addWidget(self.btn_bind)
         arow.addStretch(1)
         al.addLayout(arow)
-        tip2 = QLabel("点击音频 = 绑定/修改快捷键（按 Esc 取消）。已绑定显示在右侧")
-        tip2.setStyleSheet("color:#7a8099; font-size:11px;")
-        al.addWidget(tip2)
+        self.lbl_bind_tip = QLabel("先选中一条语音，再点「🔑 绑定/修改快捷键」，然后按一个键完成绑定（Esc 取消）")
+        self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
+        al.addWidget(self.lbl_bind_tip)
         bl.addWidget(gb_audio)
 
         # ---- 模块3：播放设备 ----
@@ -182,14 +209,14 @@ class SettingsPanel(QWidget):
         # 绑定麦克风（队友听）
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("绑定麦克风(队友听)："))
-        self.cmb_bind = QComboBox()
+        self.cmb_bind = NoWheelComboBox()
         self.cmb_bind.currentIndexChanged.connect(self._on_bind_changed)
         r1.addWidget(self.cmb_bind, 1)
         dl.addLayout(r1)
         # 自己监听
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("自己监听(耳机)："))
-        self.cmb_self = QComboBox()
+        self.cmb_self = NoWheelComboBox()
         self.cmb_self.currentIndexChanged.connect(self._on_self_changed)
         r2.addWidget(self.cmb_self, 1)
         dl.addLayout(r2)
@@ -206,7 +233,7 @@ class SettingsPanel(QWidget):
         hl.addWidget(self.chk_ptt)
         r3 = QHBoxLayout()
         r3.addWidget(QLabel("开麦键："))
-        self.cmb_pttkey = QComboBox()
+        self.cmb_pttkey = NoWheelComboBox()
         for k in ['V', 'B', 'C', 'X', 'Z', 'F1', 'F2', 'F3', 'F4', 'F5', '自定义…']:
             self.cmb_pttkey.addItem(k)
         self.cmb_pttkey.currentIndexChanged.connect(self._on_pttkey_changed)
@@ -228,6 +255,21 @@ class SettingsPanel(QWidget):
         bottom.addStretch(1)
         root.addLayout(bottom)
 
+    # ---------------- 无边框窗口拖动（按住标题行拖）----------------
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() < 40:
+            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_offset is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_offset = None
+        super().mouseReleaseEvent(e)
+
     # ---------------- 数据填充 ----------------
     def _current_pet(self):
         return self._pet
@@ -244,16 +286,7 @@ class SettingsPanel(QWidget):
         if pet is None:
             return
         # 角色
-        self.role_list.blockSignals(True)
-        self.role_list.clear()
-        for r in getattr(pet, 'roles', []) or []:
-            item = QListWidgetItem(r)
-            if r == getattr(pet, 'role', None):
-                item.setText(r + "  ←当前")
-                item.setForeground(QColor('#ffd76e'))
-            self.role_list.addItem(item)
-        self.role_list.blockSignals(False)
-        self.lbl_cur_role.setText(getattr(pet, 'role', '-') or '-')
+        self._refresh_role_list()
         # 音频
         self._refresh_audio_list()
         # 设备
@@ -286,8 +319,13 @@ class SettingsPanel(QWidget):
         for label, path in audios:
             akey = pet._audio_key(pet.role, path)
             bound = hotkeys.get(akey, '')
-            txt = label + (("   [%s]" % bound) if bound else "")
-            item = QListWidgetItem(txt)
+            # 键位显示在左边且金色高亮：[F1] 早上好
+            if bound:
+                txt = '<span style="color:#ffd76e;font-weight:bold;">[%s]</span> %s' % (bound, label)
+            else:
+                txt = label
+            item = QListWidgetItem()
+            item.setText(txt)
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setData(Qt.ItemDataRole.UserRole + 1, akey)
             self.audio_list.addItem(item)
@@ -337,6 +375,7 @@ class SettingsPanel(QWidget):
         if hasattr(pet, 'switch_role'):
             pet.switch_role(role)
         self.refresh_all()
+        self._watch_current_dir()  # 切换后重设监视目录（新角色的音频文件夹）
 
     def _import_character(self):
         """导入新形象：选文件夹（含 image.png），复制到 assets/characters/"""
@@ -389,15 +428,43 @@ class SettingsPanel(QWidget):
 
     # ---------------- 音频操作 ----------------
     def _on_audio_clicked(self, item):
-        """点击音频 = 绑定/修改快捷键（与 pet 的录制流程联动）"""
+        """单击音频 = 仅选中（不做任何修改），提示可绑定"""
+        # 选中当前项，更新提示
+        self.lbl_bind_tip.setText(
+            "已选中「%s」：可点「▶ 试听」或「🔑 绑定/修改快捷键」" % item.text().replace('<span', '').replace('</span>', ''))
+        self.lbl_bind_tip.setStyleSheet("color:#8fa3c8; font-size:11px;")
+
+    def _on_bind_mode_toggled(self, on):
+        """点「🔑 绑定/修改快捷键」进入录制模式"""
         pet = self._current_pet()
-        if pet is None:
+        if not on:
+            return
+        item = self.audio_list.currentItem()
+        if item is None:
+            QMessageBox.information(self, "提示", "请先在列表中选中一条语音，再点绑定快捷键。")
+            self.btn_bind.setChecked(False)
             return
         akey = item.data(Qt.ItemDataRole.UserRole + 1)
         if not akey:
+            self.btn_bind.setChecked(False)
             return
+        self.btn_bind.setText("按一个键绑定…（Esc 取消）")
+        self.lbl_bind_tip.setText("请按一个键绑定到「%s」，按 Esc 取消" % item.text())
         if hasattr(pet, '_begin_capture_hotkey'):
             pet._begin_capture_hotkey(akey)
+            # 录制完成/取消后由 pet 回调 _on_capture_done 恢复按钮
+        else:
+            self.btn_bind.setChecked(False)
+            self.btn_bind.setText("🔑 绑定/修改快捷键")
+
+    def on_capture_finished(self):
+        """pet 录制结束（成功或取消）后调用：恢复按钮状态并刷新列表"""
+        self.btn_bind.setChecked(False)
+        self.btn_bind.setText("🔑 绑定/修改快捷键")
+        self.lbl_bind_tip.setText(
+            "先选中一条语音，再点「🔑 绑定/修改快捷键」，然后按一个键完成绑定（Esc 取消）")
+        self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
+        self._refresh_audio_list()  # 立即刷新显示绑定的快捷键
 
     def _import_audio(self):
         pet = self._current_pet()
@@ -498,6 +565,52 @@ class SettingsPanel(QWidget):
             self.sig_ptt_key.emit(txt)
 
     # ---------------- 工具 ----------------
+    # ---------------- 自动刷新（目录监视）----------------
+    def _watch_current_dir(self):
+        """监听当前角色目录，文件变化自动刷新音频列表"""
+        pet = self._current_pet()
+        if pet is None:
+            return
+        try:
+            d = os.path.join(pet.base_dir(), 'assets', 'characters', pet.role)
+            if os.path.isdir(d):
+                watched = self._fs_watcher.directories()
+                if d not in watched:
+                    self._fs_watcher.removePaths(watched)  # 只监听当前角色
+                    self._fs_watcher.addPath(d)
+        except Exception:
+            pass
+
+    def _on_dir_changed(self, path):
+        """目录变化（导入/删除音频等）→ 防抖后自动刷新"""
+        self._auto_refresh_timer.start()
+
+    def _delayed_refresh(self):
+        self._refresh_audio_list()
+        # 若角色目录集变化（新增角色文件夹）→ 也刷角色
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'rescan_roles'):
+            old = list(getattr(pet, 'roles', []))
+            pet.rescan_roles()
+            if list(getattr(pet, 'roles', [])) != old:
+                self._refresh_role_list()
+        self._watch_current_dir()
+
+    def _refresh_role_list(self):
+        pet = self._current_pet()
+        if pet is None:
+            return
+        self.role_list.blockSignals(True)
+        self.role_list.clear()
+        for r in getattr(pet, 'roles', []) or []:
+            item = QListWidgetItem(r)
+            if r == getattr(pet, 'role', None):
+                item.setText(r + "  ←当前")
+                item.setForeground(QColor('#ffd76e'))
+            self.role_list.addItem(item)
+        self.role_list.blockSignals(False)
+        self.lbl_cur_role.setText(getattr(pet, 'role', '-') or '-')
+
     def _open_characters_folder(self):
         pet = self._current_pet()
         if pet is None:

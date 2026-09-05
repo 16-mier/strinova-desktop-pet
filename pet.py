@@ -476,11 +476,16 @@ _LLKBD_ProcType = ctypes.WINFUNCTYPE(
 )
 
 
+LLKHF_INJECTED = 0x10  # KBDLLHOOKSTRUCT.flags 位4：程序注入的按键
+
+
 class KeyCapture:
     """一次性键盘钩子：捕获用户按下的下一个键。
     低级钩子(WH_KEYBOARD_LL)的回调必须在【有消息循环的线程】中才会被派发，
     故用独立线程 + GetMessage 循环；回调只做最小记录（线程安全），
-    主线程通过 _poll() 轮询结果。Esc→None；修饰键忽略并吞掉。"""
+    主线程通过 _poll() 轮询结果。Esc→None；修饰键忽略并吞掉。
+    程序注入的键（LLKHF_INJECTED，如 auto_ptt 模拟的开麦键）会被忽略——防止
+    录音时把"语音试听触发的自动按V"误当成用户绑定键。"""
 
     def __init__(self, on_done):
         self._on_done = on_done
@@ -495,6 +500,11 @@ class KeyCapture:
         if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
             kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             vk = int(kbd.vkCode)
+            flags = int(kbd.flags)
+            if flags & LLKHF_INJECTED:
+                # 程序注入的键（auto_ptt 等模拟按键）：不录制，且放行给系统
+                return ctypes.windll.user32.CallNextHookEx(
+                    self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
             with self._result_lock:
                 if vk == VK_ESCAPE:
                     self._result = 'esc'
@@ -588,6 +598,77 @@ VK_V = 0x56  # V 键虚拟码
 KEYEVENTF_KEYUP = 0x0002
 PTT_HOLD_EXTRA_S = 0.5  # 音频结束后 V 额外按住的秒数
 
+# SendInput 需要的结构（keybd_event 旧 API 部分游戏不认，SendInput 更可靠）
+INPUT_KEYBOARD = 1
+KEYEVENTF_SCANCODE = 0x0008
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ('wVk', wintypes.WORD),
+        ('wScan', wintypes.WORD),
+        ('dwFlags', wintypes.DWORD),
+        ('time', wintypes.DWORD),
+        ('dwExtraInfo', ctypes.POINTER(wintypes.ULONG)),
+    ]
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ('dx', wintypes.LONG), ('dy', wintypes.LONG),
+        ('mouseData', wintypes.DWORD), ('dwFlags', wintypes.DWORD),
+        ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.POINTER(wintypes.ULONG)),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ('uMsg', wintypes.DWORD), ('wParamL', wintypes.WORD),
+        ('wParamH', wintypes.WORD),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [('ki', KEYBDINPUT), ('mi', MOUSEINPUT), ('hi', HARDWAREINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [('type', wintypes.DWORD), ('u', _INPUTUNION)]
+
+
+def _send_key(vk, keyup=False):
+    """用 SendInput 发送按键事件（比 keybd_event 兼容性好）"""
+    try:
+        # 显式声明原型避免 64 位指针截断
+        if not hasattr(_send_key, '_ready'):
+            _user32.SendInput.argtypes = [
+                wintypes.UINT,
+                ctypes.POINTER(INPUT),
+                ctypes.c_int,
+            ]
+            _user32.SendInput.restype = wintypes.UINT
+            _send_key._ready = True
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp.u.ki.wVk = vk & 0xFFFF
+        inp.u.ki.wScan = 0
+        inp.u.ki.dwFlags = KEYEVENTF_KEYUP if keyup else 0
+        inp.u.ki.time = 0
+        inp.u.ki.dwExtraInfo = ctypes.POINTER(wintypes.ULONG)()  # NULL
+        _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    except Exception as e:
+        print('send_key fail:', e)
+
+
+def ptt_key_down(vk=VK_V):
+    """模拟按下开麦键（SendInput）"""
+    _send_key(vk, keyup=False)
+
+
+def ptt_key_up(vk=VK_V):
+    """模拟松开开麦键（SendInput）"""
+    _send_key(vk, keyup=True)
+
 
 def audio_duration_seconds(path):
     """获取音频时长（秒）"""
@@ -597,22 +678,6 @@ def audio_duration_seconds(path):
         return info.duration
     except Exception:
         return 0.0
-
-
-def ptt_key_down(vk=VK_V):
-    """模拟按下开麦键"""
-    try:
-        _user32.keybd_event(vk, 0, 0, 0)
-    except Exception as e:
-        print('ptt down fail:', e)
-
-
-def ptt_key_up(vk=VK_V):
-    """模拟松开开麦键"""
-    try:
-        _user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-    except Exception as e:
-        print('ptt up fail:', e)
 
 
 class PetWindow(QWidget):
@@ -873,8 +938,8 @@ class PetWindow(QWidget):
     def play_audio(self, path):
         """播放指定音频文件：
         - 有绑定/监听设备 → sounddevice 并行直出到这些设备
-          （绑定麦给队友 + 自己耳机自己听）
-        - 都没有 → QMediaPlayer 走系统默认输出
+          （绑定麦给队友 + 自己耳机自己听），期间按需触发 auto_ptt
+        - 都没有 → QMediaPlayer 走系统默认输出，期间同样按需触发 auto_ptt
         """
         if not os.path.exists(path):
             return
@@ -883,16 +948,26 @@ class PetWindow(QWidget):
             threading.Thread(target=self._play_direct_worker,
                              args=(path, targets), daemon=True).start()
             return
-        # 默认模式：QMediaPlayer
+        # 默认模式：QMediaPlayer（auto_ptt 也要生效）
         if self.player is None:
             return
         try:
+            if self._auto_ptt:
+                ptt_key_down(self._ptt_vk)
             self.player.stop()
             self.player.setSource(QUrl.fromLocalFile(path))
             self.player.setPosition(0)
             self.player.play()
         except Exception as e:
             print("play error:", e)
+
+        # 音频播完（按时长估算）后松开开麦键
+        if self._auto_ptt:
+            dur = audio_duration_seconds(path)
+            def _release_ptt():
+                time.sleep(dur + PTT_HOLD_EXTRA_S)
+                ptt_key_up(self._ptt_vk)
+            threading.Thread(target=_release_ptt, daemon=True).start()
 
     def _play_direct_worker(self, path, targets):
         """后台线程：向多个设备并行播放；若开启 auto_ptt，播放开始即按住开麦键，
@@ -1457,7 +1532,7 @@ class PetWindow(QWidget):
         self._capture_audio_key = None
         if vk is None:
             # Esc 取消
-            QTimer.singleShot(0, lambda: self._show_capture_msg('已取消', 800))
+            QTimer.singleShot(0, self._cancel_capture_ui)
             return
         key_name = vk_to_key_name(vk)
         # 无法识别的键（无名字）→ 存 VK 数值键名？给通用名
@@ -1468,6 +1543,12 @@ class PetWindow(QWidget):
             key_name = 'VK%d' % vk
         # 在 Qt 主线程执行绑定
         QTimer.singleShot(0, lambda: self._apply_capture(kind, ak, vk, key_name))
+
+    def _cancel_capture_ui(self):
+        """录制被 Esc 取消：恢复面板按钮状态 + 提示"""
+        self._show_capture_msg('已取消', 800)
+        if getattr(self, '_settings_panel', None) is not None:
+            self._settings_panel.on_capture_finished()
 
     def _apply_capture(self, kind, audio_key, vk, key_name):
         """应用捕获结果：更新配置 + 重注册热键 + 菜单刷新提示"""
@@ -1489,6 +1570,9 @@ class PetWindow(QWidget):
             return
         save_config(cfg)
         self.refresh_tray_menu()
+        # 刷新打开的设置面板（音频列表显示新绑定的键 + 恢复按钮状态）
+        if getattr(self, '_settings_panel', None) is not None:
+            self._settings_panel.on_capture_finished()
         # 重注册热键（新键生效）
         self._hotkey_pending = True
         self._register_hotkeys_now()
