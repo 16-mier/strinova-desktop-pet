@@ -3,10 +3,11 @@
 # 菜单：悬停时右上角三横按钮 → 深色圆角菜单（切角色 / 退出）；托盘同款菜单。
 # 技术：PyQt6（python 3.14），per-pixel alpha 透明，打包成单文件 exe。
 #
-# 资源：assets/characters/<角色>/image.png + 语音 mp3。
+# 资源：assets/characters/<角色>/image.png（或 .gif 动图）+ 语音 mp3。
 #   - 星绘:  image.png + morning/noon/evening.mp3（按当前时间选）
 #   - 白墨:  image.png + sprint.mp3
-#   - 其他:  image.png + click.mp3（优先）或 morning.mp3
+#   - 艾卡:  .gif 动图（自动播放，动图角色支持透明）+ 语音
+#   - 其他:  image.png/.gif + click.mp3（优先）或 morning.mp3
 #
 # 交互：左键点按=播音（按下压扁回弹），拖动=移动(贴边)，左键拖动超过阈值不算点击；
 #       鼠标悬停右上角出现 ☰ 按钮 → 点击弹菜单（切换角色 / 退出）。
@@ -21,7 +22,7 @@ from datetime import datetime
 from ctypes import wintypes
 
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QUrl, QEvent, QObject
-from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage
+from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMenu,
     QSystemTrayIcon,
@@ -153,14 +154,33 @@ def chars_dir():
     return os.path.join(assets_dir(), "characters")
 
 
+def common_voice_dir():
+    """通用语音目录：任何角色都可用这套语音（与 characters 平级）"""
+    return os.path.join(assets_dir(), "common_voice")
+
+
+def role_image(d):
+    """返回角色目录主图 (路径, kind)。优先 image.png；否则目录内 .gif 动图（多张取排序首个）"""
+    png = os.path.join(d, "image.png")
+    if os.path.exists(png):
+        return png, "png"
+    try:
+        gifs = sorted(f for f in os.listdir(d) if f.lower().endswith(".gif"))
+    except Exception:
+        gifs = []
+    if gifs:
+        return os.path.join(d, gifs[0]), "gif"
+    return None
+
+
 def list_roles():
-    """从 assets/characters/ 扫描角色子目录（可扩展：丢文件夹即加角色）"""
+    """从 assets/characters/ 扫描角色子目录（可扩展：丢文件夹即加角色，支持 image.png 或 .gif 动图）"""
     roles = []
     d = chars_dir()
     if os.path.isdir(d):
         for name in os.listdir(d):
             full = os.path.join(d, name)
-            if os.path.isdir(full) and os.path.exists(os.path.join(full, "image.png")):
+            if os.path.isdir(full) and role_image(full):
                 roles.append(name)
     return roles or [DEFAULT_ROLE]
 
@@ -191,6 +211,19 @@ def friendly_audio_name(name):
 def list_role_audio(role):
     """列出角色目录下所有音频文件 → [(显示名, 绝对路径)]（按文件名排序）"""
     d = role_dir(role)
+    out = []
+    if os.path.isdir(d):
+        for f in sorted(os.listdir(d)):
+            full = os.path.join(d, f)
+            if os.path.isfile(full) and f.lower().endswith(AUDIO_EXTS):
+                name = os.path.splitext(f)[0]
+                out.append((friendly_audio_name(name), full))
+    return out
+
+
+def list_common_audio():
+    """列出通用语音目录下所有音频 → [(显示名, 绝对路径)]（按文件名排序）"""
+    d = common_voice_dir()
     out = []
     if os.path.isdir(d):
         for f in sorted(os.listdir(d)):
@@ -708,10 +741,13 @@ class PetWindow(QWidget):
         self._hotkeys_enabled = bool(_cfg.get('hotkeys_enabled', True))
         # 语音自定义快捷键: { 音频key(角色/文件名): 键名 }
         self._audio_hotkeys = dict(_cfg.get('audio_hotkeys', {}))
+        # 语音来源：'role'=角色专属语音（默认）/ 'common'=通用语音（任何角色共用一套）
+        self._voice_source = _cfg.get('voice_source', 'role') or 'role'
         self._sd_stream = None       # 正在播放的 sounddevice 流（防 GC）
 
         # 自绘：窗口固定尺寸，绘制时用 scale（origin=底部中心，复刻插件 transform-origin:50% 100%）
-        self.pixmap = None          # 当前角色图
+        self.pixmap = None          # 当前角色图（静态图，或 GIF 当前帧）
+        self._movie = None          # GIF 动图（角色为动图时非空）
         self._scale_x = 1.0
         self._scale_y = 1.0
         self.setFixedSize(BASE_SIZE, BASE_SIZE)
@@ -838,9 +874,16 @@ class PetWindow(QWidget):
             return int(key_name[2:])
         return key_name_to_vk(key_name)
 
+    def current_audio_list(self):
+        """当前语音来源下的音频列表 → [(显示名, 绝对路径)]。
+        voice_source='common' → 通用语音；否则 → 当前角色语音"""
+        if self._voice_source == 'common':
+            return list_common_audio()
+        return list_role_audio(self.role)
+
     def _hotkey_slot_audio(self, num):
-        """按小键盘数字取当前角色对应序号的音频并播放（1=第1个音频, 2=第2个…）"""
-        audios = list_role_audio(self.role)
+        """按小键盘数字取当前语音来源对应序号的音频并播放（1=第1个音频, 2=第2个…）"""
+        audios = self.current_audio_list()
         if not audios:
             return
         idx = num - 1
@@ -849,14 +892,15 @@ class PetWindow(QWidget):
             self.play_audio(path)
 
     def _custom_hotkey_audio(self, audio_key):
-        """按自定义音频快捷键播放对应音频（audio_key = role/文件名）"""
-        # 解析: 格式 "角色名/文件名"
+        """按自定义音频快捷键播放对应音频（audio_key = 角色名/文件名 或 __common__/文件名）"""
         try:
             role_name, fname = audio_key.rsplit('/', 1)
         except ValueError:
             return
-        d = role_dir(role_name)
-        path = os.path.join(d, fname)
+        if role_name == '__common__':
+            path = os.path.join(common_voice_dir(), fname)
+        else:
+            path = os.path.join(role_dir(role_name), fname)
         if os.path.exists(path):
             # 若当前角色不符且该角色存在 → 临时切角色播放? 用户期望的是"当前角色"的按键
             # 简化为：直接播放该文件（跨角色也可）
@@ -896,7 +940,11 @@ class PetWindow(QWidget):
             QTimer.singleShot(200, self._register_hotkeys_now)
 
     def closeEvent(self, e):
-        """退出前注销热键"""
+        """退出前注销热键、停止动图"""
+        try:
+            self._stop_movie()
+        except Exception:
+            pass
         try:
             hwnd = int(self.winId())
             unregister_numpad_hotkeys(hwnd, self._hotkey_ids)
@@ -907,18 +955,72 @@ class PetWindow(QWidget):
         super().closeEvent(e)
 
     # ------------- 角色 -------------
+    def _stop_movie(self):
+        """停止 GIF 动画（切角色/退出时调用）"""
+        if self._movie is not None:
+            try:
+                self._movie.stop()
+                self._movie.frameChanged.disconnect()
+            except Exception:
+                pass
+            self._movie = None
+
+    def _set_role_frame(self, frame_no):
+        """GIF 帧更新：缩放后赋给 self.pixmap（保持 paintEvent/按压动画不变）"""
+        try:
+            if self._movie is None:
+                return
+            pm = self._movie.currentPixmap()
+            if pm.isNull():
+                return
+            pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+            self.pixmap = pm
+            self.update()
+        except Exception:
+            pass
+
     def load_role(self, role):
         if role not in self.roles:
             role = self.roles[0]
         self.role = role
-        img = os.path.join(role_dir(role), "image.png")
+        self._stop_movie()
         self.pixmap = None
+        rdir = role_dir(role)
+        img = os.path.join(rdir, "image.png")
         if os.path.exists(img):
             pm = QPixmap(img)
             if not pm.isNull():
                 pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation)
                 self.pixmap = pm
+        else:
+            # 无 image.png → 尝试目录内 GIF 动图
+            gifs = []
+            try:
+                gifs = sorted(f for f in os.listdir(rdir) if f.lower().endswith(".gif"))
+            except Exception:
+                pass
+            if gifs:
+                gpath = os.path.join(rdir, gifs[0])
+                try:
+                    mv = QMovie(gpath)
+                    if mv.isValid() and mv.frameCount() > 1:
+                        mv.frameChanged.connect(self._set_role_frame)
+                        self._movie = mv
+                        mv.start()
+                        # 首帧立即显示（start 后第一帧异步，先取一次）
+                        pm = mv.currentPixmap()
+                        if pm.isNull():
+                            mv.jumpToFrame(0)
+                            pm = mv.currentPixmap()
+                        if not pm.isNull():
+                            pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation)
+                            self.pixmap = pm
+                except Exception as e:
+                    print('QMovie load fail:', e)
+                    self._movie = None
         self._scale_x = 1.0
         self._scale_y = 1.0
         self.setFixedSize(BASE_SIZE, BASE_SIZE)
@@ -1250,11 +1352,18 @@ class PetWindow(QWidget):
 
         menu.addSeparator()
 
-        # ② 当前角色全部音频（点一下=绑定快捷键；右侧显示已绑键；♫=试听）
-        audios = list_role_audio(self.role)
+        # 语音来源切换（角色专属 / 通用语音）
+        act_voice_src = QAction(
+            "语音来源：通用语音" if self._voice_source == 'common' else "语音来源：当前角色",
+            menu)
+        act_voice_src.setMenu(self._build_voice_source_submenu())
+        menu.addAction(act_voice_src)
+
+        # ② 当前语音来源全部音频（点一下=绑定快捷键；右侧显示已绑键；♫=试听）
+        audios = self.current_audio_list()
         if audios:
             for label, path in audios:
-                akey = self._audio_key(self.role, path)
+                akey = self._audio_key_for_path(path)
                 bound = self._audio_hotkeys.get(akey, '')
                 txt = "♪ " + label
                 if bound:
@@ -1281,6 +1390,53 @@ class PetWindow(QWidget):
         """音频唯一 key：角色名/文件名（跨角色稳定）"""
         fname = os.path.basename(path)
         return "%s/%s" % (role, fname)
+
+    def _audio_key_for_path(self, path):
+        """按路径自动生成音频 key：通用语音目录内 → __common__/文件名；
+        否则 → 角色名/文件名"""
+        try:
+            if os.path.dirname(path) == common_voice_dir():
+                return "__common__/%s" % os.path.basename(path)
+        except Exception:
+            pass
+        return self._audio_key(self.role, path)
+
+    def set_voice_source(self, source):
+        """切换语音来源：'role'=角色专属 / 'common'=通用语音。持久化并刷新"""
+        self._voice_source = 'common' if source == 'common' else 'role'
+        cfg = load_config()
+        cfg['voice_source'] = self._voice_source
+        save_config(cfg)
+        self.refresh_tray_menu()
+        self._schedule_menu_refresh()
+        # 同步打开的面板
+        if getattr(self, '_settings_panel', None) is not None:
+            self._settings_panel.refresh_all()
+            self._settings_panel._watch_current_dir()
+        print('voice_source ->', self._voice_source)
+
+    def _build_voice_source_submenu(self):
+        """语音来源切换子菜单：当前角色（专属）/ 通用语音（共用一套）"""
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_QSS)
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+        n_common = len(list_common_audio())
+        # 当前角色
+        act_role = QAction("当前角色（%s）" % self.role, menu)
+        act_role.setCheckable(True)
+        act_role.setChecked(self._voice_source != 'common')
+        act_role.triggered.connect(lambda c: self.set_voice_source('role'))
+        grp.addAction(act_role)
+        menu.addAction(act_role)
+        # 通用语音
+        act_common = QAction("通用语音（%d 条）" % n_common, menu)
+        act_common.setCheckable(True)
+        act_common.setChecked(self._voice_source == 'common')
+        act_common.triggered.connect(lambda c: self.set_voice_source('common'))
+        grp.addAction(act_common)
+        menu.addAction(act_common)
+        return menu
 
     def _build_ptt_key_submenu(self):
         """开麦键选择子菜单：常用键 + 「自定义…」"""

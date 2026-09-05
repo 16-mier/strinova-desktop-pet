@@ -78,6 +78,38 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-05（新增通用语音：所有角色共用一套语音，可切回角色专属）
+- **需求**：加一个「通用语音」选项——不管选哪个角色都用这套语音；可切回角色自己的语音
+- **资源**：`assets/common_voice/`（与 characters 平级）存放通用语音；桌面「艾卡语音」里挑了 2 条（06_奈斯！、20_let's go gogooooooo）放入
+- **实现**（`pet.py`）：
+  1. 新增 `common_voice_dir()`（assets/common_voice）与 `list_common_audio()`（通用语音扫描）
+  2. 配置 `voice_source`：'role'（角色专属，默认）/ 'common'（通用语音）；`PetWindow` 读入 `self._voice_source`
+  3. `current_audio_list()`：按 voice_source 返回「当前语音列表」统一入口（热键槽、菜单、面板都用它）
+  4. `_audio_key_for_path(path)`：通用目录内音频 key 用 `__common__/文件名` 前缀；`_custom_hotkey_audio` 支持解析 `__common__` 路径（跨角色稳定，切角色不丢绑定）
+  5. `set_voice_source(source)`：持久化 + 刷新托盘菜单 + 同步打开面板
+  6. 汉堡菜单加「语音来源：当前角色/通用语音」子菜单（含通用语音条数）
+- **实现**（`settings_panel.py`）：音频模块顶部加「语音来源」下拉框（角色专属/通用语音），`_refresh_audio_list` 跟随来源 + 同步下拉显示；导入/删除/目录监视目标目录改为按来源（`_current_audio_dir()`）
+- **验证**：py_compile ✅；逻辑脚本：默认 role→切 common→列表 2 条→切回 role 恢复 ✅；GUI 脚本：面板切换下拉框即时更新列表、不崩溃 ✅
+- 涉及：`pet.py`（common_voice_dir/list_common_audio/_voice_source/current_audio_list/_audio_key_for_path/set_voice_source/_build_voice_source_submenu/_custom_hotkey_audio/菜单段）、`settings_panel.py`（cmb_voice_src/_refresh_audio_list/_import_audio/_delete_selected_audio/_watch_current_dir/_current_audio_dir）
+
+### 2026-09-05（设置面板：窗口可拖拽缩放 + 列表行距紧凑 + 修复点三横崩溃）
+- **需求**：设置面板太小、不能拖大，角色/音频列表行距大
+- **实现**：面板默认按屏幕尺寸放大（max 720×860）、`setMinimumSize(520,560)`、`setMouseTracking`；新增 `nativeEvent` WM_NCHITTEST 拦截边缘/四角（_RESIZE_MARGIN=6）→ 系统接管拖拽缩放；QListWidget item padding 6px→3px 紧凑
+- **崩溃修复**：nativeEvent 未命中时返回 `super().nativeEvent(...)` 触发 C 层访问违规（0xc0000005，QtCore.pyd），窗口 show 即崩 → 改为未处理一律 `return False, 0`（与 pet.py 历史教训一致）
+- **验证**：复现脚本定位崩溃在 `panel.show()`；修复后构造/show/缩放全过；WM_NCHITTEST 四角返回 13/14/16/17、边缘 10/11/12/15、中心 1 均正确；resize 800×900 OK
+
+### 2026-09-05（角色支持 GIF 动图：艾卡导入）
+- **需求**：桌面「艾卡」文件夹导入角色，需支持 GIF 动图形象（透明、自动播放）
+- **资源**：`艾卡.gif` 120×122、18 帧、透明通道 → 复制到 `assets/characters/艾卡/艾卡.gif`
+- **实现**（`pet.py`）：
+  1. 角色扫描 `list_roles` / 新增 `role_image(dir)`：优先 `image.png`，无则取目录内**首个 .gif**（排序）作为角色形象 → 艾卡无需 image.png 也能被识别
+  2. `PetWindow` 新增 `self._movie`（QMovie）；`load_role` 无 image.png 时尝试加载目录 GIF：`frameChanged → _set_role_frame`（每帧 `currentPixmap` 缩放后赋给 `self.pixmap`，保持宽高比 + 透明）→ 与静态图共用同一绘制/按压动画路径，paintEvent 零改动
+  3. `_stop_movie`：切角色/退出时停止动画并断开信号（closeEvent 调用），避免泄漏与串角色
+  4. 只对 `frameCount()>1` 的 GIF 启用动画；首帧先同步显示防空白
+- **实现**（`settings_panel.py`）：角色导入校验放宽为「含 image.png **或 .gif**」；提示文案同步更新
+- **验证**：py_compile ✅；QMovie 实测 18 帧逐帧触发、每帧 120×122 带透明 ✅；临时加载脚本确认艾卡被识别、pixmap cacheKey 随时间变化（动画推进）✅
+- 涉及：`pet.py`（role_image/list_roles/_stop_movie/_set_role_frame/load_role/closeEvent）、`settings_panel.py`（_import_character/提示文案）
+
 ### 2026-09-05（菜单点选项后自动重开，支持连续操作）
 - **现象**：点菜单里一个选项后菜单关闭，要重新打开才能点下一个选项
 - **根因**：各设置项点击后 `_schedule_menu_refresh` 置 `_reopen_menu` 并 close，`_popup_menu_at` 在 exec 返回后**立即递归** exec——递归发生在鼠标释放事件处理栈内，新菜单被旧事件收尾逻辑关闭/不稳定 → 表现为"点一下菜单就关"

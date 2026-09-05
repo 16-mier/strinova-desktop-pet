@@ -6,6 +6,8 @@
   "hotkeys_enabled": true,
   "audio_hotkeys": {
     "星绘/noon.mp3": "Num3",
-    "白墨/sprint.mp3": "Num1"
-  }
+    "星绘/evening.mp3": "Num1",
+    "星绘/morning.mp3": "Num2"
+  },
+  "voice_source": "role"
 }
