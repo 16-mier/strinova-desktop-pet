@@ -40,6 +40,16 @@ except Exception:
     _np = None
     HAS_SD = False
 
+# 设置面板（独立窗口，替代旧弹出菜单）
+try:
+    import settings_panel as _panel_mod
+    _panel_mod.bind_pet_module(sys.modules[__name__])  # 注入模块引用供面板调用工具函数
+    HAS_PANEL = True
+except Exception as _e:
+    _panel_mod = None
+    HAS_PANEL = False
+    print('settings_panel import fail:', _e)
+
 
 PET_VERSION = "1.5.0"
 DEFAULT_ROLE = "星绘"
@@ -1093,10 +1103,9 @@ class PetWindow(QWidget):
         self.tray.setContextMenu(menu)
 
     def _on_tray_activated(self, reason):
-        # Trigger = 左键单击 → 弹菜单；Context 右键交给系统 contextMenu
+        # Trigger = 左键单击 → 打开设置面板；右键仍走托盘 contextMenu
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if self._tray_menu is not None:
-                self._tray_menu.popup(QCursor.pos())
+            self.open_settings_panel()
 
     def _build_role_menu(self, parent):
         """构建主菜单（三横/托盘共用）：
@@ -1298,6 +1307,51 @@ class PetWindow(QWidget):
         self.load_role(role)
         self.refresh_tray_menu()
         self._schedule_menu_refresh()
+        # 同步打开的面板
+        if getattr(self, '_settings_panel', None) is not None:
+            self._settings_panel.refresh_all()
+
+    # ------------- 设置面板 -------------
+    def open_settings_panel(self):
+        """打开/聚焦设置面板窗口（若已开则置前）"""
+        if not HAS_PANEL:
+            # 面板不可用时回退旧菜单
+            self._popup_menu_at(QCursor.pos())
+            return
+        panel = getattr(self, '_settings_panel', None)
+        if panel is None:
+            try:
+                panel = _panel_mod.SettingsPanel(self)
+                self._settings_panel = panel
+                panel.sig_role_changed.connect(self.switch_role)
+            except Exception as e:
+                print('panel create fail:', e)
+                self._popup_menu_at(QCursor.pos())
+                return
+        panel.refresh_all()
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
+    def rescan_roles(self):
+        """重新扫描角色目录（导入/删除角色后调用）"""
+        self.roles = list_roles()
+        if self.role not in self.roles:
+            self.role = self.roles[0] if self.roles else DEFAULT_ROLE
+            self.load_role(self.role)
+
+    # 供设置面板调用的便捷方法（委托模块级函数）
+    def base_dir(self):
+        return base_dir()
+
+    def chars_dir(self):
+        return chars_dir()
+
+    def list_output_devices(self):
+        return list_output_devices()
+
+    def list_role_audio(self, role):
+        return list_role_audio(role)
 
     # ------------- 绑定麦克风/输出 -------------
     def _schedule_menu_refresh(self):
@@ -1545,13 +1599,13 @@ class PetWindow(QWidget):
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             if self._menu_press:
-                # 三横按钮松开：若仍在其上则弹出菜单
+                # 三横按钮松开：若仍在其上则打开设置面板
                 self._menu_press = False
                 was_on_btn = self._hovering and self._on_menu_btn(e.position().toPoint())
                 self._menu_btn_hover = False
                 self.update()
                 if was_on_btn:
-                    self._popup_menu_at(e.globalPosition().toPoint())
+                    self.open_settings_panel()
             else:
                 self._down = False
                 self.press_up(not self._moved)
