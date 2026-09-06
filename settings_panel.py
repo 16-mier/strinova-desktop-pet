@@ -284,16 +284,10 @@ class SettingsPanel(QWidget):
         self.chk_ai_tts = QCheckBox("朗读 AI 回复（TTS）")
         self.chk_ai_tts.toggled.connect(self._ai_apply_tts)
         ail.addWidget(self.chk_ai_tts)
-        r_tts = QHBoxLayout()
-        r_tts.addWidget(QLabel("朗读引擎："))
-        self.cmb_ai_tts_mode = NoWheelComboBox()
-        self.cmb_ai_tts_mode.addItem("云端（微软语音，需联网）", 'cloud')
-        self.cmb_ai_tts_mode.addItem("自定义 API 语音服务", 'api')
-        self.cmb_ai_tts_mode.addItem("本地（Windows 自带语音，离线）", 'local')
-        self.cmb_ai_tts_mode.currentIndexChanged.connect(self._ai_apply_tts_mode)
-        r_tts.addWidget(self.cmb_ai_tts_mode, 1)
-        ail.addLayout(r_tts)
-        # 自定义 TTS API 服务（OpenAI 兼容 /audio/speech）—— 选「自定义 API 语音服务」才显示
+        lbl_tts_api = QLabel("朗读服务（填你的语音 API 地址；本地跑的语音服务填 http://127.0.0.1:端口）：")
+        lbl_tts_api.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:2px;")
+        ail.addWidget(lbl_tts_api)
+        # 自定义 TTS API 服务（OpenAI 兼容 /audio/speech）——唯一朗读引擎
         self.api_tts_box = QWidget()
         atl = QVBoxLayout(self.api_tts_box)
         atl.setContentsMargins(0, 0, 0, 0)
@@ -333,26 +327,7 @@ class SettingsPanel(QWidget):
         self.lbl_tts_api_status = QLabel("")
         self.lbl_tts_api_status.setStyleSheet("color:#7a8099; font-size:11px;")
         atl.addWidget(self.lbl_tts_api_status)
-        ail.addWidget(self.api_tts_box)
-        self.api_tts_box.setVisible(False)
-        # 云端音色（仅 cloud 模式显示；包成容器便于显隐）
-        self.cloud_voice_box = QWidget()
-        cvl = QVBoxLayout(self.cloud_voice_box)
-        cvl.setContentsMargins(0, 0, 0, 0)
-        r_voice = QHBoxLayout()
-        r_voice.addWidget(QLabel("云端音色："))
-        self.cmb_ai_voice = NoWheelComboBox()
-        for _v, _n in [('zh-CN-XiaoxiaoNeural', '晓晓 (女·标准)'),
-                       ('zh-CN-XiaoyiNeural', '晓伊 (女·活泼)'),
-                       ('zh-CN-YunxiNeural', '云希 (男·青年)'),
-                       ('zh-CN-YunjianNeural', '云健 (男·沉稳)'),
-                       ('zh-CN-YunyangNeural', '云扬 (男·专业)'),
-                       ('zh-CN-YunxiaNeural', '云夏 (男·少年)')]:
-            self.cmb_ai_voice.addItem(_n, _v)
-        self.cmb_ai_voice.currentIndexChanged.connect(self._ai_apply_voice)
-        r_voice.addWidget(self.cmb_ai_voice, 1)
-        cvl.addLayout(r_voice)
-        ail.addWidget(self.cloud_voice_box)
+        ail.addWidget(self.api_tts_box)   # 常驻显示（唯一朗读引擎=填地址）
         # TTS 提示词：朗读前让 AI 改写（依附 AI，AI 关则朗读也关）
         lbl_ttp = QLabel("TTS 提示词（朗读前让 AI 把回答改成适合朗读的稿子）：")
         lbl_ttp.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:4px;")
@@ -363,7 +338,7 @@ class SettingsPanel(QWidget):
         self.ed_ai_ttsprompt.setFixedHeight(70)
         self.ed_ai_ttsprompt.textChanged.connect(self._ai_apply_ttsprompt)
         ail.addWidget(self.ed_ai_ttsprompt)
-        tip5 = QLabel("朗读的文本会先由 AI 按 TTS 提示词改写；云端失败自动回退本地语音。")
+        tip5 = QLabel("朗读的文本会先由 AI 按 TTS 提示词改写，再交给上方填写的语音服务合成。")
         tip5.setStyleSheet("color:#7a8099; font-size:11px;")
         ail.addWidget(tip5)
         bl.addWidget(self.ai_box)
@@ -798,13 +773,7 @@ class SettingsPanel(QWidget):
             self.cmb_ai_model.blockSignals(True)
             self.cmb_ai_model.setCurrentText(cur_model if cur_model else "")
             self.cmb_ai_model.blockSignals(False)
-        mode = ai.get('tts_mode', 'cloud') or 'cloud'
-        mi = self.cmb_ai_tts_mode.findData(mode)
-        self.cmb_ai_tts_mode.blockSignals(True)
-        self.cmb_ai_tts_mode.setCurrentIndex(mi if mi >= 0 else 0)
-        self.cmb_ai_tts_mode.blockSignals(False)
-        self._sync_tts_mode_ui(mode)
-        # 自定义 TTS API 服务字段
+        # 朗读服务（唯一引擎=填地址的自定义语音 API）
         self.ed_tts_api_base.blockSignals(True)
         self.ed_tts_api_base.setText(ai.get('tts_api_base', ''))
         self.ed_tts_api_base.blockSignals(False)
@@ -817,11 +786,6 @@ class SettingsPanel(QWidget):
         self.ed_tts_api_voice.blockSignals(True)
         self.ed_tts_api_voice.setText(ai.get('tts_api_voice', ''))
         self.ed_tts_api_voice.blockSignals(False)
-        voice = ai.get('tts_voice', '') or ''
-        vi = self.cmb_ai_voice.findData(voice)
-        self.cmb_ai_voice.blockSignals(True)
-        self.cmb_ai_voice.setCurrentIndex(vi if vi >= 0 else 0)
-        self.cmb_ai_voice.blockSignals(False)
         # 系统提示词 / TTS 提示词
         sp = ai.get('system_prompt', '')
         sp_def = ai_mgr.default_system_prompt() if ai_mgr is not None else ''
@@ -1313,21 +1277,6 @@ class SettingsPanel(QWidget):
         self._ai_status("朗读 AI 回复已" + ("开启" if on else "关闭"),
                         "#7ae0a3" if on else "#7a8099")
 
-    def _ai_apply_tts_mode(self, idx):
-        mode = self.cmb_ai_tts_mode.itemData(idx) or 'cloud'
-        pet = self._current_pet()
-        if pet is not None and hasattr(pet, 'ai'):
-            pet.ai.set_tts_mode(mode)
-        # 按引擎显隐配置行：cloud → 云端音色；api → 自定义 API 服务表单；local → 都隐藏
-        self._sync_tts_mode_ui(mode)
-
-    def _sync_tts_mode_ui(self, mode):
-        """按朗读引擎显隐相关输入区"""
-        if hasattr(self, 'cloud_voice_box'):
-            self.cloud_voice_box.setVisible(mode == 'cloud')
-        if hasattr(self, 'api_tts_box'):
-            self.api_tts_box.setVisible(mode == 'api')
-
     def _ai_apply_tts_api(self):
         """保存自定义 TTS API 服务配置"""
         pet = self._current_pet()
@@ -1363,12 +1312,6 @@ class SettingsPanel(QWidget):
                 self.lbl_tts_api_status.setText("❌ %s" % str(msg)[:90])
                 self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
         pet.ai.test_tts_api(base, key, model, voice, _done)
-
-    def _ai_apply_voice(self, idx):
-        voice = self.cmb_ai_voice.itemData(idx) or ''
-        pet = self._current_pet()
-        if pet is not None and hasattr(pet, 'ai'):
-            pet.ai.set_voice(voice)
 
     def _ai_apply_model(self, text):
         pet = self._current_pet()

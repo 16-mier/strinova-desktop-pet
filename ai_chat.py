@@ -151,6 +151,26 @@ def _detect_proxy():
 # ============================================================================
 # OpenAI 兼容请求（纯 urllib，零新依赖）
 # ============================================================================
+# 部分服务商（如 commandcode.ai）用 Cloudflare 拦截缺浏览器指纹的脚本请求
+# （error 1010）。给所有 API 请求补上浏览器特征头即可正常访问。
+_CF_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
+
+
+def _browser_headers(extra=None):
+    h = {
+        'User-Agent': _CF_UA,
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'cross-site',
+    }
+    if extra:
+        h.update(extra)
+    return h
+
+
 def _norm_base_url(base_url):
     """规整服务器地址：容忍用户填了完整 /chat/completions 的情况。
     - 输入 https://host/v1/chat/completions → https://host/v1
@@ -176,8 +196,9 @@ def _api_speech_synth(base_url, api_key, model, text, voice, out_path, timeout=6
         'response_format': 'mp3',
     }, ensure_ascii=False).encode('utf-8')
     req = urllib.request.Request(url, data=body, method='POST')
-    req.add_header('Content-Type', 'application/json')
-    req.add_header('Authorization', 'Bearer %s' % (api_key or ''))
+    for k, v in _browser_headers({'Content-Type': 'application/json',
+                                  'Authorization': 'Bearer %s' % (api_key or '')}).items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = r.read()
     if not data:
@@ -194,8 +215,9 @@ def _chat_request(base_url, api_key, model, messages, timeout=90):
         {'model': model, 'messages': messages, 'stream': False},
         ensure_ascii=False).encode('utf-8')
     req = urllib.request.Request(url, data=body, method='POST')
-    req.add_header('Content-Type', 'application/json')
-    req.add_header('Authorization', 'Bearer %s' % (api_key or ''))
+    for k, v in _browser_headers({'Content-Type': 'application/json',
+                                  'Authorization': 'Bearer %s' % (api_key or '')}).items():
+        req.add_header(k, v)
     # urllib 默认 ProxyHandler 会读环境变量 HTTP_PROXY/HTTPS_PROXY（走代理）
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = json.loads(r.read().decode('utf-8'))
@@ -210,7 +232,8 @@ def _list_models(base_url, api_key, timeout=30):
     失败抛异常（401 未授权 / 网络 / 超时等）。"""
     url = _norm_base_url(base_url) + '/models'
     req = urllib.request.Request(url, method='GET')
-    req.add_header('Authorization', 'Bearer %s' % (api_key or ''))
+    for k, v in _browser_headers({'Authorization': 'Bearer %s' % (api_key or '')}).items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = json.loads(r.read().decode('utf-8'))
     out = []
@@ -282,71 +305,49 @@ class AIWorker(QThread):
 
 
 # ============================================================================
-# 后台线程：TTS 合成（cloud=edge-tts / local=SAPI），云端失败自动回退本地
+# 后台线程：TTS 合成（唯一引擎 = 用户填地址的自定义 OpenAI 兼容语音服务）
 # ============================================================================
 class TTSWorker(QThread):
     done = pyqtSignal(str, str)   # (音频文件路径, 错误信息；错误时路径为空)
 
-    def __init__(self, text, mode, voice, seq, parent=None):
+    def __init__(self, text, voice, seq, parent=None):
         super().__init__(parent)
         self._text = text
-        self._mode = mode if mode in (TTS_MODE_CLOUD, TTS_MODE_LOCAL, TTS_MODE_API) \
-            else TTS_MODE_CLOUD
-        self._voice = voice or DEFAULT_VOICE
+        self._voice = voice or 'alloy'
         self._seq = seq
+        self._last_err = ''
 
     def run(self):
-        # 云端路径：微软端点偶发抖动 → 自动重试 1 次；api 自定义服务同此处理
-        if self._mode in (TTS_MODE_CLOUD, TTS_MODE_API):
-            path = self._synth_once(self._mode)
-            if not path:
-                time.sleep(0.5)
-                path = self._synth_once(self._mode)
-            if path:
-                self.done.emit(path, '')
-                return
-            # 失败 → 自动回退本地（若可用）
-            path = self._synth_once(TTS_MODE_LOCAL)
-            if path:
-                self.done.emit(path, '')
-                return
-            self.done.emit('', '语音合成失败（%s 不可用且本地语音不可用）' % self._mode)
-            return
-        path = self._synth_once(self._mode)
+        # 偶发网络抖动 → 重试 1 次
+        path = self._synth_once()
+        if not path:
+            time.sleep(0.5)
+            path = self._synth_once()
         if path:
             self.done.emit(path, '')
             return
-        self.done.emit('', '语音合成失败（%s 不可用）' % self._mode)
+        self.done.emit('', self._last_err or '语音合成失败（请检查朗读服务地址/密钥/模型）')
 
-    def _synth_once(self, mode):
+    def _synth_once(self):
         base = _tts_dir()
         if not base:
+            self._last_err = '没有可写的临时目录'
+            return None
+        cfg = _ai_cfg()
+        api_base = (cfg.get('tts_api_base') or '').strip()
+        api_key = (cfg.get('tts_api_key') or '').strip()
+        api_model = (cfg.get('tts_api_model') or '').strip()
+        if not api_base or not api_key or not api_model:
+            self._last_err = '朗读服务未配置：请到 设置 → AI → 朗读服务 里填 地址/密钥/模型'
             return None
         try:
-            if mode == TTS_MODE_CLOUD and HAS_EDGE:
-                path = os.path.join(base, 'tts_%d_%d.mp3' % (self._seq, int(time.time() * 1000)))
-                data = asyncio.run(_edge_synth(self._text, self._voice))
-                with open(path, 'wb') as f:
-                    f.write(data)
-                return path
-            if mode == TTS_MODE_API:
-                cfg = _ai_cfg()
-                api_base = cfg.get('tts_api_base') or ''
-                api_key = cfg.get('tts_api_key') or ''
-                api_model = cfg.get('tts_api_model') or ''
-                if not api_base or not api_key or not api_model:
-                    return None
-                path = os.path.join(base, 'tts_%d_%d.mp3' % (self._seq, int(time.time() * 1000)))
-                _api_speech_synth(api_base, api_key, api_model, self._text,
-                                  self._voice or 'alloy', path)
-                return path
-            if mode == TTS_MODE_LOCAL and HAS_SAPI:
-                path = os.path.join(base, 'tts_%d_%d.wav' % (self._seq, int(time.time() * 1000)))
-                _sapi_synth(self._text, path)
-                return path
-        except Exception:
+            path = os.path.join(base, 'tts_%d_%d.mp3' % (self._seq, int(time.time() * 1000)))
+            _api_speech_synth(api_base, api_key, api_model, self._text,
+                              self._voice or 'alloy', path)
+            return path
+        except Exception as e:
+            self._last_err = '%s' % e
             return None
-        return None
 
 
 # ============================================================================
@@ -756,12 +757,8 @@ class AiChatManager(QObject):
         if self._player is None or seq != getattr(self, '_pending_tts_seq', 0):
             return
         cfg = self.cfg()
-        mode = cfg.get('tts_mode') or TTS_MODE_CLOUD
-        if mode == TTS_MODE_API:
-            voice = cfg.get('tts_api_voice') or 'alloy'
-        else:
-            voice = cfg.get('tts_voice') or DEFAULT_VOICE
-        self._tts_worker = TTSWorker(text, mode, voice, seq, self)
+        voice = (cfg.get('tts_api_voice') or cfg.get('tts_voice') or 'alloy')
+        self._tts_worker = TTSWorker(text, voice, seq, self)
         self._tts_worker.done.connect(
             lambda path, err, s=seq: self._on_tts_done(path, err, s))
         self._tts_worker.finished.connect(self._tts_worker.deleteLater)

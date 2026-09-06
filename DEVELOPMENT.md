@@ -78,6 +78,23 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（关键修复：commandcode Cloudflare 1010 拦截 → 加浏览器头；TTS 引擎精简为唯一「填地址」服务）
+- **用户反馈**：①换新 key 仍刷不出模型；②朗读引擎微软的不要；③本地引擎也不要（Windows 自带），所有朗读都要填 API 地址
+- **根因（重大）**：commandcode.ai 用 **Cloudflare 拦截缺浏览器指纹的脚本请求**（响应 body `error code: 1010`），与 key/套餐无关！models 与 chat/completions 都被拦 → 表现为「模型刷不出来」。
+  - 诊断过程：直连/代理都 403 → 读 403 body 发现 `error code: 1010`（Cloudflare 指纹拦截）→ 加完整浏览器头（Chrome UA + Accept + Accept-Language + Sec-Fetch-*）→ **HTTP 200，67 个模型秒出** ✅
+  - 对话接口仍 401：body `Invalid 'Authorization' header or token` → 用户填的 key 是 `user_` 开头（OAuth 登录 token），**非有效 API key**；且 `.commandcode` 目录只有 models-cache.json 无 auth.json（未 CLI 登录）→ 需在 commandcode Studio 生成真 key
+- **实现**（`ai_chat.py`）：
+  1. `_browser_headers()`：统一给 `_chat_request`/`_list_models`/`_api_speech_synth` 加浏览器特征头（Chrome UA/Accept/Accept-Language/Sec-Fetch-*）→ 绕过 Cloudflare 1010
+- **TTS 引擎精简**（`ai_chat.py` + `settings_panel.py`，按用户「微软不要、本地也要填地址」）：
+  1. 删除「朗读引擎」下拉（cloud 微软 / local Windows 自带都移除）；「朗读 AI 回复」勾选下方直接是**朗读服务表单**（服务地址/API 密钥/语音模型/音色/测试语音），**唯一引擎 = 填地址的自定义 OpenAI 兼容 `/audio/speech`**
+  2. `TTSWorker` 重写：构造签名 `(text, voice, seq)` 不再传 mode；从配置 `tts_api_*` 读地址合成，1 次重试；未配置 → 明确报错「请到 设置→AI→朗读服务 填 地址/密钥/模型」；不再回退 SAPI/edge
+  3. `_speak_text`：voice 取 `tts_api_voice`（兼容旧 `tts_voice`），直连新 TTSWorker
+  4. `settings_panel`：删 cmb_ai_tts_mode/cloud_voice_box/cmb_ai_voice 及对应 handler；api_tts_box 常驻可见
+- **验证**：py_compile ✅；真实 key 模型检测 67 个 OK ✅；面板冒烟（无旧引擎下拉/朗读服务表单存在且可见/缺模型提示）✅；本地桩 TTSWorker 合成 PASS + 未配置报错提示 PASS ✅
+- 涉及：`ai_chat.py`（_browser_headers 三处应用/TTSWorker 重写/_speak_text/set_tts_api/test_tts_api）、`settings_panel.py`（删引擎下拉与云端音色/api_tts_box 常驻/文案）
+- 备注：edge-tts/SAPI 代码保留未删（后续可再瘦身移除依赖）；桌面 exe 重新打包部署
+
+
 ### 2026-09-07（新增「AI 功能」：AI 对话 + TTS 语音朗读（云端/本地双引擎））
 - **需求**：桌宠加 AI 对话；回答文字显示在桌宠旁并朗读（TTS 云端+本地都支持）；设置面板新增「AI 功能」模块，**默认关闭**；TTS 依附 AI（朗读文本=AI 回复），AI 与朗读各自独立开关
 - **交互（用户拍板）**：右键桌宠 → 弹聊天窗打字 → AI 回复以**气泡显示在桌宠旁边** + 朗读
