@@ -220,9 +220,7 @@ class SettingsPanel(QWidget):
         self.role_list.itemClicked.connect(self._on_role_clicked)
         row.addWidget(self.role_list, 1)
         btn_col = QVBoxLayout()
-        btn_use = QPushButton("切换")
-        btn_use.clicked.connect(lambda: self._switch_selected_role())
-        btn_col.addWidget(btn_use)
+        # 单击角色名即切换（双击/单击均可，无需"切换"按钮）
         btn_import = QPushButton("导入新形象")
         btn_import.clicked.connect(self._import_character)
         btn_col.addWidget(btn_import)
@@ -271,7 +269,7 @@ class SettingsPanel(QWidget):
         arow.addWidget(self.btn_bind)
         arow.addStretch(1)
         al.addLayout(arow)
-        self.lbl_bind_tip = QLabel("💡 选中语音后可试听/绑定快捷键；也可直接拖 mp3/文件夹 进本窗口导入")
+        self.lbl_bind_tip = QLabel("💡 选中语音后可试听/绑定快捷键（可绑 F1…或小键盘数字1-9）；每个语音来源可各绑一套，互不干扰")
         self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
         al.addWidget(self.lbl_bind_tip)
         bl.addWidget(gb_audio)
@@ -407,6 +405,10 @@ class SettingsPanel(QWidget):
         pet = self._current_pet()
         if pet is None:
             return
+        # 支持的扩展名（跟随 pet.py 的 AUDIO_EXTS / IMAGE_EXTS，保证列表一致）
+        audio_ex = getattr(pet_mod, 'AUDIO_EXTS', ('.mp3', '.wav', '.ogg', '.flac', '.m4a'))
+        image_ex = getattr(pet_mod, 'IMAGE_EXTS', ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
+        gif_ex = ('.gif', '.webp') if '.webp' in image_ex else ('.gif',)
         # 分类
         audios = []
         char_dirs = []   # 文件夹（含 image.png/gif → 当角色目录）
@@ -417,20 +419,21 @@ class SettingsPanel(QWidget):
                 continue
             low = path.lower()
             if os.path.isdir(path):
-                # 文件夹：若含角色图则作为新角色；否则当作音频来源递归?（只支持含角色图目录）
+                # 文件夹：若含角色图则作为新角色；否则当作音频来源（收目录内全部音频）
                 has_img = os.path.exists(os.path.join(path, 'image.png')) or \
-                    any(f.lower().endswith('.gif') for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)))
+                    any(f.lower().endswith(gif_ex) or f.lower().endswith(image_ex)
+                        for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)))
                 if has_img:
                     char_dirs.append(path)
                 else:
                     # 不含角色图 → 把目录内音频全部导入
                     for f in os.listdir(path):
                         fp = os.path.join(path, f)
-                        if os.path.isfile(fp) and f.lower().endswith(('.mp3', '.wav', '.ogg', '.flac', '.m4a')):
+                        if os.path.isfile(fp) and f.lower().endswith(audio_ex):
                             audios.append(fp)
-            elif low.endswith(('.mp3', '.wav', '.ogg', '.flac', '.m4a')):
+            elif low.endswith(audio_ex):
                 audios.append(path)
-            elif low.endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')):
+            elif low.endswith(image_ex):
                 char_imgs.append(path)
         imported_any = False
         # 1) 导入音频到当前语音来源
@@ -476,8 +479,8 @@ class SettingsPanel(QWidget):
                 ext = os.path.splitext(img)[1].lower()
                 dst = os.path.join(chars, name)
                 os.makedirs(dst, exist_ok=True)
-                # 角色图统一叫 image.png（GIF 保留原名动画）
-                if ext == '.gif':
+                # 角色图统一叫 image.png（动图 .gif/.webp 保留原名以便动画播放）
+                if ext in ('.gif', '.webp'):
                     target = os.path.join(dst, os.path.basename(img))
                 else:
                     target = os.path.join(dst, 'image.png')
@@ -627,6 +630,9 @@ class SettingsPanel(QWidget):
         src = self.cmb_voice_src.itemData(idx) or 'role'
         if hasattr(pet, 'set_voice_source'):
             pet.set_voice_source(src)
+        # 刷新音频列表 + 监视目录（每个来源的音频/绑定各自独立）
+        self._refresh_audio_list()
+        self._watch_current_dir()
 
     def _refresh_devices(self):
         """刷新设备下拉框"""
@@ -659,11 +665,6 @@ class SettingsPanel(QWidget):
         if role and role != getattr(self._current_pet(), 'role', None):
             self._switch_role(role)
 
-    def _switch_selected_role(self):
-        item = self.role_list.currentItem()
-        if item:
-            self._switch_role(item.text().replace("  ←当前", ""))
-
     def _switch_role(self, role):
         pet = self._current_pet()
         if pet is None:
@@ -675,14 +676,16 @@ class SettingsPanel(QWidget):
         self._watch_current_dir()  # 切换后重设监视目录（新角色的音频文件夹）
 
     def _import_character(self):
-        """导入新形象：可多选 png/jpg/gif 图片（每张=新角色），或选含角色图的文件夹"""
+        """导入新形象：可多选 png/jpg/gif/webp 等图片（每张=新角色），或选含角色图的文件夹"""
         pet = self._current_pet()
         if pet is None:
             return
+        image_ex = getattr(pet_mod, 'IMAGE_EXTS', ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'))
+        pat = ' '.join('*%s' % e for e in image_ex)
         # 让用户选择：文件 或 文件夹（用 file dialog 允许目录 + 图片文件）
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择角色图片（png/jpg/gif，每张=新角色）\n也可整个含 image.png/.gif 的文件夹拖入窗口",
-            "", "图片 (*.png *.jpg *.jpeg *.gif *.webp *.bmp)")
+            self, "选择角色图片（%s，每张=新角色）\n也可整个含角色图的文件夹拖入窗口" % ' / '.join(image_ex),
+            "", "图片 (%s)" % pat)
         if not files:
             return
         chars = os.path.join(pet.base_dir(), 'assets', 'characters')
@@ -698,8 +701,8 @@ class SettingsPanel(QWidget):
                 if os.path.isdir(dst):
                     shutil.rmtree(dst)  # 覆盖同名的旧角色目录
                 os.makedirs(dst, exist_ok=True)
-                # GIF 动图保留原名（load_role 会找目录内 .gif）；其它统一存 image.png
-                if ext == '.gif':
+                # 动图（.gif/.webp）保留原名（QMovie 播放动画）；其它统一存 image.png
+                if ext in ('.gif', '.webp'):
                     target = os.path.join(dst, os.path.basename(img))
                 else:
                     target = os.path.join(dst, 'image.png')
@@ -782,7 +785,7 @@ class SettingsPanel(QWidget):
         self.btn_bind.setChecked(False)
         self.btn_bind.setText("🔑 绑定/修改快捷键")
         self.lbl_bind_tip.setText(
-            "💡 选中语音后可试听/绑定快捷键；也可直接拖 mp3/文件夹 进本窗口导入")
+            "💡 选中语音后可试听/绑定快捷键（可绑 F1…或小键盘数字1-9）；每个语音来源可各绑一套，互不干扰")
         self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
         self._refresh_audio_list()  # 立即刷新显示绑定的快捷键
 
@@ -801,9 +804,11 @@ class SettingsPanel(QWidget):
         pet = self._current_pet()
         if pet is None:
             return
+        audio_ex = getattr(pet, 'AUDIO_EXTS', ('.mp3', '.wav', '.ogg', '.flac', '.m4a'))
+        pat = ' '.join('*%s' % e for e in audio_ex)
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择音频（mp3/wav/ogg/flac）",
-            "", "音频文件 (*.mp3 *.wav *.ogg *.flac *.m4a)")
+            self, "选择音频（支持：%s）" % ' / '.join(audio_ex),
+            "", "音频文件 (%s)" % pat)
         if not files:
             return
         role_dir = self._current_audio_dir() or os.path.join(
@@ -886,6 +891,12 @@ class SettingsPanel(QWidget):
                 # 开启前提示会占用小键盘输入（仅第一次）
                 pass
             pet.set_numpad_enabled(on)
+
+    def sync_numpad_checkbox(self, on):
+        """外部（桌宠绑定数字键后自动开）同步勾选状态"""
+        self.chk_numpad.blockSignals(True)
+        self.chk_numpad.setChecked(bool(on))
+        self.chk_numpad.blockSignals(False)
 
     def _on_ptt_toggled(self, on):
         pet = self._current_pet()

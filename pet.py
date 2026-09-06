@@ -250,16 +250,32 @@ def common_voice_dir():
 
 
 def role_image(d):
-    """返回角色目录主图 (路径, kind)。优先 image.png；否则目录内 .gif 动图（多张取排序首个）"""
+    """返回角色目录主图 (路径, kind)。优先 image.png；其次常见固定名
+    （cover/avatar/角色名）且扩展名在 IMAGE_EXTS 内；否则目录内任意支持图片
+    （排序取首个；动图 .gif/.webp 标为 gif 以便 QMovie 播放）"""
+    # 1) 首选 image.png（历史约定）
     png = os.path.join(d, "image.png")
     if os.path.exists(png):
         return png, "png"
+    # 2) 常见固定名：image/cover/avatar/icon + 扩展名
     try:
-        gifs = sorted(f for f in os.listdir(d) if f.lower().endswith(".gif"))
+        files = sorted(os.listdir(d))
     except Exception:
-        gifs = []
-    if gifs:
-        return os.path.join(d, gifs[0]), "gif"
+        files = []
+    stems = ('image', 'cover', 'avatar', 'icon', 'portrait')
+    for f in files:
+        low = f.lower()
+        stem = os.path.splitext(low)[0]
+        if stem in stems and low.endswith(IMAGE_EXTS):
+            return os.path.join(d, f), ("gif" if low.endswith(('.gif', '.webp')) else "png")
+    # 3) 动画优先：任意 .gif/.webp
+    for f in files:
+        if f.lower().endswith(('.gif', '.webp')):
+            return os.path.join(d, f), "gif"
+    # 4) 任意支持图片
+    for f in files:
+        if f.lower().endswith(IMAGE_EXTS):
+            return os.path.join(d, f), "png"
     return None
 
 
@@ -280,7 +296,15 @@ def role_dir(role):
 
 
 # 支持的音频扩展名（角色目录下这些文件都会出现在菜单里）
-AUDIO_EXTS = ('.mp3', '.wav', '.ogg', '.m4a', '.flac')
+# 播放：绑定设备时走 soundfile/libsndfile 直出（常用格式），其余由 QtMultimedia
+# 内置 ffmpeg 解码播放 —— 因此这里覆盖几乎所有常见音频格式。
+AUDIO_EXTS = (
+    '.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus', '.wma',
+    '.aiff', '.aif', '.ape', '.amr', '.webm', '.m4b', '.caf', '.mp2',
+)
+
+# 支持的角色形象图扩展名（QMovie/QPixmap 可显示的；动图用 .gif/.webp）
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.avif')
 
 # 音频文件名 → 友好显示名
 AUDIO_LABEL = {
@@ -406,8 +430,14 @@ def _adapt_to_device(data, sr, dev_idx):
         dev_info = devs[dev_idx]
         ch = dev_info['max_output_channels'] or 2
         if data.shape[1] < ch:
-            pad = _np.zeros((data.shape[0], ch - data.shape[1]), dtype='float32')
-            data = _np.concatenate([data, pad], axis=1)
+            # 声道不足：复制已有声道（如单声道→立体声，两耳都听到），
+            # 不能用补零（会导致右声道无声）
+            reps = ch // data.shape[1]
+            remainder = ch % data.shape[1]
+            parts = [data] * reps
+            if remainder:
+                parts.append(data[:, :remainder])
+            data = _np.concatenate(parts, axis=1)
         elif data.shape[1] > ch:
             data = data[:, :ch]
         target_sr = int(dev_info['default_samplerate'] or 48000)
@@ -747,9 +777,14 @@ _user32.GetClassNameW.restype = ctypes.c_int
 
 
 _TEXT_INPUT_CN = {
-    "edit", "richedit", "rhedit", "tkinter", "scintilla", "chrome_edit", "editwrapper",
-    "consolewindowclass", "cmdline", "notepad", "tb_browser", "osinputbox", "webbrowser",
-    "ime",
+    # 经典 Win32 输入控件
+    "edit", "richedit", "rhedit", "tkinter", "scintilla", "consolewindowclass",
+    "cmdline", "notepad", "ime",
+    # 浏览器内核（Chrome/Edge/Electron 应用输入框）
+    "chrome_edit", "editwrapper", "osinputbox", "webbrowser", "tb_browser",
+    "textbox", "textfield", "input",
+    # 现代 UI（WinUI/UWP/WPF/跨平台）
+    "windowsuicore", "hwndhost", "texteditor",
 }
 # 注意：不把通用 "qwidget"/"metawindow" 当输入控件（误伤所有 Qt 程序）；
 # Qt 应用是否在输入靠 hwndCaret 精确判定。
@@ -758,7 +793,7 @@ _TEXT_INPUT_CN = {
 # 游戏、桌宠本体、资源管理器等不在名单 → 按小键盘触发语音。
 _TEXT_INPUT_EXE = {
     "chrome", "msedge", "firefox", "qq", "wechat", "weixin", "dingtalk", "feishu",
-    "notepad", "notepad++", "code", "cursor", "idea64", "pycharm64", "explorer",
+    "notepad", "notepad++", "code", "cursor", "idea64", "pycharm64",
     "winword", "excel", "powerpnt", "wps", "obsidian", "typora",
     "windowsTerminal", "cmd", "powershell", "mintty", "alacritty",
     "telegram", "discord", "slack", "tim", "wxwork",
@@ -770,8 +805,9 @@ def foreground_is_input():
     """检测前台窗口当前是否处于"文本输入"状态（应放行小键盘数字）。
     判据（任一命中即放行）：
     ① 前台线程有 caret（光标在输入框内，最精确）
-    ② 前台窗口类名是已知输入控件
-    ③ 前台进程名是常见"可输入应用"（浏览器/聊天/编辑器等，聚焦多半在输入）
+    ② 前台线程当前焦点控件是已知输入控件（GetFocus，覆盖现代应用/网页输入框）
+    ③ 前台窗口类名是已知输入控件
+    ④ 前台进程名是常见"可输入应用"（浏览器/聊天/编辑器等，聚焦多半在输入）
     失败时保守返回 True（放行输入，避免误吞打字）"""
     try:
         fg = _user32.GetForegroundWindow()
@@ -781,24 +817,36 @@ def foreground_is_input():
         tid = _user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
         if not tid:
             return True
-        # ① caret 检测
+        # ① caret 检测（最精确：正在文本输入）
         gti = GUITHREADINFO()
         gti.cbSize = ctypes.sizeof(GUITHREADINFO)
         if _user32.GetGUIThreadInfo(tid, ctypes.byref(gti)) and gti.hwndCaret:
             return True  # 有闪烁光标 → 正在输入
-        # ② 窗口类名
+        # ② 线程焦点控件：前台窗口线程当前获得焦点的子控件（跨线程 AttachThreadInput
+        #    拿不到，但同线程焦点控件 GetFocus 即可；前台应用自己线程的焦点）
+        #    Windows 10+ 前台窗口的焦点控件类名是 Edit/RichEdit 等 → 判定输入
+        try:
+            fcs = ctypes.create_unicode_buffer(256)
+            _user32.GetFocus.restype = wintypes.HWND
+            focus_hwnd = _user32.GetFocus()
+            if focus_hwnd and _user32.GetClassNameW(focus_hwnd, fcs, 256):
+                fcn = fcs.value.lower()
+                for pat in _TEXT_INPUT_CN:
+                    if pat in fcn:
+                        return True
+        except Exception:
+            pass
+        # ③ 窗口类名
         cls = ctypes.create_unicode_buffer(256)
         _user32.GetClassNameW(fg, cls, 256)
         cn = cls.value.lower()
         for pat in _TEXT_INPUT_CN:
             if pat in cn:
                 return True
-        # ③ 进程名白名单
+        # ④ 进程名白名单（子串匹配：chrome/msedge/qq/wechat 主程序与子进程都算）
         if pid.value:
             pname = ''
             try:
-                # PROCESS_QUERY_LIMITED_INFORMATION(0x1000) + QueryFullProcessImageNameW 即可
-                # （无需管理员，比 OpenProcess+GetModuleBaseNameW 更可靠）
                 hProc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
                 if hProc:
                     buf = ctypes.create_unicode_buffer(1024)
@@ -904,7 +952,7 @@ class NumpadPlayHook:
         with self._lock:
             n = self._num_pressed
             self._num_pressed = None
-        if n is not None and n != self._last:
+        if n is not None:
             self._last = n
             try:
                 self._on_play(n)
@@ -1192,7 +1240,26 @@ class PetWindow(QWidget):
         return list_role_audio(self.role)
 
     def _hotkey_slot_audio(self, num):
-        """按小键盘数字取当前语音来源对应序号的音频并播放（1=第1个音频, 2=第2个…）"""
+        """小键盘数字按下：
+        1) 先查当前语音来源里绑定到 Num<num> 的音频（绑定跟音频走、带来源，
+           每个语音来源可各绑一套数字键，互不干扰）
+        2) 无绑定 → 回退：播当前语音来源第 num 条音频（旧习惯兼容）
+        """
+        key_name = 'Num%d' % num
+        audio_key = None
+        # 当前来源下查绑定（角色专属 vs 通用语音分开）
+        if self._voice_source == 'common':
+            prefix = '__common__'
+        else:
+            prefix = self.role
+        for k, v in self._audio_hotkeys.items():
+            if v == key_name and k.rsplit('/', 1)[0] == prefix:
+                audio_key = k
+                break
+        if audio_key:
+            self._custom_hotkey_audio(audio_key)
+            return
+        # 回退：按位置取当前来源第 num 条
         audios = self.current_audio_list()
         if not audios:
             return
@@ -1300,40 +1367,48 @@ class PetWindow(QWidget):
         self._stop_movie()
         self.pixmap = None
         rdir = role_dir(role)
-        img = os.path.join(rdir, "image.png")
-        if os.path.exists(img):
-            pm = QPixmap(img)
-            if not pm.isNull():
-                pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation)
-                self.pixmap = pm
-        else:
-            # 无 image.png → 尝试目录内 GIF 动图
-            gifs = []
-            try:
-                gifs = sorted(f for f in os.listdir(rdir) if f.lower().endswith(".gif"))
-            except Exception:
-                pass
-            if gifs:
-                gpath = os.path.join(rdir, gifs[0])
+        found = role_image(rdir)  # (路径, kind: 'png'|'gif')，支持 image.png / 动图 gif.webp / 各图片格式
+        if found:
+            img, kind = found
+            if kind == 'gif':
+                # 动图：QMovie 播放（gif/webp），首帧立即显示
                 try:
-                    mv = QMovie(gpath)
+                    mv = QMovie(img)
                     if mv.isValid() and mv.frameCount() > 1:
                         mv.frameChanged.connect(self._set_role_frame)
                         self._movie = mv
                         mv.start()
-                        # 首帧立即显示（start 后第一帧异步，先取一次）
                         pm = mv.currentPixmap()
                         if pm.isNull():
                             mv.jumpToFrame(0)
                             pm = mv.currentPixmap()
-                        if not pm.isNull():
-                            pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
-                                           Qt.TransformationMode.SmoothTransformation)
-                            self.pixmap = pm
+                    else:
+                        pm = mv.currentPixmap()
+                    if not pm.isNull():
+                        pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                        self.pixmap = pm
+                    elif mv.isValid() and mv.frameCount() <= 1:
+                        # 静态 webp/gif：当静态图处理
+                        pm2 = QPixmap(img)
+                        if not pm2.isNull():
+                            pm2 = pm2.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+                            self.pixmap = pm2
                 except Exception as e:
                     print('QMovie load fail:', e)
                     self._movie = None
+                    pm2 = QPixmap(img)
+                    if not pm2.isNull():
+                        pm2 = pm2.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+                        self.pixmap = pm2
+            else:
+                pm = QPixmap(img)
+                if not pm.isNull():
+                    pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+                    self.pixmap = pm
         self._scale_x = 1.0
         self._scale_y = 1.0
         self.setFixedSize(BASE_SIZE, BASE_SIZE)
@@ -2155,10 +2230,14 @@ class PetWindow(QWidget):
         """应用捕获结果：更新配置 + 重注册热键 + 菜单刷新提示"""
         cfg = load_config()
         if kind == 'audio' and audio_key:
-            # 若该键已被其它音频占用 → 释放旧的
+            # 同一键若被【同一语音来源】的其它音频占用 → 释放旧的；
+            # 不同来源（不同角色 / 通用语音）允许共用同一键 —— 每个语音来源一套快捷键
+            my_src = audio_key.rsplit('/', 1)[0]
             for k, v in list(self._audio_hotkeys.items()):
                 if v == key_name and k != audio_key:
-                    del self._audio_hotkeys[k]
+                    k_src = k.rsplit('/', 1)[0]
+                    if k_src == my_src:
+                        del self._audio_hotkeys[k]
             self._audio_hotkeys[audio_key] = key_name
             cfg['audio_hotkeys'] = self._audio_hotkeys
             msg = '%s → %s' % (os.path.basename(audio_key), key_name)
@@ -2171,6 +2250,12 @@ class PetWindow(QWidget):
             return
         save_config(cfg)
         self.refresh_tray_menu()
+        # 绑的是小键盘数字(1-9)但小键盘开关没开 → 自动开启，否则绑定不生效
+        if kind == 'audio' and key_name in ('Num%d' % i for i in range(1, 10)):
+            if not self._numpad_enabled:
+                self.set_numpad_enabled(True)
+                if getattr(self, '_settings_panel', None) is not None:
+                    self._settings_panel.sync_numpad_checkbox(True)
         # 刷新打开的设置面板（音频列表显示新绑定的键 + 恢复按钮状态）
         if getattr(self, '_settings_panel', None) is not None:
             self._settings_panel.on_capture_finished()

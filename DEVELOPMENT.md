@@ -78,6 +78,27 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（增强兼容与瘦身：更多音频/图片格式、单声道修复、各来源独立快捷键、智能输入判定加强、exe 65→44.5MB）
+- **更多素材格式**：
+  1. `AUDIO_EXTS` 扩到 16 种：原 mp3/wav/ogg/m4a/flac + **aac/opus/wma/aiff/aif/ape/amr/webm/m4b/caf/mp2**（soundfile 能解的走低延迟直出，其余自动回退 QtMultimedia 内置 ffmpeg 解码 → 全格式覆盖）
+  2. 新增 `IMAGE_EXTS` 8 种：png/jpg/jpeg/gif/webp/bmp/ico/avif；`role_image()` 支持固定名（cover/avatar 等）+ 任意支持图 + **webp 动图**（QMovie）；`load_role` 统一走 role_image()
+  3. 设置面板导入/拖放白名单改为引用 `pet.AUDIO_EXTS/IMAGE_EXTS`（不再硬编码），动图 .gif/.webp 保留原名
+- **修复单声道只有左声道有声音**：`_adapt_to_device` 声道不足时原来补**零**（右声道静音）→ 改为**复制已有声道**（单声道→双耳都响）
+- **每个语音来源独立快捷键**：
+  1. 绑定冲突释放改为**同来源才释放**（不同角色/通用语音可绑同一键，互不干扰）
+  2. `_hotkey_slot_audio`：小键盘数字先查**当前来源绑定到 Num<n> 的音频**，无绑定回退按位置
+  3. 绑数字键时若小键盘开关没开 → **自动开启**
+  4. 设置面板语音来源下拉切换后自动刷新音频列表/监视目录；面板文案提示"可绑 F1 或小键盘 1-9，各来源一套"
+- **智能输入判定加强**（修复打字时误触发播语音+按 V）：
+  1. 增加判据②：前台线程焦点控件类名检查（GetFocus）；判据③④加强
+  2. `_TEXT_INPUT_CN` 扩充（textbox/textfield/input/windowsuicore 等现代控件类）
+  3. **explorer 从输入白名单移除**（桌面/看文件时按小键盘应触发语音；重命名文件由 Edit 类判据兜底）
+- **修复**：NumpadPlayHook `_poll` 的 `_last` 防重 bug（连按同一数字第二次不触发）
+- **exe 瘦身 65MB → 44.5MB（-31.5%）**：spec 排除 PIL/pytest/twisted/OpenSSL/cryptography 等误收模块；binaries 过滤移除 Qt6Pdf/Qt6Network/opengl32sw 等无用 Qt DLL（**保留 avcodec 等 ffmpeg 引擎 = 全格式解码关键**）
+- **UI**：设置面板移除「切换」按钮（点角色名即切换）
+- **验证**：py_compile ✅；单声道复制逻辑单测 PASS ✅；各来源同键共存单测 PASS ✅；真实记事本前台 → 输入判定 True ✅；桌面前台 → False ✅；exe 冒烟启动、numpad smart hook started ✅；Qt 支持 webp/gif 格式确认 ✅
+- 涉及：`pet.py`（AUDIO_EXTS/IMAGE_EXTS/role_image/load_role/_adapt_to_device/_apply_capture/_hotkey_slot_audio/foreground_is_input/NumpadPlayHook._poll）、`settings_panel.py`（白名单引用/切换按钮/_on_voice_src_changed 刷新/sync_numpad_checkbox/文案）、`卡丘简易桌宠.spec`（excludes+binaries 过滤）
+
 ### 2026-09-06（用户数据收纳到独立文件夹：桌面不再散落文件；旧版自动迁移；重新打包 exe）
 - **问题**：桌面版 exe 把 `pet_config.json` / `assets` / `pet_debug.log` 直接散在 exe 同目录（桌面），用户觉得乱
 - **修复**（`pet.py`）：
