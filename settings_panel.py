@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QGroupBox, QScrollArea, QFrame, QCheckBox,
-    QComboBox, QLineEdit, QSizePolicy, QSlider,
+    QComboBox, QLineEdit, QSizePolicy, QSlider, QSpinBox,
 )
 
 # 无边框窗口缩放：WM_NCHITTEST 命中测试常量（仅 Windows 生效）
@@ -147,7 +147,6 @@ class SettingsPanel(QWidget):
         # 无边框窗口：去掉系统标题栏（避免出现多余的 系统 最小化/关闭 按钮与自定义 ✕ 混叠）
         self.setWindowFlags(
             Qt.WindowType.Window
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.FramelessWindowHint
         )
         self.setWindowTitle("卡丘简易桌宠 · 设置")
@@ -213,7 +212,7 @@ class SettingsPanel(QWidget):
         cur_row.addWidget(self.lbl_cur_role)
         cur_row.addStretch(1)
         rl.addLayout(cur_row)
-        # 桌宠大小滑块（拖动实时预览）
+        # 桌宠大小：滑块 + 可输入数字（拖动实时预览；直接填数也行）
         size_row = QHBoxLayout()
         size_row.addWidget(QLabel("桌宠大小："))
         self.sld_size = QSlider(Qt.Orientation.Horizontal)
@@ -222,10 +221,13 @@ class SettingsPanel(QWidget):
         self.sld_size.setPageStep(20)
         self.sld_size.valueChanged.connect(self._on_size_changed)
         size_row.addWidget(self.sld_size, 1)
-        self.lbl_size_val = QLabel("200")
-        self.lbl_size_val.setMinimumWidth(34)
-        self.lbl_size_val.setStyleSheet("color:#ffd76e;")
-        size_row.addWidget(self.lbl_size_val)
+        self.spn_size = QSpinBox()
+        self.spn_size.setRange(60, 600)
+        self.spn_size.setSingleStep(10)
+        self.spn_size.setSuffix(" px")
+        self.spn_size.setMinimumWidth(86)
+        self.spn_size.valueChanged.connect(self._on_size_changed)
+        size_row.addWidget(self.spn_size)
         rl.addLayout(size_row)
         # 角色列表 + 侧按钮
         row = QHBoxLayout()
@@ -571,12 +573,14 @@ class SettingsPanel(QWidget):
         pet = self._current_pet()
         if pet is None:
             return
-        # 大小滑块同步
+        # 大小滑块/输入框同步
         sz = int(getattr(pet, '_pet_size', 200) or 200)
         self.sld_size.blockSignals(True)
         self.sld_size.setValue(sz)
         self.sld_size.blockSignals(False)
-        self.lbl_size_val.setText(str(sz))
+        self.spn_size.blockSignals(True)
+        self.spn_size.setValue(sz)
+        self.spn_size.blockSignals(False)
         # 角色
         self._refresh_role_list()
         # 音频
@@ -680,14 +684,22 @@ class SettingsPanel(QWidget):
 
     # ---------------- 角色操作 ----------------
     def _on_size_changed(self, val):
-        """大小滑块：实时调桌宠尺寸"""
+        """大小滑块/输入框：实时调桌宠尺寸；两个控件互相联动（防循环）"""
         pet = self._current_pet()
         if pet is None:
             return
-        self.lbl_size_val.setText(str(val))
+        # 同步另一个控件（blockSignals 防来回触发死循环）
+        s = self.sender()
+        if s is self.sld_size:
+            self.spn_size.blockSignals(True)
+            self.spn_size.setValue(val)
+            self.spn_size.blockSignals(False)
+        elif s is self.spn_size:
+            self.sld_size.blockSignals(True)
+            self.sld_size.setValue(val)
+            self.sld_size.blockSignals(False)
         if hasattr(pet, 'set_pet_size'):
             pet.set_pet_size(val)
-        # 面板本身可无动作（桌宠实时变）
 
     def _on_role_clicked(self, item):
         # 单击=切换

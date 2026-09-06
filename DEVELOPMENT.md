@@ -78,6 +78,15 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（设置面板：大小可填数字 + 面板不再一直置顶）
+- **需求**：①桌宠大小处要能直接填数字；②设置面板（选项框）不要一直置顶
+- **实现**（`settings_panel.py`）：
+  1. 大小行：数值标签换成 **QSpinBox**（60–600 可手填 + 上下箭头微调，后缀 "px"），与滑块双向联动（blockSignals 防循环），`_on_size_changed` 按 sender 同步另一控件并实时调 `pet.set_pet_size`
+  2. 面板窗口去掉 `WindowStaysOnTopHint`（不再永远盖在别的窗口上）；打开时仍 `raise_` + `activateWindow`（点击桌宠打开瞬间正常置前，之后可被其它窗口覆盖）
+  3. `refresh_all` 同步滑块 + spinbox 双值
+- **验证**：py_compile ✅；exe 部署启动正常
+- 涉及：`settings_panel.py`（setWindowFlags/QSpinBox/_on_size_changed/refresh_all）
+
 ### 2026-09-06（音频播放性能优化：解码缓存 / 时长缓存 / 预解码 / 连点去抖）
 - **需求**：提升播放性能（更快播放音频）
 - **实现**（`pet.py`）：
