@@ -78,6 +78,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（拖动不出屏 + 按屏幕位置自动左右翻转）
+- **需求**：①拖动桌宠过头会拖出屏幕外，要限制在屏幕内；②根据窗口在屏幕左右的位置自动翻转（角色面向屏幕中心）
+- **实现**（`pet.py`）：
+  1. `_clamp_to_screen(x, y)`：拖动时把窗口左上角限制在鼠标所在屏幕可用区域（四个方向都 clamp），多屏时用 `QApplication.screenAt` 按窗口中心定位所在屏
+  2. `_facing` 字段（+1 正常 / -1 水平镜像）：新增独立于按压动画的朝向
+  3. `_update_facing()`：窗口中心在屏幕左半边 → 脸朝右(+1)；右半边 → 脸朝左(-1)；拖动中实时更新 + 松开/place_default 后再更新
+  4. `paintEvent`：`painter.scale(_scale_x * _facing, _scale_y)` —— 翻转与按压缩放相乘不冲突；GIF 动图帧走同一 pixmap 也自动镜像；三横按钮/toast 不翻转（独立绘制）
+  5. `mouseMoveEvent` 拖动用 clamp 后的坐标；`place_default` 初始调用 facing（默认右下角 → 脸朝左）
+- **验证**：py_compile ✅；facing/clamp 数学单测（右下角→-1、左侧→+1、左右下拖过头 clamp 正确）✅；exe 部署启动正常（uia=True）
+- 涉及：`pet.py`（_clamp_to_screen/_update_facing/_facing/paintEvent/mouseMoveEvent/mouseReleaseEvent/place_default）
+
 ### 2026-09-06（修复：Qt6Network 误删导致 QtMultimedia 崩溃 + UIA 通用输入判定，DSH/Electron 聊天框不再误触）
 - **问题1（崩溃）**：瘦身时把 Qt6Network.dll 也过滤掉 → Qt6Multimedia.dll 导入表依赖它 → `ImportError: DLL load failed while importing QtMultimedia`
   - **教训**：**不能砍 Qt6Network**（QtMultimedia 在 Windows 依赖它）；Qt6Pdf/opengl32sw 可砍

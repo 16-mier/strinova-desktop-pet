@@ -1163,6 +1163,7 @@ class PetWindow(QWidget):
         self._movie = None          # GIF 动图（角色为动图时非空）
         self._scale_x = 1.0
         self._scale_y = 1.0
+        self._facing = 1.0          # 水平朝向：+1 正常 / -1 镜像（角色面向屏幕中心）
         self.setFixedSize(BASE_SIZE, BASE_SIZE)
 
         # 音频播放（QMediaPlayer 支持 mp3，不阻塞主线程；存 self 防 GC）
@@ -1578,11 +1579,12 @@ class PetWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self.pixmap is not None:
             # 角色图：以底部中心为 origin 做 scaleX/scaleY（只变形不位移）
+            # _facing=-1 时水平镜像（角色面向屏幕中心），与按压动画的 scale 相乘不冲突
             painter.save()
             w = self.width()
             h = self.height()
             painter.translate(w / 2.0, h)
-            painter.scale(self._scale_x, self._scale_y)
+            painter.scale(self._scale_x * self._facing, self._scale_y)
             painter.translate(-w / 2.0, -h)
             painter.drawPixmap(0, 0, w, h, self.pixmap)
             painter.restore()
@@ -1705,10 +1707,45 @@ class PetWindow(QWidget):
             # 点击桌宠本体播放的"点击语音"：不开 auto_ptt（避免在打字/聊天时误注入开麦键打出字母）
             self.play_click_voice()
 
-    # ------------- 窗口交互 -------------
+    def _clamp_to_screen(self, x, y):
+        """把窗口左上角 (x,y) 限制在鼠标所在屏幕的可用区域内（不许拖出屏幕）"""
+        try:
+            scr = QApplication.screenAt(QPoint(x + self.width() // 2, y + self.height() // 2))
+        except Exception:
+            scr = None
+        if scr is None:
+            scr = QApplication.primaryScreen()
+        if scr is None:
+            return x, y
+        g = scr.availableGeometry()
+        x = max(g.left(), min(x, g.right() - self.width() + 1))
+        y = max(g.top(), min(y, g.bottom() - self.height() + 1))
+        return x, y
+
+    def _update_facing(self):
+        """根据窗口中心相对屏幕的位置自动朝向：角色始终面向屏幕中心
+        （窗口在屏幕左半边 → 脸朝右 _facing=+1；右半边 → 脸朝左 _facing=-1）
+        翻转只影响水平镜像，与按压缩放独立相乘，不冲突"""
+        try:
+            scr = QApplication.screenAt(self.frameGeometry().center())
+        except Exception:
+            scr = None
+        if scr is None:
+            scr = QApplication.primaryScreen()
+        if scr is None:
+            return
+        g = scr.availableGeometry()
+        cx = self.frameGeometry().center().x()
+        mid = (g.left() + g.right()) / 2.0
+        want = 1.0 if cx <= mid else -1.0
+        if want != self._facing:
+            self._facing = want
+            self.update()
+
     def place_default(self):
         scr = QApplication.primaryScreen().availableGeometry()
         self.move(scr.right() - self.width() - 24, scr.bottom() - self.height() - 24)
+        self._update_facing()  # 默认右下角 → 右半屏 → 脸朝左
 
     def init_tray(self):
         """创建托盘图标（仅一次，避免图标堆积）。菜单更新走 refresh_tray"""
@@ -2418,7 +2455,13 @@ class PetWindow(QWidget):
             cur = e.globalPosition().toPoint()
             if self._press_pos and (cur - self._press_pos).manhattanLength() > 6:
                 self._moved = True
-                self.move(cur - self._drag_offset)
+                # 拖动位置（限制不出屏幕）
+                nx = cur.x() - self._drag_offset.x()
+                ny = cur.y() - self._drag_offset.y()
+                nx, ny = self._clamp_to_screen(nx, ny)
+                self.move(nx, ny)
+                # 拖动时实时更新朝向（左半屏脸朝右 / 右半屏脸朝左）
+                self._update_facing()
                 # 拖动时同步更新 hover/按钮高亮
                 self._hovering = True
                 self._menu_btn_hover = self._on_menu_btn(e.position().toPoint())
@@ -2441,6 +2484,8 @@ class PetWindow(QWidget):
             else:
                 self._down = False
                 self.press_up(not self._moved)
+                # 松开后按最终位置更新朝向（可能停在屏幕左右半边分界处）
+                self._update_facing()
         e.accept()
 
 
