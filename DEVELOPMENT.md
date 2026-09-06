@@ -78,6 +78,13 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 聊天窗 ✕ 关闭按钮不明显 → 红底白字醒目样式）
+- **需求（用户反馈）**：右键桌宠的聊天窗右上角 ✕ 关闭按钮图标不明显
+- **实现**（`ai_chat.py` ChatWindow 标题行）：`btn_x` 由默认 QSS 深色按钮改为**红底白字**（#c0392b 背景、白色粗体 ✕、圆角 6px、hover 变亮 #e74c3c、按下变深 #a93226），加 PointingHandCursor 与「关闭聊天窗」tooltip，尺寸 30x26
+- **验证**：py_compile ✅；exe 打包部署重启正常（163MB 主进程 + hook 正常）
+- 涉及：`ai_chat.py`（ChatWindow 标题行 btn_x 样式）
+- 备注：**模型刷新已同时修复**（上一轮跨线程信号 bug，E2E 真实配置 67 模型 PASS）；用户需**完全退出旧桌宠再双击新版**，且若旧面板一直开着需先关掉（面板打开时读配置，换 key 后旧面板输入框仍是旧值）
+
 ### 2026-09-07（关键修复：模型「刷不出来」元凶 = 后台线程操作 Qt 控件；改信号跨线程回调）
 - **用户反馈**：换了真 key（user_2W4u...，实测模型 67 个+对话全通）但桌宠里点「刷新模型」仍刷不出来
 - **根因（隐蔽 bug）**：`AiChatManager.fetch_models/test_tts_api/test_connection` 在**后台线程**里直接调用面板回调 `_done`，而回调里操作 QComboBox/QLabel 等 Qt 控件 → **Qt 控件禁止跨线程操作**，UI 更新被 Qt 丢弃/无效 → 模型早已查到但**永远填不进下拉框**
