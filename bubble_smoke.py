@@ -92,15 +92,22 @@ ok.append(('思考定时器在跑', mgr._bubble._think_timer.isActive()))
 text = "你好呀，这是一段用来测试逐字蹦字效果的文字，速度要快一点！"
 mgr._get_bubble().show_text(text)
 app.processEvents()
-ok.append(('蹦字前只显示部分', mgr._bubble._label.text() != text
+ok.append(('蹦字前只显示部分', mgr._bubble._shown() != text
            or mgr._bubble._type_pos < len(text)))
 ok.append(('蹦字定时器在跑', mgr._bubble._type_timer.isActive()))
 
 
 def _check_done():
-    ok.append(('蹦字最终完整', mgr._bubble._label.text() == text))
+    ok.append(('蹦字最终完整', mgr._bubble._shown() == text))
     ok.append(('蹦字定时器停', not mgr._bubble._type_timer.isActive()))
-    ok.append(('字体加粗显眼', 'bold' in mgr._bubble._label.styleSheet()))
+    ok.append(('跟随定时器在跑', mgr._bubble._follow.isActive()))
+    # 测试跟随：移动宠物 → 气泡跟着挪
+    p.frameGeometry = lambda: QRect(700, 500, 200, 200)
+    app.processEvents()
+    import time
+    time.sleep(0.15)
+    app.processEvents()
+    ok.append(('气泡跟随桌宠移动', mgr._bubble.x() != 600 or mgr._bubble.y() != 400))
     # 4. Esc 关闭迷你条
     ev = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Escape,
                    Qt.KeyboardModifier.NoModifier)

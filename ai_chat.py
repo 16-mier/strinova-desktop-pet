@@ -410,24 +410,20 @@ class BubbleWidget(QWidget):
                          | Qt.WindowType.WindowStaysOnTopHint
                          | Qt.WindowType.Tool)
         self._pet = pet
+        # 完全透明背景（不画底色）；文字用粗白字+深色描边保证任何桌面都清晰
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(False)
-        # 主标签：大字号粗体白字，显眼
-        self._label = QLabel(self)
-        self._label.setWordWrap(True)
-        self._label.setStyleSheet(
-            'color:#ffffff; background:transparent; font-size:17px;'
-            'font-weight:bold;')
-        self._label.setMargin(12)
+        self._font = QFont('Microsoft YaHei', 18)
+        self._font.setBold(True)
         # 自动消失
         self._life = QTimer(self)
         self._life.setSingleShot(True)
         self._life.setInterval(_BUBBLE_LIFE_MS)
         self._life.timeout.connect(self.hide)
-        # 跟随桌宠移动
+        # 跟随桌宠移动（更密集轮询，桌宠拖动时文字贴住）
         self._follow = QTimer(self)
-        self._follow.setInterval(_FOLLOW_MS)
+        self._follow.setInterval(50)
         self._follow.timeout.connect(self._reposition)
         # 逐字蹦字定时器
         self._type_timer = QTimer(self)
@@ -441,66 +437,62 @@ class BubbleWidget(QWidget):
         self._think_timer.setInterval(_THINK_MS)
         self._think_timer.timeout.connect(self._think_step)
 
-    # ---------- 思考指示（三点跳动） ----------
+    # ---------- 显示文本（自绘，带描边） ----------
+    def _shown(self):
+        if self._think_timer.isActive():
+            return self._think_text
+        return self._type_text[:self._type_pos]
+
     def show_thinking(self):
         self._stop_type()
-        self._label.setText("")
-        self._resize_to_text("···")
+        self._think = 0
+        self._think_text = '···'
+        self._size_for_full(self._think_text)
         self._reposition()
         self.show()
         self.raise_()
+        self._follow.start()      # 跟随桌宠移动（拖动时贴住）
         self._lift_life()
-        self._think = 0
         self._think_timer.start()
 
     def _think_step(self):
-        self._think = (self._think + 1) % 4
-        dots = '。·'[: max(0, self._think)]
-        self._label.setText(dots)
-        self._resize_to_text(dots)
-        self._reposition()
+        self._think = (self._think + 1) % 3
+        self._think_text = '·' * (self._think + 1)
+        self.update()
 
-    # ---------- 逐字蹦字 ----------
     def show_text(self, text):
         self._stop_thinking()
         self._type_text = text
         self._type_pos = 0
-        self._label.setText("")
-        self._size_for_full(text)   # 按全文定好窗口大小（避免逐字跳动）
+        self._size_for_full(text)   # 按全文定窗口大小（避免逐字跳动）
         self._reposition()
         self.show()
         self.raise_()
+        self._follow.start()        # 跟随桌宠移动（拖动时贴住）
         self._lift_life()
+        self.update()
         self._type_timer.start()
 
     def _type_step(self):
         self._type_pos += 1
-        self._label.setText(self._type_text[:self._type_pos])
+        self.update()
         if self._type_pos >= len(self._type_text):
             self._type_timer.stop()
             self._lift_life()   # 蹦字完成后重新计时自动消失
 
+    # ---------- 尺寸 ----------
     def _size_for_full(self, text):
         """按全文计算窗口尺寸：宽=min(需要宽, MAX)；高按换行行数"""
-        font = QFont('Microsoft YaHei', 17)
-        font.setBold(True)
-        fm = QFontMetrics(font)
-        # 目标宽：需要宽 + 边距，clamp 到 [MIN, MAX]
-        need = fm.horizontalAdvance(text) + 48
+        fm = QFontMetrics(self._font)
+        need = fm.horizontalAdvance(text) + 40
         w = int(min(_BUBBLE_MAX_W, max(_BUBBLE_MIN_W, need)))
-        usable = w - 48
-        # 中文逐字断行：行数 = ceil(文本宽 / 可用宽)
+        usable = w - 40
         tw = fm.horizontalAdvance(text)
         lines = max(1, -(-tw // max(1, usable)))
-        h = lines * fm.height() + 40
+        h = lines * fm.height() + 24
         self.resize(w, int(h))
-        self._label.setFont(font)
-        self._label.setWordWrap(True)
-        # label 撑满内部（减去边距），setGeometry 精确控制
-        self._label.setGeometry(14, 8, w - 28, h - 16)
 
     def _resize_to_text(self, text):
-        # 兼容旧调用：思考动画用（三点短文本直接算）
         self._size_for_full(text)
 
     def _stop_type(self):
@@ -511,20 +503,32 @@ class BubbleWidget(QWidget):
     def _stop_thinking(self):
         self._think_timer.stop()
         self._think = 0
+        self._think_text = ''
 
     def _lift_life(self):
         self._life.start()
 
-    # ---------- 通用 ----------
+    # ---------- 绘制：透明背景 + 白字深描边 ----------
     def paintEvent(self, ev):
-        """画深色半透明圆角底（白字高对比、显眼）"""
+        text = self._shown()
+        if not text:
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor(255, 255, 255, 70), 1))
-        p.setBrush(QColor(18, 20, 28, 235))
-        p.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, 14, 14)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setFont(self._font)
+        rect = self.rect().adjusted(10, 6, -10, -6)
+        # 先画描边（深色粗轮廓，多层加粗 → 白字在任何背景上都清晰显眼）
+        pen = QPen(QColor(10, 12, 18, 235), 4)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                   | Qt.TextFlag.TextWordWrap, text)
+        # 再画白字本体
+        p.setPen(QColor(255, 255, 255, 255))
+        p.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+                   | Qt.TextFlag.TextWordWrap, text)
         p.end()
-        super().paintEvent(ev)
 
     def hideEvent(self, ev):
         self._follow.stop()
@@ -872,17 +876,18 @@ class AiChatManager(QObject):
         return self._bubble
 
     def _bubble_msg(self, text):
-        """错误/提示信息：直接整段显示在气泡（不走逐字，避免长错误慢慢蹦）"""
+        """错误/提示信息：整段直接显示在透明气泡（不走逐字）"""
         b = self._get_bubble()
         b._stop_type()
         b._stop_thinking()
-        b._label.setText(text)
-        b._type_text = ''
-        b._type_pos = 0
+        b._type_text = text
+        b._type_pos = len(text)
         b._size_for_full(text)
         b._reposition()
         b.show()
         b.raise_()
+        b._follow.start()
+        b.update()
         b._lift_life()
 
     def _show_thinking(self):
