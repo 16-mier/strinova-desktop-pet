@@ -78,6 +78,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（气泡改版：透明背景 + 描边白字 + 跟随桌宠移动）
+- **需求（用户反馈）**：①AI 输出文字气泡的背景要透明（不要深色底）；②气泡要随着桌宠移动
+- **实现**（`ai_chat.py` BubbleWidget 重构）：
+  1. **背景全透明**：删除 paintEvent 深色圆角底绘制；窗口保持 WA_TranslucentBackground，只在需要时画文字
+  2. **自绘描边文字保证可读**：QLabel 改为 paintEvent 直接 drawText——先画深色粗描边（4px、圆角连接、深色 235 不透明），再叠纯白字 → 透明背景下任何桌面都清晰显眼（兼顾"透明"与"显眼"）
+  3. **跟随桌宠移动（修复关键 bug）**：`_follow` 定时器原来**从未 start**（show 时只启动了 _life），气泡根本不跟随！现在 `show_text/show_thinking/_bubble_msg` 都显式 `_follow.start()`；间隔 300ms → **50ms**（拖动更跟手）
+  4. 思考动画显示改为 `_think_text` 状态 + `update()` 重绘（QLabel 已移除）
+  5. manager `_bubble_msg` 适配新 API（_type_text 全量 + _type_pos=len + update）
+- **验证**：bubble_smoke 13 项全 PASS（含新增「跟随定时器在跑」「气泡跟随桌宠移动」两项：宠物从 (600,400) 挪到 (700,500) 气泡坐标随之变化）✅；py_compile ✅；exe 部署运行正常（100MB）
+- 涉及：`ai_chat.py`（BubbleWidget 重写/manager._bubble_msg）、`bubble_smoke.py`
+- 备注：桌面 exe 已部署
+
+
 ### 2026-09-07（AI 聊天窗 ✕ 关闭按钮不明显 → 红底白字醒目样式）
 - **需求（用户反馈）**：右键桌宠的聊天窗右上角 ✕ 关闭按钮图标不明显
 - **实现**（`ai_chat.py` ChatWindow 标题行）：`btn_x` 由默认 QSS 深色按钮改为**红底白字**（#c0392b 背景、白色粗体 ✕、圆角 6px、hover 变亮 #e74c3c、按下变深 #a93226），加 PointingHandCursor 与「关闭聊天窗」tooltip，尺寸 30x26
