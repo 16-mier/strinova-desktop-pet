@@ -78,6 +78,22 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（新增「📜 记录」按钮 + 完整对话上下文窗口 ChatHistoryWindow）
+- **需求（用户）**：添加一个按键，能查看当前对话的完整上下文，直接列出一个完整的对话窗口；要求开发得精致
+- **实现**（`ai_chat.py`）：
+  1. **消息时间戳**：`_messages` 追加消息改为 `{'role','content','ts'}`（ts=`time.strftime('%H:%M:%S')`），user 与 assistant 两处 append 统一；`clear_context` 同步清空
+  2. **发送剥离多余字段**：`_on_send` 构造发给 API 的 `msgs` 从 `self._messages[-20:] +=` 改为逐条只取 `role/content`（避免把 ts 等多余字段发给服务商导致潜在 400）
+  3. **ChatHistoryWindow 新类**：无边框圆角深色置顶窗；标题栏（💬 完整对话 + 条数徽章 + 复制全文 + 关闭✕）；主体 QTextBrowser 富文本渲染——系统提示词灰色斜体置顶、用户消息右对齐青绿气泡块、AI 消息左对齐深灰气泡块、每条带时间戳、消息换行自动 <br>、自动滚动到底；底部状态栏（用户N条·AI N条·共N字 + Esc提示）；支持全窗拖动、Esc/✕关闭、复制全文按钮（复制后短暂变「已复制 ✓」）
+  4. **ChatWindow 加按钮**：第一行加「📜 记录」按钮（清理上下文旁），新增 `historyRequested` 信号；窗口宽 380→**470px** 容纳
+  5. **Manager 接线**：`_history` 属性 + `show_history()`（点按钮重建窗口、定位桌宠上方）、`open_chat` 连接信号、`clear_context` 同步刷新历史窗为空、`close_all` 一并关闭
+- **实现**（测试）：`history_smoke.py` 15 项冒烟（记录按钮存在/点击弹窗/计数4条/消息渲染/时间戳/换行/元信息/空会话提示/复制全文/html 转义）
+- **验证**：
+  - `history_smoke.py` 15/15 PASS ✅
+  - `usage_layout_smoke.py` 11 项（尺寸改 470 后）ALL PASS ✅；`gui_smoke.py` 回归过 ✅；py_compile 全过 ✅
+  - 离屏渲染像素校验：历史窗 540×507 / 聊天窗 470×70 均正常渲染，18 种采样色（背景面板/用户青绿气泡/AI 深灰气泡/标题/关闭红钮）✅
+- 涉及：`ai_chat.py`（ChatHistoryWindow 新类/ChatWindow btn_history+historyRequested+W_USAGE 470/Manager _history+show_history+open_chat+clear_context+close_all/_on_send 剥字段+两处 append ts）、`usage_layout_smoke.py`（380→470）、新增 `history_smoke.py`
+- 备注：历史窗只读展示、不编辑；消息条数无上限（`_messages` 本就全量保留，发送 API 才截最近 20 条）；打包部署见下条
+
 ### 2026-09-07（调研：audio.cpp 流式输出可行性——BreezeTTS 2 不支持）
 - **问题（用户）**：audio.cpp 有没有流式输出（用于桌宠朗读边合成边播）
 - **查证（官方文档 + 本机实测）**：
