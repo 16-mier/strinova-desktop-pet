@@ -78,6 +78,18 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（重新打包部署新版 exe：55.2MB，UPX 生效）
+- **需求（用户）**：改完「清理上下文按钮 + 缓存计价 + Kimi-K3 审阅重构」后打包成 exe 部署到桌面
+- **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'`（PyInstaller 6.22.2 + Python 3.14.7）
+- **产物**：`dsh-desktop-pet\dist\卡丘简易桌宠.exe` **55.2MB**（0:24，较上版 64MB 缩小——UPX 压缩生效）
+- **踩坑**：
+  1. UPX 5.2.1 对 `python3.dll` 报 `NotCompressibleException`（不可压缩）→ 管道 exit 1，但**仅该 DLL 失败，其余压缩成功，产物完整**；PyInstaller 对 CFG 保护的 MSVCP/VCRUNTIME 自动跳过 UPX（INFO 非错误）
+  2. **⚠️ workspace 根目录有个旧 `dist\卡丘简易桌宠.exe`（64MB 残留）**——与项目 `dsh-desktop-pet\dist` 同名同 exe，极易误用；本次曾误把旧版部署到桌面，已纠正
+- **部署**：备份旧版为桌面 `卡丘简易桌宠_上一版.exe`（64MB）→ 新版覆盖桌面 `卡丘简易桌宠_最新.exe`（55.2MB）
+- **验证**：桌面新版启动 OK（主进程 + 提权副本 2 进程运行，10s 存活）✅ → 测试后已停止
+- 涉及：`卡丘简易桌宠.spec`（未改）、`dsh-desktop-pet\dist\卡丘简易桌宠.exe`、桌面 `卡丘简易桌宠_最新.exe` / `卡丘简易桌宠_上一版.exe`
+- 备注：**用户需完全退出旧桌宠再双击桌面 `卡丘简易桌宠_最新.exe`**；数据目录仍是桌面 `卡丘简易桌宠数据\`（含 commandcode key/flash 模型/自定义单价，不被覆盖）
+
 ### 2026-09-07（清理上下文按钮左移+改名 / token统计记全输入·缓存命中·输出 / 单价补缓存命中档）
 - **需求（用户）**：①聊天窗「清空」改名「清理上下文」并移到**输入框左边**；②token 消耗不能只记输入/输出，要记全**缓存**（DeepSeek 前缀缓存命中）；③用户实际用模型 = commandcode 的 `deepseek/deepseek-v4-flash-fast`，单价要按 flash 缓存命中档补
 - **实现**（`ai_chat.py`）：
