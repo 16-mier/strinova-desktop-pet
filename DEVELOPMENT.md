@@ -78,6 +78,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（音频播放性能优化：解码缓存 / 时长缓存 / 预解码 / 连点去抖）
+- **需求**：提升播放性能（更快播放音频）
+- **实现**（`pet.py`）：
+  1. **解码缓存**：`_decode_and_prepare` 结果按路径 LRU 缓存（上限 4 条、>5MB 不缓存、访问刷新）——重复播放同一音频（点击语音高频触发）不再每次重读整个文件解码；实测热缓存比冷解码快数千倍
+  2. **时长缓存**：`audio_duration_seconds` 按路径 + mtime 校验缓存（上限 64 条）——PTT 释放线程不再反复读文件头
+  3. **预解码**：启动 1.5s 后后台线程预解码「当前角色点击语音 + 语音来源第 1 条」→ 首次播放免等待
+  4. **连点去抖**：`play_audio` 同一文件 300ms 内重复请求忽略——快速连点不叠音
+  5. **缓存失效**：删除音频/删除角色时同步清理对应解码/时长缓存
+- **验证**：py_compile ✅；LRU/去抖逻辑单测 ✅；缓存基准：冷解码 1.9ms → 热缓存 ~0ms ✅；exe 部署正常（43.99MB）
+- 涉及：`pet.py`（_decode_cache/_cache_decode/_decode_and_prepare/_dur_cache/audio_duration_seconds/play_audio 去抖/_preload_click_audio/remove_audio_file/remove_role 清缓存）
+
 ### 2026-09-06（设置面板加桌宠大小滑块实时预览 + 再次瘦身 46.1→44MB）
 - **需求**：设置面板加一个可调整桌宠大小的滑块，拖动实时看效果
 - **实现**（`pet.py` + `settings_panel.py`）：

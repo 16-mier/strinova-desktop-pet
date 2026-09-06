@@ -425,12 +425,39 @@ def _resolve_device_index(device_name):
     return None
 
 
+# 音频解码缓存（LRU，上限 4 条；大文件不缓存防占内存）。
+# 点击语音/常用音频会反复播放 → 缓存解码结果避免每次重新读整个文件（最大性能提升点）
+_decode_cache = {}          # path → (data, sr)
+_decode_cache_order = []    # 按访问顺序记录 path（用于 LRU 淘汰）
+_DECODE_CACHE_MAX = 4
+_DECODE_CACHE_MAX_BYTES = 5 * 1024 * 1024   # 单文件 >5MB 不缓存
+
+
+def _cache_decode(path, data, sr):
+    try:
+        if os.path.getsize(path) > _DECODE_CACHE_MAX_BYTES:
+            return  # 大文件不缓存
+        if path in _decode_cache:
+            _decode_cache_order.remove(path)
+        _decode_cache[path] = (data, sr)
+        _decode_cache_order.append(path)
+        while len(_decode_cache_order) > _DECODE_CACHE_MAX:
+            old = _decode_cache_order.pop(0)
+            _decode_cache.pop(old, None)
+    except Exception:
+        pass
+
+
 def _decode_and_prepare(path):
-    """读音频 → (float32 二维数组, 采样率)，失败返回 None"""
+    """读音频 → (float32 二维数组, 采样率)，失败返回 None。带解码缓存"""
+    cached = _decode_cache.get(path)
+    if cached is not None:
+        return cached
     try:
         data, sr = _sf.read(path, dtype='float32', always_2d=True)
         if data.size == 0:
             return None
+        _cache_decode(path, data, sr)
         return data, sr
     except Exception:
         return None
@@ -1112,12 +1139,25 @@ def ptt_key_up(vk=VK_V):
     _send_key(vk, keyup=True)
 
 
+# 音频时长缓存（path → (mtime, 秒)）：避免每次播放都重读文件头
+_dur_cache = {}
+
+
 def audio_duration_seconds(path):
-    """获取音频时长（秒）"""
+    """获取音频时长（秒），带 mtime 校验缓存"""
     try:
+        st = os.stat(path)
+        mtime = st.st_mtime_ns
+        c = _dur_cache.get(path)
+        if c and c[0] == mtime:
+            return c[1]
         import soundfile as _sfx
         info = _sfx.info(path)
-        return info.duration
+        d = float(info.duration)
+        if len(_dur_cache) > 64:
+            _dur_cache.clear()
+        _dur_cache[path] = (mtime, d)
+        return d
     except Exception:
         return 0.0
 
@@ -1238,6 +1278,37 @@ class PetWindow(QWidget):
         # 若配置开启小键盘智能播放 → 启动钩子
         if self._numpad_enabled:
             QTimer.singleShot(350, self._numpad_hook_start)
+        # 空闲预解码：启动 1.5s 后在后台线程解码「当前点击语音」，让首次点击秒播
+        QTimer.singleShot(1500, self._preload_click_audio)
+
+    def _preload_click_audio(self):
+        """后台预解码当前最可能播放的音频（当前角色的点击语音）→ 首次播放免等待"""
+        def work():
+            try:
+                d = role_dir(self.role)
+                if not os.path.isdir(d):
+                    return
+                if self.role == "白墨":
+                    f = os.path.join(d, "sprint.mp3")
+                elif self.role == "星绘":
+                    f = os.path.join(d, self.greeting_for_now() + ".mp3")
+                else:
+                    click = os.path.join(d, "click.mp3")
+                    f = click if os.path.exists(click) else os.path.join(d, "morning.mp3")
+                if os.path.exists(f):
+                    # 已有缓存则跳过
+                    if f not in _decode_cache:
+                        _decode_and_prepare(f)
+                # 顺带预解码当前语音来源第 1 条（快捷键最常按）
+                try:
+                    audios = self.current_audio_list()
+                    if audios and audios[0][1] not in _decode_cache:
+                        _decode_and_prepare(audios[0][1])
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def _register_hotkeys_now(self):
         """窗口已显示后调用：注册所有热键（小键盘1-9默认 + 自定义键）；可重试直到成功。
@@ -1552,6 +1623,13 @@ class PetWindow(QWidget):
         """
         if not os.path.exists(path):
             return
+        # 同文件 300ms 去抖：快速连点/连按同一语音时不叠加重播（避免嘈杂）
+        now_m = time.monotonic()
+        if path == getattr(self, '_last_play_path', None) and \
+                now_m - getattr(self, '_last_play_time', 0.0) < 0.3:
+            return
+        self._last_play_path = path
+        self._last_play_time = now_m
         ptt_on = self._auto_ptt if ptt_override is None else bool(ptt_override)
         targets = self._target_devices()
         if targets and HAS_SD:
@@ -2214,6 +2292,13 @@ class PetWindow(QWidget):
                 os.remove(path)
         except Exception as e:
             return False, "删除失败: %s" % e
+        # 清理解码/时长缓存
+        _decode_cache.pop(path, None)
+        try:
+            _decode_cache_order.remove(path)
+        except ValueError:
+            pass
+        _dur_cache.pop(path, None)
         # 清理该音频绑定（若有）
         self.unbind_audio_key(akey)
         return True, ""
@@ -2229,6 +2314,16 @@ class PetWindow(QWidget):
                 shutil.rmtree(d)
         except Exception as e:
             return False, "删除失败: %s" % e
+        # 清理该角色路径下的解码/时长缓存
+        rpre = d + os.sep
+        try:
+            for p in [k for k in _decode_cache if k.startswith(rpre)]:
+                _decode_cache.pop(p, None)
+            _decode_cache_order[:] = [k for k in _decode_cache_order if k not in _decode_cache]
+            for p in [k for k in _dur_cache if k.startswith(rpre)]:
+                _dur_cache.pop(p, None)
+        except Exception:
+            pass
         # 清理该角色所有音频绑定（前缀 "<role>/"）
         changed = False
         for k in list(self._audio_hotkeys.keys()):
