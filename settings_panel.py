@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QGroupBox, QScrollArea, QFrame, QCheckBox,
-    QComboBox, QLineEdit, QSizePolicy,
+    QComboBox, QLineEdit, QSizePolicy, QSlider,
 )
 
 # 无边框窗口缩放：WM_NCHITTEST 命中测试常量（仅 Windows 生效）
@@ -213,6 +213,20 @@ class SettingsPanel(QWidget):
         cur_row.addWidget(self.lbl_cur_role)
         cur_row.addStretch(1)
         rl.addLayout(cur_row)
+        # 桌宠大小滑块（拖动实时预览）
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("桌宠大小："))
+        self.sld_size = QSlider(Qt.Orientation.Horizontal)
+        self.sld_size.setRange(60, 600)
+        self.sld_size.setSingleStep(10)
+        self.sld_size.setPageStep(20)
+        self.sld_size.valueChanged.connect(self._on_size_changed)
+        size_row.addWidget(self.sld_size, 1)
+        self.lbl_size_val = QLabel("200")
+        self.lbl_size_val.setMinimumWidth(34)
+        self.lbl_size_val.setStyleSheet("color:#ffd76e;")
+        size_row.addWidget(self.lbl_size_val)
+        rl.addLayout(size_row)
         # 角色列表 + 侧按钮
         row = QHBoxLayout()
         self.role_list = QListWidget()
@@ -557,6 +571,12 @@ class SettingsPanel(QWidget):
         pet = self._current_pet()
         if pet is None:
             return
+        # 大小滑块同步
+        sz = int(getattr(pet, '_pet_size', 200) or 200)
+        self.sld_size.blockSignals(True)
+        self.sld_size.setValue(sz)
+        self.sld_size.blockSignals(False)
+        self.lbl_size_val.setText(str(sz))
         # 角色
         self._refresh_role_list()
         # 音频
@@ -659,6 +679,16 @@ class SettingsPanel(QWidget):
             cmb.blockSignals(False)
 
     # ---------------- 角色操作 ----------------
+    def _on_size_changed(self, val):
+        """大小滑块：实时调桌宠尺寸"""
+        pet = self._current_pet()
+        if pet is None:
+            return
+        self.lbl_size_val.setText(str(val))
+        if hasattr(pet, 'set_pet_size'):
+            pet.set_pet_size(val)
+        # 面板本身可无动作（桌宠实时变）
+
     def _on_role_clicked(self, item):
         # 单击=切换
         role = item.text().replace("  ←当前", "")

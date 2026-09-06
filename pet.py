@@ -1164,7 +1164,8 @@ class PetWindow(QWidget):
         self._scale_x = 1.0
         self._scale_y = 1.0
         self._facing = 1.0          # 水平朝向：+1 正常 / -1 镜像（角色面向屏幕中心）
-        self.setFixedSize(BASE_SIZE, BASE_SIZE)
+        self._pet_size = int(_cfg.get('pet_size', BASE_SIZE)) or BASE_SIZE  # 桌宠尺寸（滑块可调，持久化）
+        self.setFixedSize(self._pet_size, self._pet_size)
 
         # 音频播放（QMediaPlayer 支持 mp3，不阻塞主线程；存 self 防 GC）
         # 打包环境下 QtMultimedia 插件可能缺失导致崩溃 → try/except 保证窗口/图片先显示
@@ -1425,7 +1426,8 @@ class PetWindow(QWidget):
             pm = self._movie.currentPixmap()
             if pm.isNull():
                 return
-            pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+            sz = self._pet_size
+            pm = pm.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
                            Qt.TransformationMode.SmoothTransformation)
             self.pixmap = pm
             self.update()
@@ -1438,10 +1440,12 @@ class PetWindow(QWidget):
         self.role = role
         self._stop_movie()
         self.pixmap = None
+        self._src_pixmap = None   # 未缩放的原图（静态角色）；供实时调尺寸用
         rdir = role_dir(role)
         found = role_image(rdir)  # (路径, kind: 'png'|'gif')，支持 image.png / 动图 gif.webp / 各图片格式
         if found:
             img, kind = found
+            sz = self._pet_size
             if kind == 'gif':
                 # 动图：QMovie 播放（gif/webp），首帧立即显示
                 try:
@@ -1454,17 +1458,20 @@ class PetWindow(QWidget):
                         if pm.isNull():
                             mv.jumpToFrame(0)
                             pm = mv.currentPixmap()
+                        self._src_pixmap = pm if not pm.isNull() else None
                     else:
                         pm = mv.currentPixmap()
+                        self._src_pixmap = pm if not pm.isNull() else None
                     if not pm.isNull():
-                        pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                        pm = pm.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
                                        Qt.TransformationMode.SmoothTransformation)
                         self.pixmap = pm
                     elif mv.isValid() and mv.frameCount() <= 1:
                         # 静态 webp/gif：当静态图处理
                         pm2 = QPixmap(img)
                         if not pm2.isNull():
-                            pm2 = pm2.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                            self._src_pixmap = pm2
+                            pm2 = pm2.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation)
                             self.pixmap = pm2
                 except Exception as e:
@@ -1472,19 +1479,57 @@ class PetWindow(QWidget):
                     self._movie = None
                     pm2 = QPixmap(img)
                     if not pm2.isNull():
-                        pm2 = pm2.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                        self._src_pixmap = pm2
+                        pm2 = pm2.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
                                          Qt.TransformationMode.SmoothTransformation)
                         self.pixmap = pm2
             else:
                 pm = QPixmap(img)
                 if not pm.isNull():
-                    pm = pm.scaled(BASE_SIZE, BASE_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                    self._src_pixmap = pm
+                    pm = pm.scaled(sz, sz, Qt.AspectRatioMode.KeepAspectRatio,
                                    Qt.TransformationMode.SmoothTransformation)
                     self.pixmap = pm
         self._scale_x = 1.0
         self._scale_y = 1.0
-        self.setFixedSize(BASE_SIZE, BASE_SIZE)
+        self.setFixedSize(self._pet_size, self._pet_size)
         self.update()
+
+    def set_pet_size(self, size):
+        """调整桌宠大小（px）：实时改窗口 + 重载当前角色图到新尺寸，并持久化"""
+        size = int(size)
+        if size < 60:
+            size = 60
+        if size > 600:
+            size = 600
+        if size == self._pet_size:
+            return
+        self._pet_size = size
+        # 保持窗口中心不变（缩放时居中微调，避免跳走）
+        try:
+            geo = self.frameGeometry()
+            cx = geo.center().x()
+            cy = geo.center().y()
+        except Exception:
+            cx = cy = None
+        self.setFixedSize(size, size)
+        if cx is not None:
+            self.move(cx - size // 2, cy - size // 2)
+        # 静态角色：从原图直接重缩放（丝滑）；动图角色：重建 QMovie（帧尺寸跟随）
+        if self._movie is None and self._src_pixmap is not None and not self._src_pixmap.isNull():
+            pm = self._src_pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+            self.pixmap = pm
+            self.update()
+        else:
+            role = self.role
+            self.load_role(role)
+        # 持久化
+        cfg = load_config()
+        cfg['pet_size'] = size
+        save_config(cfg)
+        self._clamp_to_screen(self.x(), self.y())
+        self._update_facing()
 
     # ------------- 播放 -------------
     def _target_devices(self):

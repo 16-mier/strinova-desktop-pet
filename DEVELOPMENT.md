@@ -78,6 +78,18 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（设置面板加桌宠大小滑块实时预览 + 再次瘦身 46.1→44MB）
+- **需求**：设置面板加一个可调整桌宠大小的滑块，拖动实时看效果
+- **实现**（`pet.py` + `settings_panel.py`）：
+  1. `pet.py`：`_pet_size` 实例变量（默认 BASE_SIZE=200，读取配置 `pet_size` 持久化）；构造 `setFixedSize(_pet_size)`；`load_role`/`_set_role_frame` 全部改用 `_pet_size` 缩放
+  2. `set_pet_size(size)`：60–600px 范围；保持窗口中心不变；静态角色从 `_src_pixmap` 原图直接重缩放（丝滑），动图角色重建 QMovie；持久化到配置；clamp 屏幕内 + 更新朝向
+  3. `load_role` 新增保存未缩放原图 `_src_pixmap`
+  4. `settings_panel.py`：形象角色模块加「桌宠大小」QSlider（60-600，步进10）+ 数值标签；`_on_size_changed` 实时调 `pet.set_pet_size`；`refresh_all` 同步滑块
+- **进一步瘦身 46.1 → 44.0MB**：spec `_BIN_KEEP` 追加 `Qt6Svg`/`libcrypto-3`/`libssl-3`（Qt TLS 运行时才按需加载，桌宠纯本地播放永不触达；Qt6Svg 界面无 SVG 用）；实测 exe 启动正常 + 本地 mp3 播放正常（不依赖 openssl）
+- **素材**：星绘 image.png 水平翻转（用户反馈表情反了）——桌面数据版 + 项目源码版都翻，透明保留
+- **验证**：py_compile ✅；隔离 exe 启动 QtMultimedia 正常 ✅；本地 mp3 播放 OK ✅；大小范围逻辑单测 ✅；exe 46.1→43.99MB
+- 涉及：`pet.py`（_pet_size/_src_pixmap/set_pet_size/load_role/_set_role_frame）、`settings_panel.py`（QSlider/_on_size_changed/refresh_all）、`卡丘简易桌宠.spec`（_BIN_KEEP）、`assets/characters/星绘/image.png`
+
 ### 2026-09-06（左右翻转加平滑动画：cos 曲线压扁转身，不再生硬）
 - **需求**：上一版左右翻转是瞬间镜像，太生硬 → 要平滑"转身"动画
 - **实现**（`pet.py`）：
