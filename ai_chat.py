@@ -456,7 +456,14 @@ class ChatWindow(QWidget):
         title.addWidget(t)
         title.addStretch(1)
         btn_x = QPushButton("✕")
-        btn_x.setFixedSize(28, 24)
+        btn_x.setFixedSize(30, 26)
+        btn_x.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_x.setToolTip("关闭聊天窗")
+        btn_x.setStyleSheet(
+            "QPushButton{background:#c0392b; border:none; border-radius:6px;"
+            " color:white; font-size:15px; font-weight:bold;}"
+            "QPushButton:hover{background:#e74c3c;}"
+            "QPushButton:pressed{background:#a93226;}")
         btn_x.clicked.connect(self.hide)
         title.addWidget(btn_x)
         root.addLayout(title)
