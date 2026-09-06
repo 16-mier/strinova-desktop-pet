@@ -878,13 +878,211 @@ class CloseXButton(QPushButton):
         p.end()
 
 
+# ============================================================================
+# 完整对话上下文窗口（点「聊天记录」弹出：列出当前会话全部消息）
+# ============================================================================
+class ChatHistoryWindow(QWidget):
+    """精致深色窗口，用富文本气泡列出完整对话上下文。
+    用户消息右对齐(青绿)、AI 消息左对齐(白)、系统提示灰色斜体置顶；
+    每条带时间戳；支持滚动 / 复制全文 / 拖动 / Esc 关闭。"""
+
+    # 配色
+    _BG = "#171a23"
+    _PANEL = "#1f2430"
+    _USER_BG = "#1e3a5f"
+    _USER_BORDER = "#3b6ea5"
+    _AI_BG = "#2a2e3d"
+    _AI_BORDER = "#46506b"
+    _SYS_COLOR = "#8a93b0"
+    _TITLE = "#e7eaf4"
+    _SUB = "#7d87a6"
+    _TIME = "#6f7898"
+
+    def __init__(self, pet):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        self._pet = pet
+        self.setWindowTitle("完整对话")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._drag_offset = None
+        self.setStyleSheet("ChatHistoryWindow{background:%s; }"
+                           % self._BG)
+        self._build_ui()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
+
+        # 顶部标题栏
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.lbl_title = QLabel("💬 完整对话")
+        self.lbl_title.setStyleSheet(
+            "color:%s; font-size:15px; font-weight:bold;" % self._TITLE)
+        head.addWidget(self.lbl_title)
+        self.lbl_count = QLabel("")
+        self.lbl_count.setStyleSheet(
+            "color:%s; font-size:11px; background:%s; border-radius:8px;"
+            " padding:2px 8px;" % (self._SUB, self._PANEL))
+        head.addWidget(self.lbl_count)
+        head.addStretch(1)
+        self.btn_copy = QPushButton("复制全文")
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.setStyleSheet(
+            "QPushButton{background:%s; border:none; border-radius:7px;"
+            " color:%s; font-size:12px; padding:4px 10px;}"
+            "QPushButton:hover{background:#3a4257;}"
+            "QPushButton:pressed{background:#2e3444;}"
+            % (self._PANEL, self._SUB))
+        self.btn_copy.clicked.connect(self._copy_all)
+        head.addWidget(self.btn_copy)
+        self.btn_x = CloseXButton(self)
+        head.addWidget(self.btn_x)
+        self.btn_x.clicked.connect(self.hide)
+        root.addLayout(head)
+
+        # 主体：富文本记录区
+        self.browser = QTextBrowser()
+        self.browser.setOpenExternalLinks(False)
+        self.browser.setStyleSheet(
+            "QTextBrowser{background:%s; border:none; color:%s;"
+            " font-size:13px;}" % (self._PANEL, self._TITLE))
+        self.browser.setFixedSize(520, 440)
+        root.addWidget(self.browser, 1)
+
+        # 底部状态栏
+        foot = QHBoxLayout()
+        self.lbl_meta = QLabel("")
+        self.lbl_meta.setStyleSheet("color:%s; font-size:11px;" % self._SUB)
+        foot.addWidget(self.lbl_meta)
+        foot.addStretch(1)
+        self.lbl_esc = QLabel("Esc 关闭 · 可拖动")
+        self.lbl_esc.setStyleSheet("color:%s; font-size:10px;" % self._SUB)
+        foot.addWidget(self.lbl_esc)
+        root.addLayout(foot)
+
+    # ---------- 供外部调用 ----------
+    def show_history(self, messages, system_prompt=''):
+        """根据完整消息列表重建并显示窗口。
+        messages: [{'role','content','ts'}, ...]（不含 system）"""
+        esc = html.escape
+        parts = []
+
+        # 系统提示词置顶（灰斜体小字）
+        if system_prompt:
+            parts.append(
+                '<div style="color:%s; font-style:italic; font-size:11px;'
+                ' padding:4px 10px; margin:2px 6px 8px 6px;'
+                ' background:%s; border-radius:8px;">'
+                '▍系统提示词：%s</div>'
+                % (self._SYS_COLOR, self._PANEL, esc(system_prompt)))
+
+        if not messages:
+            parts.append(
+                '<div style="color:%s; text-align:center; padding:20px;">'
+                '暂无对话内容——去和桌宠聊几句吧 ✨</div>' % self._SUB)
+
+        for m in messages:
+            role = m.get('role')
+            content = (m.get('content') or '').rstrip()
+            ts = m.get('ts') or '—'
+            if role == 'user':
+                # 用户消息：右对齐、青绿块；系统操作（清理等）则居中灰字
+                if self._is_cmd(content):
+                    parts.append(
+                        '<div style="text-align:center; color:%s; font-size:11px;'
+                        ' margin:3px 0;">⚙ %s · %s</div>'
+                        % (self._SYS_COLOR, esc(content), ts))
+                    continue
+                parts.append(
+                    '<div style="text-align:right; margin:3px 2px;">'
+                    '<span style="background:%s; border:1px solid %s;'
+                    ' border-radius:10px; padding:6px 10px; color:#dcecff;'
+                    ' display:inline-block; max-width:72%%; text-align:left;">'
+                    '<span style="color:%s; font-size:10px;">%s</span><br>%s'
+                    '</span><br><span style="color:%s; font-size:9px;">%s · %s</span>'
+                    '</div>'
+                    % (self._USER_BG, self._USER_BORDER, self._SUB, esc('你'),
+                       content.replace('\n', '<br>'),
+                       self._TIME, esc('你'), ts))
+            else:
+                # AI / assistant 消息：左对齐、白块
+                ai_name = getattr(self._pet, 'role', None) or 'AI'
+                parts.append(
+                    '<div style="text-align:left; margin:3px 2px;">'
+                    '<span style="background:%s; border:1px solid %s;'
+                    ' border-radius:10px; padding:6px 10px; color:%s;'
+                    ' display:inline-block; max-width:72%%; text-align:left;">'
+                    '<span style="color:%s; font-size:10px;">%s</span><br>%s'
+                    '</span><br><span style="color:%s; font-size:9px;">%s · %s</span>'
+                    '</div>'
+                    % (self._AI_BG, self._AI_BORDER, self._TITLE, self._SUB,
+                       esc(ai_name), content.replace('\n', '<br>'),
+                       self._TIME, ai_name, ts))
+        total = sum(len(m.get('content') or '') for m in messages)
+        self.browser.setHtml(
+            '<html><body style="font-family:Segoe UI,Microsoft YaHei;'
+            ' padding:6px;">%s</body></html>' % ''.join(parts))
+        self.lbl_count.setText("%d 条" % len(messages))
+        self.lbl_meta.setText(
+            "用户 %d 条 · AI %d 条 · 共 %d 字"
+            % (sum(1 for m in messages if m.get('role') == 'user'),
+               sum(1 for m in messages if m.get('role') != 'user'), total))
+        self.browser.verticalScrollBar().setValue(
+            self.browser.verticalScrollBar().maximum())
+
+    @staticmethod
+    def _is_cmd(content):
+        """判断该条是否是「系统操作」消息（清理上下文等命令回显）"""
+        c = (content or '').strip()
+        return c in ('clear_context', '清理上下文', '清空上下文') or \
+            c.startswith('已清理上下文') or c.startswith('已清空上下文')
+
+    def _copy_all(self):
+        from PyQt6.QtWidgets import QApplication as _A
+        _A.clipboard().setText(self.browser.toPlainText())
+        self.btn_copy.setText("已复制 ✓")
+        QTimer.singleShot(1200,
+                          lambda: self.btn_copy.setText("复制全文"))
+
+    # ---------- 窗口拖动 ----------
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = e.globalPosition().toPoint() - \
+                self.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_offset is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_offset = None
+        super().mouseReleaseEvent(e)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.hide()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+
 class ChatWindow(QWidget):
     """迷你打字条：一小段可输入的行（历史改为桌宠旁气泡展示，不再用大窗）"""
     sendRequested = pyqtSignal(str)
     clearRequested = pyqtSignal()
+    historyRequested = pyqtSignal()
 
     # 窗口尺寸常量：带用量行高 / 隐藏用量行高
-    W_USAGE = 380
+    W_USAGE = 470
     H_USAGE = 70
     H_NO_USAGE = 46
 
@@ -922,6 +1120,15 @@ class ChatWindow(QWidget):
             "QPushButton:hover{background:#7a4d4d;}")
         self.btn_clear.clicked.connect(self._clear)
         row1.addWidget(self.btn_clear)
+        self.btn_history = QPushButton("📜 记录", self)
+        self.btn_history.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_history.setToolTip("查看完整对话上下文（本会话全部消息）")
+        self.btn_history.setStyleSheet(
+            "QPushButton{background:#3a4458; border:none; border-radius:9px;"
+            " color:#cfd8ee; font-size:12px; padding:5px 9px;}"
+            "QPushButton:hover{background:#4a5670;}")
+        self.btn_history.clicked.connect(self._open_history)
+        row1.addWidget(self.btn_history)
         self.input = QLineEdit(self)
         self.input.setPlaceholderText("问桌宠…（回车发送，Esc 关闭）")
         self.input.setStyleSheet(
@@ -1050,6 +1257,10 @@ class ChatWindow(QWidget):
         """清理上下文按钮"""
         self.clearRequested.emit()
 
+    def _open_history(self):
+        """查看完整对话按钮"""
+        self.historyRequested.emit()
+
     def set_usage(self, text):
         """在输入条下方显示单次 token 消耗与金额；空串则隐藏该行"""
         if not hasattr(self, 'lbl_usage'):
@@ -1077,6 +1288,7 @@ class AiChatManager(QObject):
         super().__init__()
         self._pet = pet
         self._chat = None
+        self._history = None
         self._bubble = None
         self._messages = []           # 多轮上下文（不含 system，由发送时补）
         self._ai_worker = None
@@ -1371,6 +1583,7 @@ class AiChatManager(QObject):
             self._chat = ChatWindow(self._pet)
             self._chat.sendRequested.connect(self._on_send)
             self._chat.clearRequested.connect(self.clear_context)
+            self._chat.historyRequested.connect(self.show_history)
             # 打开时把已保存的用量显示同步上去
             try:
                 self._sync_chat_usage()
@@ -1382,6 +1595,29 @@ class AiChatManager(QObject):
         self._chat.activateWindow()
         self._chat.input.setFocus()
 
+    def show_history(self):
+        """点「📜 记录」：弹出完整对话上下文窗口"""
+        if self._history is None:
+            self._history = ChatHistoryWindow(self._pet)
+        self._history.show_history(self._messages, self.system_prompt())
+        # 显示在桌宠附近（聊天气泡同侧，略偏上）
+        try:
+            pr = self._pet.frameGeometry()
+            scr = QApplication.screenAt(pr.center()) or QApplication.primaryScreen()
+            geo = scr.availableGeometry() if scr is not None else None
+            x = pr.right() - self._history.width()
+            if geo is not None:
+                x = max(geo.left(), min(x, geo.right() - self._history.width()))
+            y = pr.top() - self._history.height() - 6
+            if geo is not None and y < geo.top():
+                y = pr.bottom() + 10
+            self._history.move(x, y)
+        except Exception:
+            pass
+        self._history.show()
+        self._history.raise_()
+        self._history.activateWindow()
+
     def clear_context(self):
         """清理多轮上下文（开始全新对话）"""
         self._messages = []
@@ -1389,6 +1625,12 @@ class AiChatManager(QObject):
         if self._chat is not None:
             try:
                 self._chat.set_usage('')
+            except Exception:
+                pass
+        # 历史窗同步为空
+        if self._history is not None and self._history.isVisible():
+            try:
+                self._history.show_history([], self.system_prompt())
             except Exception:
                 pass
         try:
@@ -1401,6 +1643,8 @@ class AiChatManager(QObject):
             self._bubble.hide()
         if self._chat is not None:
             self._chat.hide()
+        if self._history is not None:
+            self._history.hide()
         if self._player is not None:
             try:
                 self._player.stop()
@@ -1440,9 +1684,13 @@ class AiChatManager(QObject):
         self._show_thinking()
         # 多轮上下文：system（可自定义）+ 最近 20 条
         msgs = [{'role': 'system', 'content': self.system_prompt()}]
-        msgs += self._messages[-20:]
+        # 发送给 API 的消息只保留 role/content（服务商对多余字段可能报错）
+        for m in self._messages[-20:]:
+            msgs.append({'role': m.get('role'), 'content': m.get('content')})
         msgs.append({'role': 'user', 'content': text})
-        self._messages.append({'role': 'user', 'content': text})
+        # 本地完整上下文：带时间戳（供「完整对话」窗口展示）
+        self._messages.append({'role': 'user', 'content': text,
+                               'ts': time.strftime('%H:%M:%S')})
         self._ai_worker = AIWorker(base_url, api_key, model, msgs, self)
         self._ai_worker.done.connect(self._on_ai_done)
         self._ai_worker.finished.connect(self._ai_worker.deleteLater)
@@ -1494,7 +1742,8 @@ class AiChatManager(QObject):
             self._show_usage(usage)
         except Exception:
             pass
-        self._messages.append({'role': 'assistant', 'content': reply})
+        self._messages.append({'role': 'assistant', 'content': reply,
+                               'ts': time.strftime('%H:%M:%S')})
         # TTS 依附 AI：若朗读开，则气泡文字等音频就绪后随音频同步蹦字（同始同终）
         if self.tts_enabled() and self.enabled():
             self._seq += 1

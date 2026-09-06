@@ -69,7 +69,7 @@ w0 = ly.itemAt(0).widget()
 ck("第一行第一个控件是 btn_clear(清理上下文)", w0 is cw.btn_clear)
 
 # 尺寸
-ck("初始宽度=380", cw.width() == 380)
+ck("初始宽度=470", cw.width() == 470)
 cw.set_usage("本次 ↑100[缓存50] ↓20 共120 tok ≈ $0.000010")
 ck("有用量时高度=70", cw.height() == 70)
 cw.set_usage("")
