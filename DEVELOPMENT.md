@@ -78,6 +78,15 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（调研：audio.cpp 流式输出可行性——BreezeTTS 2 不支持）
+- **问题（用户）**：audio.cpp 有没有流式输出（用于桌宠朗读边合成边播）
+- **查证（官方文档 + 本机实测）**：
+  1. **框架支持**：server README 载明 streaming-capable TTS 模型（config `mode:"streaming"`）的 `POST /v1/audio/speech` 支持 `"stream_format":"sse"`（SSE 事件 `speech.audio.delta` base64 PCM → `speech.audio.done` → `[DONE]`）或 `"stream_format":"audio"`+`response_format:"pcm"`（chunked 裸 PCM）；另有 `/v1/audio/speech/live` 双工端点
+  2. **BreezeTTS 2 不支持**：tts.md 中 VoxCPM1/2、OmniVoice(伪流式)、Confucius4、NeuTTS 有流式说明，breeze_tts 无；本机 `bin-cuda\model_specs\breeze_tts.json` 的 `runtime.tags` 仅 `["gguf"]`、无 `"stream"` 标签（所有真流式模型均带 stream 标签）
+  3. **本机实测**（server 跑于 8080，breeze-tts-clone，mode=offline）：普通 POST 200 返回整段 `audio/wav` ✅；`stream:true` → **HTTP 500** ❌；`/v1/audio/speech/stream` → **404** ❌；`mode:"streaming"`/`response_format:"pcm"` 参数均被忽略仍返回整段 wav
+- **结论**：桌宠「合成完整段播放 + 文字随音频同步蹦字」是 BreezeTTS 2 下的正确实现，无需改动；若将来要真流式朗读，可评估换 `voxcpm2`（中英双语+克隆+SSE PCM 流），需重新克隆星绘音色并改桌宠 TTS 播放器为分块投喂
+- 备注：此条与 2026-09-07「BreezeTTS2 不支持真流式」的记录一致并补充了 server API 层面的实证
+
 ### 2026-09-07（重新打包部署新版 exe：55.2MB，UPX 生效）
 - **需求（用户）**：改完「清理上下文按钮 + 缓存计价 + Kimi-K3 审阅重构」后打包成 exe 部署到桌面
 - **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'`（PyInstaller 6.22.2 + Python 3.14.7）
