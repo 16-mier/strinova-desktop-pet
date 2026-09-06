@@ -78,6 +78,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（左右翻转加平滑动画：cos 曲线压扁转身，不再生硬）
+- **需求**：上一版左右翻转是瞬间镜像，太生硬 → 要平滑"转身"动画
+- **实现**（`pet.py`）：
+  1. 新增翻转动画状态：`_flip_from/_flip_to/_flip_timer/_flip_frames/_flip_idx/_flip_scale_x`
+  2. `_update_facing()`：朝向变化时不再瞬间翻转，改启动 `_start_flip_anim()`（18 帧 @16ms ≈ 0.29s）
+  3. `_flip_step()`：水平 scale = `from * cos(πt)` —— t=0→±1、t=0.5→**0（角色水平压成一线）**、t=1→∓1（转身完成）；正反方向同一条公式
+  4. `paintEvent`：水平方向乘 `_flip_scale_x`（静止=±1，动画中平滑过零），与按压 scale 相乘不冲突；三横按钮/toast 不翻转
+  5. 动画中断（快速来回拖）→ `_start_flip_anim` stop 旧 timer 重启，from 取当前朝向 ±1 保证曲线不跳变
+- **验证**：py_compile ✅；曲线单测（1→0.707→0→-0.707→-1 正反平滑过零）✅；exe 部署启动正常（uia=True）
+- 涉及：`pet.py`（构造翻转状态/_update_facing/_start_flip_anim/_flip_step/paintEvent）
+
 ### 2026-09-06（拖动不出屏 + 按屏幕位置自动左右翻转）
 - **需求**：①拖动桌宠过头会拖出屏幕外，要限制在屏幕内；②根据窗口在屏幕左右的位置自动翻转（角色面向屏幕中心）
 - **实现**（`pet.py`）：

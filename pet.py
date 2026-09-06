@@ -1208,6 +1208,15 @@ class PetWindow(QWidget):
         self._anim_to_y = 1.0
         self._anim_ease = "down"
 
+        # 翻转动画状态：_flip_from→_flip_to 平滑过渡（+1 原朝向 → -1 镜像）
+        # 用水平 scale = cos(π·t) 从 1 缩到 0 再反向展开到 -1，像"转身"
+        self._flip_from = 1.0
+        self._flip_to = 1.0
+        self._flip_timer = None
+        self._flip_frames = 0
+        self._flip_idx = 0
+        self._flip_scale_x = 1.0    # 当前水平翻转 scale（绘制用；无动画时=朝向）
+
         self.load_role(self.role)
         self.init_tray()
         self.place_default()
@@ -1579,12 +1588,13 @@ class PetWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self.pixmap is not None:
             # 角色图：以底部中心为 origin 做 scaleX/scaleY（只变形不位移）
-            # _facing=-1 时水平镜像（角色面向屏幕中心），与按压动画的 scale 相乘不冲突
+            # 水平方向乘 _flip_scale_x：静止 = ±1（面向屏幕中心），翻转动画中
+            # 平滑过 0（角色压成一线再展开 = 转身），与按压动画的 scale 相乘不冲突
             painter.save()
             w = self.width()
             h = self.height()
             painter.translate(w / 2.0, h)
-            painter.scale(self._scale_x * self._facing, self._scale_y)
+            painter.scale(self._scale_x * self._flip_scale_x, self._scale_y)
             painter.translate(-w / 2.0, -h)
             painter.drawPixmap(0, 0, w, h, self.pixmap)
             painter.restore()
@@ -1723,9 +1733,9 @@ class PetWindow(QWidget):
         return x, y
 
     def _update_facing(self):
-        """根据窗口中心相对屏幕的位置自动朝向：角色始终面向屏幕中心
-        （窗口在屏幕左半边 → 脸朝右 _facing=+1；右半边 → 脸朝左 _facing=-1）
-        翻转只影响水平镜像，与按压缩放独立相乘，不冲突"""
+        """根据窗口中心相对屏幕的位置决定朝向并播放水平翻转动画：
+        （窗口在屏幕左半边 → 脸朝右 +1；右半边 → 脸朝左 -1）
+        翻转用水平 scale 平滑过渡（cos 曲线：1→0→-1 = 转身），不瞬间生硬镜像"""
         try:
             scr = QApplication.screenAt(self.frameGeometry().center())
         except Exception:
@@ -1739,8 +1749,38 @@ class PetWindow(QWidget):
         mid = (g.left() + g.right()) / 2.0
         want = 1.0 if cx <= mid else -1.0
         if want != self._facing:
-            self._facing = want
-            self.update()
+            # 翻转动画：from 恒为 ±1（当前朝向），曲线 ±1→0→∓1 平滑转身
+            self._flip_from = self._facing
+            self._flip_to = want
+            self._facing = want  # 目标朝向先记下；绘制用动画进度
+            self._start_flip_anim()
+
+    def _start_flip_anim(self):
+        """启动水平翻转动画（约 0.3s：先水平压窄到一线，再反向展开 = 转身）"""
+        if self._flip_timer is not None:
+            self._flip_timer.stop()
+        self._flip_frames = 18  # 18 帧 ≈ 0.29s @ 16ms
+        self._flip_idx = 0
+        self._flip_scale_x = self._flip_from  # 当前水平 scale
+        self._flip_timer = QTimer(self)
+        self._flip_timer.setInterval(16)
+        self._flip_timer.timeout.connect(self._flip_step)
+        self._flip_timer.start()
+
+    def _flip_step(self):
+        """翻转动画逐帧：水平 scale = from * cos(πt)
+        t=0 → from；t=0.5 → 0（角色水平压成一线）；t=1 → -from = to（转身完成）
+        from/to 恒为 ±1 且相反，一条公式全程平滑"""
+        self._flip_idx += 1
+        t = self._flip_idx / float(self._flip_frames)
+        if t >= 1.0:
+            self._flip_scale_x = self._flip_to
+            if self._flip_timer is not None:
+                self._flip_timer.stop()
+                self._flip_timer = None
+        else:
+            self._flip_scale_x = self._flip_from * math.cos(math.pi * t)
+        self.update()
 
     def place_default(self):
         scr = QApplication.primaryScreen().availableGeometry()
