@@ -30,6 +30,20 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
+# UIAutomation（可选）：用于智能输入判定兜底 —— 识别 Chromium/Electron 应用
+# （DSH Desktop、新版 QQ/微信等）内部输入框。这些窗口 hwndCaret/焦点类名都拿不到，
+# 但 UIA 能查焦点元素是否支持 TextPattern → 通用识别"正在输入"。缺失时自动降级。
+try:
+    import comtypes
+    import comtypes.client as _cc
+    from comtypes.gen import UIAutomationClient as _UIA
+    comtypes.CoInitialize()
+    _UIA_AUTO = _cc.CreateObject(_UIA.CUIAutomation, interface=_UIA.IUIAutomation)
+    HAS_UIA = True
+except Exception as _uia_e:
+    _UIA_AUTO = None
+    HAS_UIA = False
+
 # sounddevice / soundfile：绑定麦克风直出用（可选，缺失则回退 QMediaPlayer）
 try:
     import sounddevice as _sd
@@ -800,12 +814,55 @@ _TEXT_INPUT_EXE = {
     "outlook", "foxmail", "thunderbird",
 }
 
+# UIA 兜底判定缓存：{前台hwnd: (时间戳, 结果)} —— UIA 查询约 10-50ms，做 1 秒缓存
+_uia_cache = {}
+_UIA_TEXT_PATTERNS = (10014, 10002, 10005)  # TextPattern / ValuePattern / KeyboardFocus?（用前两个）
+_UIA_CACHE_TTL = 1.0
+
+
+def _uia_focus_is_text(hwnd):
+    """用 UIA 查前台窗口的焦点元素是否可输入（支持 TextPattern/ValuePattern）。
+    返回 True=正在输入；False/异常=查不到。带 1 秒缓存"""
+    if not HAS_UIA or not hwnd:
+        return False
+    now = time.monotonic()
+    c = _uia_cache.get(hwnd)
+    if c and now - c[0] < _UIA_CACHE_TTL:
+        return c[1]
+    try:
+        fe = _UIA_AUTO.GetFocusedElement()
+        if fe is None:
+            _uia_cache[hwnd] = (now, False)
+            return False
+        # 确认焦点元素属于目标窗口（否则是其它窗口抢了焦点）
+        try:
+            win = fe.GetCurrentPattern(10033)  # WindowPattern → 宿主窗口
+            win_hwnd = int(win.CurrentWindowHandle or 0)
+        except Exception:
+            win_hwnd = 0
+        # 简化：直接看控件类型/模式；若拿不到宿主，靠缓存+前台判定兜底
+        ct = int(fe.CurrentControlType)
+        if ct in (50004, 50030, 50032, 50033):  # Edit / Document / Hyperlink? / Pane（可编辑富文本身兼）
+            _uia_cache[hwnd] = (now, True)
+            return True
+        for pid_ in (10014, 10002):  # TextPattern / ValuePattern
+            try:
+                fe.GetCurrentPattern(pid_)
+                _uia_cache[hwnd] = (now, True)
+                return True
+            except Exception:
+                continue
+        _uia_cache[hwnd] = (now, False)
+        return False
+    except Exception:
+        return False
+
 
 def foreground_is_input():
     """检测前台窗口当前是否处于"文本输入"状态（应放行小键盘数字）。
     判据（任一命中即放行）：
-    ① 前台线程有 caret（光标在输入框内，最精确）
-    ② 前台线程当前焦点控件是已知输入控件（GetFocus，覆盖现代应用/网页输入框）
+    ① 前台线程 GUI 信息 hwndFocus/hwndCaret 指向输入控件（最精确：正在输入）
+    ② 前台线程焦点控件类名是已知输入控件（覆盖现代应用/网页输入框）
     ③ 前台窗口类名是已知输入控件
     ④ 前台进程名是常见"可输入应用"（浏览器/聊天/编辑器等，聚焦多半在输入）
     失败时保守返回 True（放行输入，避免误吞打字）"""
@@ -817,25 +874,21 @@ def foreground_is_input():
         tid = _user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
         if not tid:
             return True
-        # ① caret 检测（最精确：正在文本输入）
+        # ① 前台线程 GUI 信息（hwndFocus / hwndCaret）
         gti = GUITHREADINFO()
         gti.cbSize = ctypes.sizeof(GUITHREADINFO)
-        if _user32.GetGUIThreadInfo(tid, ctypes.byref(gti)) and gti.hwndCaret:
-            return True  # 有闪烁光标 → 正在输入
-        # ② 线程焦点控件：前台窗口线程当前获得焦点的子控件（跨线程 AttachThreadInput
-        #    拿不到，但同线程焦点控件 GetFocus 即可；前台应用自己线程的焦点）
-        #    Windows 10+ 前台窗口的焦点控件类名是 Edit/RichEdit 等 → 判定输入
-        try:
-            fcs = ctypes.create_unicode_buffer(256)
-            _user32.GetFocus.restype = wintypes.HWND
-            focus_hwnd = _user32.GetFocus()
-            if focus_hwnd and _user32.GetClassNameW(focus_hwnd, fcs, 256):
+        if _user32.GetGUIThreadInfo(tid, ctypes.byref(gti)):
+            if gti.hwndCaret:
+                return True  # 有闪烁光标 → 正在输入
+            # ② 焦点控件类名（GetGUIThreadInfo 的 hwndFocus 属于前台线程，
+            #    比 GetFocus() 可靠——GetFocus 只返回调用线程的焦点）
+            if gti.hwndFocus:
+                fcs = ctypes.create_unicode_buffer(256)
+                _user32.GetClassNameW(gti.hwndFocus, fcs, 256)
                 fcn = fcs.value.lower()
                 for pat in _TEXT_INPUT_CN:
                     if pat in fcn:
                         return True
-        except Exception:
-            pass
         # ③ 窗口类名
         cls = ctypes.create_unicode_buffer(256)
         _user32.GetClassNameW(fg, cls, 256)
@@ -864,6 +917,15 @@ def foreground_is_input():
             for exe in _TEXT_INPUT_EXE:
                 if pname and exe in pname:
                     return True
+        # ⑤ UIA 兜底：Chromium/Electron 系应用（DSH桌面/新版QQ微信等）窗口类名
+        #    是 Chrome_WidgetWin_1，内部输入框拿不到 caret/焦点类名，但 UIA 能查
+        #    焦点元素是否支持 TextPattern —— 通用识别“正在输入”，不再依赖进程白名单
+        if 'chrome_widgetwin' in cn or 'chromium' in cn:
+            try:
+                if _uia_focus_is_text(fg):
+                    return True
+            except Exception:
+                pass
         return False
     except Exception:
         return True  # 出错保守放行
@@ -2147,7 +2209,7 @@ class PetWindow(QWidget):
         try:
             self._numpad_hook = NumpadPlayHook(self._hotkey_slot_audio)
             self._numpad_hook.start()
-            _dbg('numpad smart hook started')
+            _dbg('numpad smart hook started (uia=%s)' % HAS_UIA)
         except Exception as e:
             print('numpad hook start fail:', e)
             self._numpad_hook = None

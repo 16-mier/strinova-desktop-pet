@@ -78,6 +78,23 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（修复：Qt6Network 误删导致 QtMultimedia 崩溃 + UIA 通用输入判定，DSH/Electron 聊天框不再误触）
+- **问题1（崩溃）**：瘦身时把 Qt6Network.dll 也过滤掉 → Qt6Multimedia.dll 导入表依赖它 → `ImportError: DLL load failed while importing QtMultimedia`
+  - **教训**：**不能砍 Qt6Network**（QtMultimedia 在 Windows 依赖它）；Qt6Pdf/opengl32sw 可砍
+  - 修复：spec 的 excludes 与 `_BIN_KEEP` 移除 Qt6Network；exe 45.7MB 恢复可用
+- **问题2（DSH/Electron 聊天框不识别）**：DSH Desktop（Electron/Chromium 内核）进程名不在白名单、窗口类 `Chrome_WidgetWin_1` 不设 hwndCaret、焦点控件类名拿不到 → 传统判据全失效 → 打字按小键盘仍吞键播语音
+  - Chromium 系窗口特征：顶层类 `Chrome_WidgetWin_1`、hwndFocus=顶层自己、hwndCaret=None（自绘光标）
+- **修复（UIA 通用判定）**：
+  1. 引入 **UI Automation（comtypes + UIAutomationClient）**：查前台焦点元素是否支持 TextPattern/ValuePattern/是 Edit/Document 控件 → **通用识别"正在输入"**，不依赖进程白名单（QQ/微信/DSH/浏览器全兼容）
+  2. `_uia_focus_is_text(hwnd)`：带 1 秒缓存（UIA 查询 ~10-50ms，缓存后近零开销）；控件类型 50004(Edit)/50030(Document)/50032/50033 + 模式 10014/10002
+  3. `foreground_is_input()` 增加判据⑤：仅当窗口类名属 Chromium 系（chrome_widgetwin）且传统判据失败才调 UIA（减少开销）
+  4. 判据②改用 `gti.hwndFocus`（前台线程真实焦点）替代无效的 `GetFocus()`（它只返回调用线程焦点）
+  5. spec hiddenimports 收集 comtypes + comtypes.gen.UIAutomationClient（PyInstaller 打包验证 uia=True ✅）
+  6. hook 启动日志带 `(uia=True/False)` 便于诊断
+- **验证**：隔离 exe 启动日志 `numpad smart hook started (uia=True)` ✅；DSH 窗口 UIA 判定可输入=True（24ms）✅；Edge/记事本前台判定正确 ✅；配置 BOM 测试假象排除（PowerShell Set-Content UTF8 带 BOM 会致 json.load 失败，正式 exe json.dump 无 BOM 无此问题）
+- 涉及：`pet.py`（comtypes 引入/_uia_focus_is_text/_uia_cache/foreground_is_input 判据②⑤/hook 日志）、`卡丘简易桌宠.spec`（Qt6Network 放行 + comtypes hiddenimports）
+- exe：45.7MB → 46.1MB（+comtypes）
+
 ### 2026-09-06（增强兼容与瘦身：更多音频/图片格式、单声道修复、各来源独立快捷键、智能输入判定加强、exe 65→44.5MB）
 - **更多素材格式**：
   1. `AUDIO_EXTS` 扩到 16 种：原 mp3/wav/ogg/m4a/flac + **aac/opus/wma/aiff/aif/ape/amr/webm/m4b/caf/mp2**（soundfile 能解的走低延迟直出，其余自动回退 QtMultimedia 内置 ffmpeg 解码 → 全格式覆盖）
