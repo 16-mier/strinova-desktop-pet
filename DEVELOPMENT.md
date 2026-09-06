@@ -111,9 +111,25 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   7. **健壮性**：`BubbleWidget._reposition` 对 pet 无几何容错（防 None frameGeometry）
 - **验证**：py_compile ✅；面板冒烟：AI 折叠展开 visible True↔False、AI 关时勾 TTS 被拒、AI 开→TTS 可勾、AI 关→TTS 自动取消+置灰 ✅；模型检测（填假 key → 401 提示不崩）✅；改稿链路（无 key 静默/坏 key 改写失败回退原文→云端合成播放真实走通）✅；ai_selftest 全过（云端合成 17KB/本地 wav/代理探测）✅
 - 涉及：`ai_chat.py`（_list_models/fetch_models/system_prompt/set_system_prompt/tts_prompt/set_tts_prompt/_rewrite_for_tts/_on_rewrite_done/_speak_text/_pending_tts_seq/_on_tts_done/BubbleWidget 容错）、`settings_panel.py`（AI 折叠头+ai_box 置顶/cmb_ai_model/ed_ai_sysprompt/ed_ai_ttsprompt/handlers 重构/refresh_all 依赖联动）
-- 备注：**尚未重新打包 exe**（源码已自测，待用户确认后打包部署）
+- 备注：桌面 exe 已打包部署（63b3dd0）；用户需在面板填**服务器地址/API 密钥/模型**并保存后可用（key 明文存 pet_config.json 的 ai 段）
 
 
+### 2026-09-07（TTS 引擎扩充：自定义 API 语音服务 + 桌宠大小滑块禁滚轮 + 模型检测失败分类提示 + commandcode 403 排查）
+- **需求（用户反馈）**：
+  1. 桌宠大小滑块悬停滚动滚轮会误改大小 → 去掉滚轮调值
+  2. TTS 也需要**自己填 API 服务地址**（不要只能浏览器那套 edge-tts）；支持自定义 OpenAI 兼容语音
+  3. 填了 commandcode.ai 的地址+key，模型没识别出来 → 排查
+- **实现**（`ai_chat.py` + `settings_panel.py`）：
+  1. **NoWheelSlider**：新增禁滚轮滑块类（wheelEvent 忽略），桌宠大小滑块 `sld_size` 改用它
+  2. **TTS 自定义 API 引擎** `TTS_MODE_API='api'`：面板朗读引擎下拉加「自定义 API 语音服务」，选它显示 服务地址/API 密钥/语音模型/音色 表单 +「测试语音」按钮（OpenAI 兼容 POST `{base}/audio/speech`，body `{model,input,voice,response_format:mp3}`，Bearer key，响应 mp3 落盘走播放器）；配置存 `ai.tts_api_base/tts_api_key/tts_api_model/tts_api_voice`；`_norm_base_url` 规整地址（容忍末尾带 /chat/completions 或 /models 的填法）；api 模式失败自动回退本地 SAPI
+  3. **云端音色行**包成 `cloud_voice_box`、API 表单 `api_tts_box`，按引擎显隐联动（`_sync_tts_mode_ui`）
+  4. **模型检测失败分类提示**：403→服务商未开放模型列表可手动输入；401→密钥无效；404→地址不对；其余原样
+- **403 排查结论（用户 commandcode 服务）**：地址 `https://api.commandcode.ai/provider/v1/chat/completions` 是官方正确端点（文档确认）；直连/代理都 403 → 非网络问题，是该服务要求 **Studio 生成的专用 key + Provider 及以上套餐**（官网：除 Go 套餐外 GOAT/Pro/Max/Team/Provider 才有 API 权限，Provider 计划以上才有 API）；让用户在 commandcode.ai Studio → API Keys 里重新生成 key 并确认套餐
+- **验证**：py_compile ✅；panel_smoke3（13 项：引擎含 API 项/表单显隐联动/配置保存/缺字段提示/滑块滚轮被忽略）✅；本地 HTTP 桩验证 `_api_speech_synth` 请求体（model/input/voice/response_format + Bearer）✅；panel_smoke2 + ai_selftest 回归全过 ✅
+- 涉及：`ai_chat.py`（TTS_MODE_API/_api_speech_synth/TTSWorker api 分支/set_tts_api/test_tts_api/_norm_base_url 应用到 models）、`settings_panel.py`（NoWheelSlider/api_tts_box 表单/cloud_voice_box/_sync_tts_mode_ui/_ai_apply_tts_api/_ai_test_tts_api/refresh_all/403 提示）
+- 备注：桌面 exe 已重新打包部署；**用户需在 commandcode Studio 生成专用 key 或改用支持 OpenAI 语音的服务**
+
+### 2026-09-06（设置面板：大小可填数字 + 面板不再一直置顶）
 - **需求**：①桌宠大小处要能直接填数字；②设置面板（选项框）不要一直置顶
 - **实现**（`settings_panel.py`）：
   1. 大小行：数值标签换成 **QSpinBox**（60–600 可手填 + 上下箭头微调，后缀 "px"），与滑块双向联动（blockSignals 防循环），`_on_size_changed` 按 sender 同步另一控件并实时调 `pet.set_pet_size`

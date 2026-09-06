@@ -83,6 +83,13 @@ class NoWheelComboBox(QComboBox):
         event.ignore()
 
 
+class NoWheelSlider(QSlider):
+    """禁用滚轮调值的滑块（鼠标悬停滚动滚轮不改变数值，防误触）"""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class CloseButton(QPushButton):
     """自绘 ✕ 关闭按钮（画两条交叉线，任何系统都显示为标准 X，不受字体影响）"""
 
@@ -281,10 +288,57 @@ class SettingsPanel(QWidget):
         r_tts.addWidget(QLabel("朗读引擎："))
         self.cmb_ai_tts_mode = NoWheelComboBox()
         self.cmb_ai_tts_mode.addItem("云端（微软语音，需联网）", 'cloud')
+        self.cmb_ai_tts_mode.addItem("自定义 API 语音服务", 'api')
         self.cmb_ai_tts_mode.addItem("本地（Windows 自带语音，离线）", 'local')
         self.cmb_ai_tts_mode.currentIndexChanged.connect(self._ai_apply_tts_mode)
         r_tts.addWidget(self.cmb_ai_tts_mode, 1)
         ail.addLayout(r_tts)
+        # 自定义 TTS API 服务（OpenAI 兼容 /audio/speech）—— 选「自定义 API 语音服务」才显示
+        self.api_tts_box = QWidget()
+        atl = QVBoxLayout(self.api_tts_box)
+        atl.setContentsMargins(0, 0, 0, 0)
+        atl.setSpacing(6)
+        r_api_base = QHBoxLayout()
+        r_api_base.addWidget(QLabel("服务地址："))
+        self.ed_tts_api_base = QLineEdit()
+        self.ed_tts_api_base.setPlaceholderText("https://api.siliconflow.cn/v1 或其它 OpenAI 兼容语音服务")
+        self.ed_tts_api_base.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_base.addWidget(self.ed_tts_api_base, 1)
+        atl.addLayout(r_api_base)
+        r_api_key = QHBoxLayout()
+        r_api_key.addWidget(QLabel("API 密钥："))
+        self.ed_tts_api_key = QLineEdit()
+        self.ed_tts_api_key.setPlaceholderText("sk-…")
+        self.ed_tts_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ed_tts_api_key.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_key.addWidget(self.ed_tts_api_key, 1)
+        atl.addLayout(r_api_key)
+        r_api_model = QHBoxLayout()
+        r_api_model.addWidget(QLabel("语音模型："))
+        self.ed_tts_api_model = QLineEdit()
+        self.ed_tts_api_model.setPlaceholderText("如 tts-1 / FunAudioLLM/CosyVoice2-0.5B 等，按服务商填")
+        self.ed_tts_api_model.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_model.addWidget(self.ed_tts_api_model, 1)
+        atl.addLayout(r_api_model)
+        r_api_voice = QHBoxLayout()
+        r_api_voice.addWidget(QLabel("音色："))
+        self.ed_tts_api_voice = QLineEdit()
+        self.ed_tts_api_voice.setPlaceholderText("如 alloy / 中文女声名，按服务商填")
+        self.ed_tts_api_voice.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_voice.addWidget(self.ed_tts_api_voice, 1)
+        btn_tts_api_test = QPushButton("测试语音")
+        btn_tts_api_test.clicked.connect(self._ai_test_tts_api)
+        r_api_voice.addWidget(btn_tts_api_test)
+        atl.addLayout(r_api_voice)
+        self.lbl_tts_api_status = QLabel("")
+        self.lbl_tts_api_status.setStyleSheet("color:#7a8099; font-size:11px;")
+        atl.addWidget(self.lbl_tts_api_status)
+        ail.addWidget(self.api_tts_box)
+        self.api_tts_box.setVisible(False)
+        # 云端音色（仅 cloud 模式显示；包成容器便于显隐）
+        self.cloud_voice_box = QWidget()
+        cvl = QVBoxLayout(self.cloud_voice_box)
+        cvl.setContentsMargins(0, 0, 0, 0)
         r_voice = QHBoxLayout()
         r_voice.addWidget(QLabel("云端音色："))
         self.cmb_ai_voice = NoWheelComboBox()
@@ -297,7 +351,8 @@ class SettingsPanel(QWidget):
             self.cmb_ai_voice.addItem(_n, _v)
         self.cmb_ai_voice.currentIndexChanged.connect(self._ai_apply_voice)
         r_voice.addWidget(self.cmb_ai_voice, 1)
-        ail.addLayout(r_voice)
+        cvl.addLayout(r_voice)
+        ail.addWidget(self.cloud_voice_box)
         # TTS 提示词：朗读前让 AI 改写（依附 AI，AI 关则朗读也关）
         lbl_ttp = QLabel("TTS 提示词（朗读前让 AI 把回答改成适合朗读的稿子）：")
         lbl_ttp.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:4px;")
@@ -328,7 +383,7 @@ class SettingsPanel(QWidget):
         # 桌宠大小：滑块 + 可输入数字（拖动实时预览；直接填数也行）
         size_row = QHBoxLayout()
         size_row.addWidget(QLabel("桌宠大小："))
-        self.sld_size = QSlider(Qt.Orientation.Horizontal)
+        self.sld_size = NoWheelSlider(Qt.Orientation.Horizontal)
         self.sld_size.setRange(60, 600)
         self.sld_size.setSingleStep(10)
         self.sld_size.setPageStep(20)
@@ -748,6 +803,20 @@ class SettingsPanel(QWidget):
         self.cmb_ai_tts_mode.blockSignals(True)
         self.cmb_ai_tts_mode.setCurrentIndex(mi if mi >= 0 else 0)
         self.cmb_ai_tts_mode.blockSignals(False)
+        self._sync_tts_mode_ui(mode)
+        # 自定义 TTS API 服务字段
+        self.ed_tts_api_base.blockSignals(True)
+        self.ed_tts_api_base.setText(ai.get('tts_api_base', ''))
+        self.ed_tts_api_base.blockSignals(False)
+        self.ed_tts_api_key.blockSignals(True)
+        self.ed_tts_api_key.setText(ai.get('tts_api_key', ''))
+        self.ed_tts_api_key.blockSignals(False)
+        self.ed_tts_api_model.blockSignals(True)
+        self.ed_tts_api_model.setText(ai.get('tts_api_model', ''))
+        self.ed_tts_api_model.blockSignals(False)
+        self.ed_tts_api_voice.blockSignals(True)
+        self.ed_tts_api_voice.setText(ai.get('tts_api_voice', ''))
+        self.ed_tts_api_voice.blockSignals(False)
         voice = ai.get('tts_voice', '') or ''
         vi = self.cmb_ai_voice.findData(voice)
         self.cmb_ai_voice.blockSignals(True)
@@ -1249,6 +1318,51 @@ class SettingsPanel(QWidget):
         pet = self._current_pet()
         if pet is not None and hasattr(pet, 'ai'):
             pet.ai.set_tts_mode(mode)
+        # 按引擎显隐配置行：cloud → 云端音色；api → 自定义 API 服务表单；local → 都隐藏
+        self._sync_tts_mode_ui(mode)
+
+    def _sync_tts_mode_ui(self, mode):
+        """按朗读引擎显隐相关输入区"""
+        if hasattr(self, 'cloud_voice_box'):
+            self.cloud_voice_box.setVisible(mode == 'cloud')
+        if hasattr(self, 'api_tts_box'):
+            self.api_tts_box.setVisible(mode == 'api')
+
+    def _ai_apply_tts_api(self):
+        """保存自定义 TTS API 服务配置"""
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        pet.ai.set_tts_api(
+            self.ed_tts_api_base.text().strip(),
+            self.ed_tts_api_key.text().strip(),
+            self.ed_tts_api_model.text().strip(),
+            self.ed_tts_api_voice.text().strip())
+
+    def _ai_test_tts_api(self):
+        """测试自定义 TTS API：合成一小段验证配置正确性"""
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        base = self.ed_tts_api_base.text().strip()
+        key = self.ed_tts_api_key.text().strip()
+        model = self.ed_tts_api_model.text().strip()
+        voice = self.ed_tts_api_voice.text().strip() or 'alloy'
+        if not base or not key or not model:
+            self.lbl_tts_api_status.setText("⚠ 请先填服务地址 / 密钥 / 模型")
+            self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
+            return
+        self.lbl_tts_api_status.setText("测试中…")
+        self.lbl_tts_api_status.setStyleSheet("color:#8fa3c8; font-size:11px;")
+
+        def _done(ok, msg):
+            if ok:
+                self.lbl_tts_api_status.setText("✅ 语音合成成功（服务配置可用）")
+                self.lbl_tts_api_status.setStyleSheet("color:#7ae0a3; font-size:11px;")
+            else:
+                self.lbl_tts_api_status.setText("❌ %s" % str(msg)[:90])
+                self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
+        pet.ai.test_tts_api(base, key, model, voice, _done)
 
     def _ai_apply_voice(self, idx):
         voice = self.cmb_ai_voice.itemData(idx) or ''
@@ -1297,7 +1411,16 @@ class SettingsPanel(QWidget):
 
         def _done(ok, result):
             if not ok:
-                self._ai_status("模型检测失败：%s" % str(result)[:80], "#e06c75")
+                msg = str(result)
+                if '403' in msg or 'Forbidden' in msg:
+                    tip = "服务商未开放模型列表接口（403），可直接在下方手动输入模型名"
+                elif '401' in msg or 'Unauthorized' in msg:
+                    tip = "API 密钥无效或没有权限（401），请检查密钥"
+                elif '404' in msg or 'Not Found' in msg:
+                    tip = "服务地址不对（404），请检查是否填了完整 /v1 地址"
+                else:
+                    tip = msg[:80]
+                self._ai_status("模型检测失败：%s" % tip, "#e06c75")
                 return
             models = result
             if not models:
