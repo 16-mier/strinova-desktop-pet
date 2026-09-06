@@ -6,6 +6,7 @@ import os
 import sys
 import shutil
 import ctypes
+import threading
 from ctypes import wintypes
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QFileSystemWatcher, QRectF, QPoint
@@ -181,6 +182,12 @@ class SettingsPanel(QWidget):
         self._connect_ai_signals()
         self.refresh_all()
         self._watch_current_dir()
+        # 定时探测本地 TTS 服务状态（UI 上的启动/停止按钮状态实时反映）
+        self._svc_timer = QTimer(self)
+        self._svc_timer.setInterval(5000)
+        self._svc_timer.timeout.connect(self._refresh_tts_svc_state)
+        self._svc_timer.start()
+        self._refresh_tts_svc_state()
 
     def _connect_ai_signals(self):
         """连接 AI 管理器的跨线程信号（后台线程 emit → 主线程槽执行，安全操作 UI）。
@@ -233,8 +240,15 @@ class SettingsPanel(QWidget):
 
     def _on_tts_api_tested(self, ok, msg):
         if ok:
-            self.lbl_tts_api_status.setText("✅ 语音合成成功（服务配置可用）")
+            self.lbl_tts_api_status.setText("✅ 合成成功，正在播放试听…")
             self.lbl_tts_api_status.setStyleSheet("color:#7ae0a3; font-size:11px;")
+            # msg = 合成好的音频路径 → 播放让用户听到
+            pet = self._current_pet()
+            if pet is not None and hasattr(pet, 'ai') and str(msg):
+                try:
+                    pet.ai.play_audio_file(str(msg))
+                except Exception:
+                    pass
         else:
             self.lbl_tts_api_status.setText("❌ %s" % str(msg)[:90])
             self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
@@ -342,11 +356,61 @@ class SettingsPanel(QWidget):
         self.ed_ai_sysprompt.setFixedHeight(70)
         self.ed_ai_sysprompt.textChanged.connect(self._ai_apply_sysprompt)
         ail.addWidget(self.ed_ai_sysprompt)
+        # 单价（每百万 token，美元）——用于聊天条显示 token 消耗金额
+        # 三档：进（缓存未命中）/ 缓存（缓存命中，DeepSeek 前缀缓存约98%折扣）/ 出
+        pr_row = QHBoxLayout()
+        pr_row.setSpacing(3)
+        pr_row.addWidget(QLabel("单价($/M)：进"))
+        self.ed_ai_price_in = QLineEdit()
+        self.ed_ai_price_in.setPlaceholderText("0.14")
+        self.ed_ai_price_in.setFixedWidth(62)
+        self.ed_ai_price_in.editingFinished.connect(self._ai_apply_prices)
+        pr_row.addWidget(self.ed_ai_price_in)
+        pr_row.addWidget(QLabel("缓存"))
+        self.ed_ai_price_cache = QLineEdit()
+        self.ed_ai_price_cache.setPlaceholderText("0.0028")
+        self.ed_ai_price_cache.setFixedWidth(70)
+        self.ed_ai_price_cache.editingFinished.connect(self._ai_apply_prices)
+        pr_row.addWidget(self.ed_ai_price_cache)
+        pr_row.addWidget(QLabel("出"))
+        self.ed_ai_price_out = QLineEdit()
+        self.ed_ai_price_out.setPlaceholderText("0.28")
+        self.ed_ai_price_out.setFixedWidth(62)
+        self.ed_ai_price_out.editingFinished.connect(self._ai_apply_prices)
+        pr_row.addWidget(self.ed_ai_price_out)
+        pr_row.addStretch(1)
+        ail.addLayout(pr_row)
+        # 提示：单价会在「选模型」时按官方价自动带出（用户已改则不覆盖）
+        lbl_price_hint = QLabel("选模型时若单价仍是默认值会自动按官方价带入（deepseek-v4-flash 0.14/0.28/缓存0.0028）；改后不再联动。")
+        lbl_price_hint.setStyleSheet("color:#6f7899; font-size:10px; margin-top:0px;")
+        ail.addWidget(lbl_price_hint)
         # TTS（朗读，依附 AI：AI 对话开启才能开启朗读）
         self.chk_ai_tts = QCheckBox("朗读 AI 回复（TTS）")
         self.chk_ai_tts.toggled.connect(self._ai_apply_tts)
         ail.addWidget(self.chk_ai_tts)
-        lbl_tts_api = QLabel("朗读服务（填你的语音 API 地址；本地跑的语音服务填 http://127.0.0.1:端口）：")
+        # 本地 TTS 服务控制（启动/停止 + 状态灯）
+        svc_row = QHBoxLayout()
+        self.lbl_tts_svc_state = QLabel("本地 TTS 服务：检测中…")
+        self.lbl_tts_svc_state.setStyleSheet("color:#8fa3c8; font-size:11px;")
+        svc_row.addWidget(self.lbl_tts_svc_state, 1)
+        self.btn_tts_svc_start = QPushButton("▶ 启动服务")
+        self.btn_tts_svc_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tts_svc_start.setStyleSheet(
+            "QPushButton{background:#2a5c3a; border:none; border-radius:7px; color:#fff;"
+            " padding:4px 10px; font-size:12px;}"
+            "QPushButton:hover{background:#35754a;}")
+        self.btn_tts_svc_start.clicked.connect(self._ai_tts_svc_start)
+        svc_row.addWidget(self.btn_tts_svc_start)
+        self.btn_tts_svc_stop = QPushButton("■ 停止服务")
+        self.btn_tts_svc_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tts_svc_stop.setStyleSheet(
+            "QPushButton{background:#5c2a2a; border:none; border-radius:7px; color:#fff;"
+            " padding:4px 10px; font-size:12px;}"
+            "QPushButton:hover{background:#754a35;}")
+        self.btn_tts_svc_stop.clicked.connect(self._ai_tts_svc_stop)
+        svc_row.addWidget(self.btn_tts_svc_stop)
+        ail.addLayout(svc_row)
+        lbl_tts_api = QLabel("朗读服务（填语音 API 地址；本地 TTS 用 http://127.0.0.1:8080/v1）：")
         lbl_tts_api.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:2px;")
         ail.addWidget(lbl_tts_api)
         # 自定义 TTS API 服务（OpenAI 兼容 /audio/speech）——唯一朗读引擎
@@ -386,10 +450,52 @@ class SettingsPanel(QWidget):
         btn_tts_api_test.clicked.connect(self._ai_test_tts_api)
         r_api_voice.addWidget(btn_tts_api_test)
         atl.addLayout(r_api_voice)
+        # 克隆音色三件套（本地 TTS 引擎如 audio.cpp/BreezeTTS 2 支持声音克隆）
+        r_api_ref = QHBoxLayout()
+        r_api_ref.addWidget(QLabel("参考音频："))
+        self.ed_tts_api_ref = QLineEdit()
+        self.ed_tts_api_ref.setPlaceholderText("克隆用参考音频的完整路径（如 D:\\audio-cpp\\refs\\星绘.wav）；留空=不克隆")
+        self.ed_tts_api_ref.setToolTip("声音克隆：提供一段参考音频 + 它的转录，让模型学这个音色说话。填了才启用克隆。")
+        self.ed_tts_api_ref.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_ref.addWidget(self.ed_tts_api_ref, 1)
+        btn_tts_ref_pick = QPushButton("浏览…")
+        btn_tts_ref_pick.clicked.connect(self._ai_pick_tts_ref)
+        r_api_ref.addWidget(btn_tts_ref_pick)
+        atl.addLayout(r_api_ref)
+        r_api_reftext = QHBoxLayout()
+        r_api_reftext.addWidget(QLabel("参考转录："))
+        self.ed_tts_api_ref_text = QLineEdit()
+        self.ed_tts_api_ref_text.setPlaceholderText("参考音频里说的原话（须与音频一致），克隆时必填")
+        self.ed_tts_api_ref_text.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_reftext.addWidget(self.ed_tts_api_ref_text, 1)
+        atl.addLayout(r_api_reftext)
+        r_api_instr = QHBoxLayout()
+        r_api_instr.addWidget(QLabel("默认情绪："))
+        self.ed_tts_api_instr = QLineEdit()
+        self.ed_tts_api_instr.setPlaceholderText("留空=AI 自动判断语气；或填如「难过地低声」作为默认")
+        self.ed_tts_api_instr.setToolTip("默认说话情绪/人设。留空时，朗读会先由 AI 按文本自动判断情绪再合成（自动补齐情绪）。")
+        self.ed_tts_api_instr.editingFinished.connect(self._ai_apply_tts_api)
+        r_api_instr.addWidget(self.ed_tts_api_instr, 1)
+        atl.addLayout(r_api_instr)
         self.lbl_tts_api_status = QLabel("")
         self.lbl_tts_api_status.setStyleSheet("color:#7a8099; font-size:11px;")
         atl.addWidget(self.lbl_tts_api_status)
         ail.addWidget(self.api_tts_box)   # 常驻显示（唯一朗读引擎=填地址）
+        # 朗读音量滑块（实时生效 + 可填数字；0-300%，>100 数字增益）
+        vol_row = QHBoxLayout()
+        vol_row.addWidget(QLabel("朗读音量："))
+        self.sld_tts_volume = NoWheelSlider(Qt.Orientation.Horizontal)
+        self.sld_tts_volume.setRange(0, 300)
+        self.sld_tts_volume.setSingleStep(10)
+        self.sld_tts_volume.setValue(100)
+        self.sld_tts_volume.valueChanged.connect(self._ai_apply_tts_volume)
+        vol_row.addWidget(self.sld_tts_volume, 1)
+        self.spn_tts_volume = QSpinBox()
+        self.spn_tts_volume.setRange(0, 300)
+        self.spn_tts_volume.setSuffix(" %")
+        self.spn_tts_volume.valueChanged.connect(self._ai_apply_tts_volume)
+        vol_row.addWidget(self.spn_tts_volume)
+        ail.addLayout(vol_row)
         # TTS 提示词：朗读前让 AI 改写（依附 AI，AI 关则朗读也关）
         lbl_ttp = QLabel("TTS 提示词（朗读前让 AI 把回答改成适合朗读的稿子）：")
         lbl_ttp.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:4px;")
@@ -848,17 +954,49 @@ class SettingsPanel(QWidget):
         self.ed_tts_api_voice.blockSignals(True)
         self.ed_tts_api_voice.setText(ai.get('tts_api_voice', ''))
         self.ed_tts_api_voice.blockSignals(False)
+        self.ed_tts_api_ref.blockSignals(True)
+        self.ed_tts_api_ref.setText(ai.get('tts_api_ref', ''))
+        self.ed_tts_api_ref.blockSignals(False)
+        self.ed_tts_api_ref_text.blockSignals(True)
+        self.ed_tts_api_ref_text.setText(ai.get('tts_api_ref_text', ''))
+        self.ed_tts_api_ref_text.blockSignals(False)
+        self.ed_tts_api_instr.blockSignals(True)
+        self.ed_tts_api_instr.setText(ai.get('tts_api_instruction', ''))
+        self.ed_tts_api_instr.blockSignals(False)
         # 系统提示词 / TTS 提示词
         sp = ai.get('system_prompt', '')
         sp_def = ai_mgr.default_system_prompt() if ai_mgr is not None else ''
         self.ed_ai_sysprompt.blockSignals(True)
         self.ed_ai_sysprompt.setPlainText(sp if sp else sp_def)
         self.ed_ai_sysprompt.blockSignals(False)
+        # 单价（进=未命中 / 缓存=命中 / 出）
+        try:
+            pin = ai.get('ai_price_in', 0.14)
+            pout = ai.get('ai_price_out', 0.28)
+            pcache = ai.get('ai_price_cache', 0.0028)
+            self.ed_ai_price_in.setText(str(pin if pin not in (None, '') else 0.14))
+            self.ed_ai_price_out.setText(str(pout if pout not in (None, '') else 0.28))
+            self.ed_ai_price_cache.setText(str(pcache if pcache not in (None, '') else 0.0028))
+        except Exception:
+            self.ed_ai_price_in.setText('0.14')
+            self.ed_ai_price_out.setText('0.28')
+            self.ed_ai_price_cache.setText('0.0028')
         tp = ai.get('tts_prompt', '')
         tp_def = ai_mgr.default_tts_prompt() if ai_mgr is not None else ''
         self.ed_ai_ttsprompt.blockSignals(True)
         self.ed_ai_ttsprompt.setPlainText(tp if tp else tp_def)
         self.ed_ai_ttsprompt.blockSignals(False)
+        # 朗读音量
+        try:
+            vol = max(0, min(300, int(ai.get('tts_volume', 100) or 100)))
+        except Exception:
+            vol = 100
+        self.sld_tts_volume.blockSignals(True)
+        self.sld_tts_volume.setValue(vol)
+        self.sld_tts_volume.blockSignals(False)
+        self.spn_tts_volume.blockSignals(True)
+        self.spn_tts_volume.setValue(vol)
+        self.spn_tts_volume.blockSignals(False)
         self._ai_status("")
 
     def _refresh_audio_list(self):
@@ -1340,7 +1478,7 @@ class SettingsPanel(QWidget):
                         "#7ae0a3" if on else "#7a8099")
 
     def _ai_apply_tts_api(self):
-        """保存自定义 TTS API 服务配置"""
+        """保存自定义 TTS API 服务配置（含克隆三件套）"""
         pet = self._current_pet()
         if pet is None or not hasattr(pet, 'ai'):
             return
@@ -1348,7 +1486,39 @@ class SettingsPanel(QWidget):
             self.ed_tts_api_base.text().strip(),
             self.ed_tts_api_key.text().strip(),
             self.ed_tts_api_model.text().strip(),
-            self.ed_tts_api_voice.text().strip())
+            self.ed_tts_api_voice.text().strip(),
+            self.ed_tts_api_ref.text().strip(),
+            self.ed_tts_api_ref_text.text().strip(),
+            self.ed_tts_api_instr.text().strip())
+
+    def _ai_pick_tts_ref(self):
+        """浏览选择克隆参考音频，并把同目录同名 .txt 自动填进参考转录"""
+        f, _ = QFileDialog.getOpenFileName(
+            self, "选择克隆参考音频",
+            self.ed_tts_api_ref.text().strip() or "",
+            "音频文件 (*.wav *.mp3 *.flac *.ogg *.m4a);;所有文件 (*.*)")
+        if not f:
+            return
+        self.ed_tts_api_ref.setText(f)
+        # 尝试自动填参考转录：同目录同名 .txt / 去掉扩展名的 .txt
+        cand = []
+        for ext in ('.txt',):
+            cand.append(os.path.splitext(f)[0] + ext)
+        d = os.path.dirname(f)
+        base = os.path.splitext(os.path.basename(f))[0]
+        cand.append(os.path.join(d, base + '.txt'))
+        cand.append(os.path.join(d, base + '.transcript.txt'))
+        for c in cand:
+            if os.path.isfile(c):
+                try:
+                    with open(c, 'r', encoding='utf-8-sig') as fh:
+                        txt = fh.read().strip()
+                    if txt:
+                        self.ed_tts_api_ref_text.setText(txt)
+                        break
+                except Exception:
+                    continue
+        self._ai_apply_tts_api()
 
     def _ai_test_tts_api(self):
         """测试自定义 TTS API：合成一小段验证配置正确性"""
@@ -1365,7 +1535,11 @@ class SettingsPanel(QWidget):
             return
         self.lbl_tts_api_status.setText("测试中…")
         self.lbl_tts_api_status.setStyleSheet("color:#8fa3c8; font-size:11px;")
-        pet.ai.test_tts_api(base, key, model, voice, None)
+        pet.ai.test_tts_api(
+            base, key, model, voice, None,
+            ref=self.ed_tts_api_ref.text().strip(),
+            ref_text=self.ed_tts_api_ref_text.text().strip(),
+            instruction=self.ed_tts_api_instr.text().strip())
 
     def _ai_apply_model(self, text):
         pet = self._current_pet()
@@ -1373,16 +1547,140 @@ class SettingsPanel(QWidget):
             pet.ai.set_server(pet.ai.cfg().get('base_url', ''),
                               pet.ai.cfg().get('api_key', ''),
                               text)
+            # 模型若被识别出官方单价，仅当当前单价仍是「默认价之一」时联动填入
+            # （用户已手动改过则不覆盖）
+            try:
+                sp = pet.ai.suggested_prices(text)
+                if sp is not None and self._prices_are_default():
+                    self.ed_ai_price_in.setText(self._fmt_price(sp[0]))
+                    self.ed_ai_price_out.setText(self._fmt_price(sp[1]))
+                    self.ed_ai_price_cache.setText(self._fmt_price(sp[2]))
+                    pet.ai.set_prices(sp[0], sp[1], sp[2])
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fmt_price(v):
+        """单价格式化：去掉多余的 0，保留必要精度（如 0.14 / 0.0028 / 0.435）"""
+        s = ('%.6f' % float(v)).rstrip('0').rstrip('.')
+        return s if s else '0'
+
+    def _prices_are_default(self):
+        """当前面板三单价是否仍为某套默认价（flash 或 pro）。True 表示未人工改动。"""
+        try:
+            pin = float(self.ed_ai_price_in.text().strip() or 0)
+            pout = float(self.ed_ai_price_out.text().strip() or 0)
+            pc = float(self.ed_ai_price_cache.text().strip() or 0)
+        except Exception:
+            return True
+        known = {(0.14, 0.28, 0.0028), (0.435, 0.87, 0.003625)}
+        return (round(pin, 6), round(pout, 6), round(pc, 6)) in known
 
     def _ai_apply_sysprompt(self):
         pet = self._current_pet()
         if pet is not None and hasattr(pet, 'ai'):
             pet.ai.set_system_prompt(self.ed_ai_sysprompt.toPlainText())
 
+    def _ai_apply_prices(self):
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            try:
+                pin = float(self.ed_ai_price_in.text().strip() or 0.14)
+            except Exception:
+                pin = 0.14
+            try:
+                pout = float(self.ed_ai_price_out.text().strip() or 0.28)
+            except Exception:
+                pout = 0.28
+            try:
+                pcache = float(self.ed_ai_price_cache.text().strip() or 0.0028)
+            except Exception:
+                pcache = 0.0028
+            pet.ai.set_prices(pin, pout, pcache)
+
     def _ai_apply_ttsprompt(self):
         pet = self._current_pet()
         if pet is not None and hasattr(pet, 'ai'):
             pet.ai.set_tts_prompt(self.ed_ai_ttsprompt.toPlainText())
+
+    def _ai_apply_tts_volume(self, val):
+        """朗读音量滑块/数字：双向同步 + 实时应用到 AI 播放器"""
+        sender = self.sender()
+        # 从触发方取值，另一控件只显示同步（blockSignals 防循环）
+        if sender is self.spn_tts_volume:
+            target = self.spn_tts_volume.value()
+        else:
+            target = self.sld_tts_volume.value()
+        if self.sld_tts_volume.value() != target:
+            self.sld_tts_volume.blockSignals(True)
+            self.sld_tts_volume.setValue(target)
+            self.sld_tts_volume.blockSignals(False)
+        if self.spn_tts_volume.value() != target:
+            self.spn_tts_volume.blockSignals(True)
+            self.spn_tts_volume.setValue(target)
+            self.spn_tts_volume.blockSignals(False)
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            pet.ai.set_tts_volume(target)
+
+    # ---------------- 本地 TTS 服务控制 ----------------
+    def _refresh_tts_svc_state(self):
+        """探测本地 TTS 服务状态并刷新 UI（状态灯 + 按钮启停）"""
+        if not hasattr(self, 'lbl_tts_svc_state'):
+            return
+        try:
+            ai_mod = sys.modules.get('ai_chat')
+            if ai_mod is None:
+                return
+            ok, msg = ai_mod.tts_service_health()
+            if ok:
+                self.lbl_tts_svc_state.setText("● %s" % msg)
+                self.lbl_tts_svc_state.setStyleSheet("color:#7ae0a3; font-size:11px;")
+                self.btn_tts_svc_start.setEnabled(False)
+                self.btn_tts_svc_stop.setEnabled(True)
+            else:
+                self.lbl_tts_svc_state.setText("○ 本地 TTS 服务未启动")
+                self.lbl_tts_svc_state.setStyleSheet("color:#e0a35c; font-size:11px;")
+                self.btn_tts_svc_start.setEnabled(True)
+                self.btn_tts_svc_stop.setEnabled(False)
+        except Exception:
+            pass
+
+    def _ai_tts_svc_start(self):
+        ai_mod = sys.modules.get('ai_chat')
+        if ai_mod is None:
+            return
+        self.lbl_tts_svc_state.setText("正在启动…（模型加载约 20-60 秒，稍候）")
+        self.lbl_tts_svc_state.setStyleSheet("color:#8fa3c8; font-size:11px;")
+        self.btn_tts_svc_start.setEnabled(False)
+        self.btn_tts_svc_stop.setEnabled(False)
+
+        def _run():
+            try:
+                ai_mod.tts_service_start()
+            except Exception:
+                pass
+            # 回到主线程刷新状态
+            QTimer.singleShot(0, self._refresh_tts_svc_state)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _ai_tts_svc_stop(self):
+        ai_mod = sys.modules.get('ai_chat')
+        if ai_mod is None:
+            return
+        self.lbl_tts_svc_state.setText("正在停止…")
+        self.btn_tts_svc_start.setEnabled(False)
+        self.btn_tts_svc_stop.setEnabled(False)
+
+        def _run():
+            try:
+                ai_mod.tts_service_stop()
+            except Exception:
+                pass
+            QTimer.singleShot(0, self._refresh_tts_svc_state)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _ai_save(self):
         pet = self._current_pet()

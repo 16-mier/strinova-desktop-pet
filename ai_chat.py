@@ -16,6 +16,7 @@ import html
 import json
 import os
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -34,6 +35,16 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+# soundfile/numpy：TTS wav 音量>100% 数字增益用（可选）
+try:
+    import soundfile as _sf
+    import numpy as _np
+    HAS_SF = True
+except Exception:
+    _sf = None
+    _np = None
+    HAS_SF = False
 
 # ---------- 可选依赖（都失败也能聊天，只是没有朗读） ----------
 try:
@@ -123,6 +134,189 @@ def _tts_dir():
         return d
     except Exception:
         return None
+
+
+# ============================================================================
+# 本地 TTS 服务管理（audio.cpp / audiocpp_server 的启动/停止/状态探测）
+# 服务路径写死为本机已部署的 audio.cpp 位置；地址从 tts_api_base 解析端口。
+# ============================================================================
+_AUDIO_CPP_SERVER = (
+    r'C:\Users\mier\Desktop\deepseek work\breeze-tts-local\audio-cpp\bin-cuda\audiocpp_server.exe'
+)
+_SERVICE_PROC = None   # 由本模块启动的进程引用
+_SERVICE_LOCK = threading.Lock()
+
+
+def tts_service_url():
+    """从配置解析服务健康检查地址（默认 http://127.0.0.1:8080）"""
+    ai = _ai_cfg()
+    base = (ai.get('tts_api_base') or '').strip() or 'http://127.0.0.1:8080/v1'
+    base = _norm_base_url(base)
+    # health 端点在根（无 /v1），剥掉可能的 /v1 前缀
+    for tail in ('/v1', '/api', '/'):
+        if base.endswith(tail):
+            base = base[:-len(tail)]
+            break
+    return base.rstrip('/') or 'http://127.0.0.1:8080'
+
+
+def tts_service_health(timeout=2.0):
+    """探测本地 TTS 服务是否活着。返回 (ok, 详情 str)"""
+    base = tts_service_url()
+    try:
+        req = urllib.request.Request(base.rstrip('/') + '/health', method='GET')
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode('utf-8'))
+        return True, '运行中（backend=%s）' % data.get('backend', '?')
+    except Exception as e:
+        return False, '已停止（%s）' % str(e)[:40]
+
+
+def _models_paths():
+    """在 bin-cuda/models 下查找 breeze 家族 GGUF，返回可加载的模型文件列表。
+    遍历 models_root 各子目录，取含 gguf 的路径（按文件名 bf16 优先）。"""
+    svc_dir = os.path.dirname(_AUDIO_CPP_SERVER)
+    root = os.path.join(svc_dir, 'models')
+    if not os.path.isdir(root):
+        return []
+    hits = []
+    for sub in sorted(os.listdir(root)):
+        subdir = os.path.join(root, sub)
+        if not os.path.isdir(subdir):
+            continue
+        for fn in os.listdir(subdir):
+            if fn.lower().endswith('.gguf'):
+                hits.append(os.path.join(subdir, fn))
+    # 优先 bf16，再 q8；排序稳定
+    hits.sort(key=lambda p: (0 if 'bf16' in p.lower() else 1, p))
+    return hits
+
+
+def _server_command(svc_dir, spec_dir):
+    """构造 audiocpp_server 启动命令与环境（CUDA PATH + spec override）"""
+    CUDA_TOOLKIT = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+    env = dict(os.environ)
+    cuda_paths = [p for p in (CUDA_TOOLKIT, CUDA_TOOLKIT + r"\x64", svc_dir) if os.path.isdir(p)]
+    env['PATH'] = ';'.join(cuda_paths) + ';' + env.get('PATH', '')
+    cmd = [_AUDIO_CPP_SERVER, '--ui', '--ui-management',
+           '--backend', 'cuda', '--host', '127.0.0.1']
+    if os.path.isdir(spec_dir):
+        cmd += ['--model-spec-override', spec_dir]
+    return cmd, env
+
+
+def _api_json(method, url, payload=None, timeout=30):
+    """发 JSON 请求，返回解析后的 dict/值；失败抛异常"""
+    req = urllib.request.Request(url, method=method)
+    req.add_header('Content-Type', 'application/json')
+    if payload is not None:
+        req.data = json.dumps(payload).encode('utf-8')
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read().decode('utf-8')
+    return json.loads(raw) if raw.strip() else None
+
+
+def tts_service_start():
+    """启动本地 audiocpp server 并加载 Breeze 模型。返回 (ok, 消息)
+    进程：启动（带 CUDA PATH + spec override）→ 探测就绪 → POST /v1/models/load。"""
+    global _SERVICE_PROC
+    # 已在跑且模型可用 → 直接返回
+    try:
+        n = len(_api_json('GET', tts_service_url().rstrip('/') + '/v1/models', timeout=3)['data'])
+        if n >= 1:
+            return True, '服务已在运行（%d 个模型）' % n
+    except Exception:
+        pass
+    if not os.path.exists(_AUDIO_CPP_SERVER):
+        return False, '找不到服务程序：%s' % _AUDIO_CPP_SERVER
+    svc_dir = os.path.dirname(_AUDIO_CPP_SERVER)
+    spec_dir = os.path.join(svc_dir, 'model_specs')
+    cmd, env = _server_command(svc_dir, spec_dir)
+    with _SERVICE_LOCK:
+        try:
+            creation = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            _SERVICE_PROC = subprocess.Popen(
+                cmd, cwd=svc_dir, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=creation, close_fds=True)
+        except Exception as e:
+            return False, '启动失败：%s' % e
+    # 等 server 就绪（health 可达）
+    base = tts_service_url().rstrip('/')
+    deadline = time.time() + 60
+    ready = False
+    while time.time() < deadline:
+        if _SERVICE_PROC.poll() is not None:
+            return False, '服务进程退出（code=%s）' % _SERVICE_PROC.returncode
+        try:
+            _api_json('GET', base + '/health', timeout=2)
+            ready = True
+            break
+        except Exception:
+            time.sleep(1.0)
+    if not ready:
+        if _SERVICE_PROC.poll() is not None:
+            return False, '服务进程退出（code=%s）' % _SERVICE_PROC.returncode
+        return False, '服务启动超时'
+    # 加载 Breeze 模型（models 列表默认空，须显式 load）
+    loaded_ok = False
+    for model_path in _models_paths():
+        try:
+            payload = {
+                'id': 'breeze-tts-clone',
+                'path': model_path,
+                'family': 'breeze_tts',
+                'task': 'clon',
+                'mode': 'offline',
+                'model_spec_override': spec_dir if os.path.isdir(spec_dir) else '',
+            }
+            res = _api_json('POST', base + '/v1/models/load', payload, timeout=60)
+            if isinstance(res, dict) and res.get('loaded'):
+                loaded_ok = True
+                break
+        except Exception:
+            continue
+    if loaded_ok:
+        return True, '服务已启动并加载模型（%s）' % os.path.basename(_models_paths()[0] if _models_paths() else '')
+    return False, '服务已启动但模型加载失败，请检查模型文件'
+
+
+def tts_service_stop():
+    """停止本地 audiocpp server。先停本模块启动的进程，再按名结束。返回 (ok, 消息)"""
+    global _SERVICE_PROC
+    stopped = False
+    with _SERVICE_LOCK:
+        if _SERVICE_PROC is not None and _SERVICE_PROC.poll() is None:
+            try:
+                _SERVICE_PROC.terminate()
+                try:
+                    _SERVICE_PROC.wait(timeout=5)
+                except Exception:
+                    _SERVICE_PROC.kill()
+                stopped = True
+            except Exception:
+                pass
+        _SERVICE_PROC = None
+    if not stopped:
+        try:
+            out = subprocess.run(
+                ['taskkill', '/IM', 'audiocpp_server.exe', '/F'],
+                capture_output=True, timeout=10,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            so = out.stdout.decode('gbk', errors='replace')
+            if '成功' in so or 'SUCCESS' in so.upper():
+                stopped = True
+        except Exception:
+            pass
+    return True, '服务已停止' if stopped else '未发现运行中的服务'
+
+
+def tts_service_pid():
+    """返回本模块启动的进程 PID（供 UI 显示）；未启动返回 None"""
+    global _SERVICE_PROC
+    if _SERVICE_PROC is not None and _SERVICE_PROC.poll() is None:
+        return _SERVICE_PROC.pid
+    return None
 
 
 def _detect_proxy():
@@ -222,16 +416,39 @@ def _open_url(req, timeout):
         raise
 
 
-def _api_speech_synth(base_url, api_key, model, text, voice, out_path, timeout=60):
-    """调 OpenAI 兼容 {base}/audio/speech 合成 mp3 到 out_path。
-    返回 True/False；失败抛异常（由调用方兜底）。"""
+def _api_speech_synth(base_url, api_key, model, text, voice, out_path, timeout=60,
+                      ref_audio='', ref_text='', instruction=''):
+    """调 OpenAI 兼容 {base}/audio/speech 合成语音到 out_path。
+    返回 True/False；失败抛异常（由调用方兜底）。
+
+    额外支持 audio.cpp / FishSpeech 等本地引擎的克隆 + 情绪参数：
+    - ref_audio:   参考音频路径（克隆音色）。填了才走克隆。
+    - ref_text:    参考音频的转录（克隆时必填，须与音频内容一致）。
+    - instruction: 生成指令/情绪人设。BreezeTTS 2 支持中文情绪描述，
+                   如「难过地、低声、带一点哽咽」；留空则由请求方自动补齐。
+    """
     url = _norm_base_url(base_url) + '/audio/speech'
-    body = json.dumps({
+    payload = {
         'model': model,
         'input': text,
-        'voice': voice,
-        'response_format': 'mp3',
-    }, ensure_ascii=False).encode('utf-8')
+        'response_format': 'wav',   # audio.cpp 实际总是返回 audio/wav（RIFF 头）
+    }
+    # ⚠ audio.cpp server 语义（runtime.cpp）：
+    #   1) 克隆时绝不能带顶层 "voice" —— 它会设 cached_voice_id（内置音色），
+    #      与 voice_ref(参考音频) 同时存在会让引擎优先用内置音色，克隆失效。
+    #      参考 WebUI：克隆请求只有 voice_ref + reference_text，无 voice。
+    #   2) 情绪/人设字段是复数 "instructions"（单数 instruction 会被忽略）。
+    if ref_audio:
+        # 克隆音色：voice_ref + reference_text（+ 可选 instructions 情绪）
+        payload['voice_ref'] = ref_audio
+        if ref_text:
+            payload['reference_text'] = ref_text
+    else:
+        # 无克隆：才发 voice（内置音色/预设名）
+        payload['voice'] = voice or ''
+    if instruction:
+        payload['instructions'] = instruction
+    body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
     req = urllib.request.Request(url, data=body, method='POST')
     for k, v in _browser_headers({'Content-Type': 'application/json',
                                   'Authorization': 'Bearer %s' % (api_key or '')}).items():
@@ -240,13 +457,20 @@ def _api_speech_synth(base_url, api_key, model, text, voice, out_path, timeout=6
         data = r.read()
     if not data:
         raise RuntimeError('语音服务返回空音频')
+    # 统一存成 .wav 文件（QMediaPlayer 通吃 mp3/wav；audio.cpp 返回 WAV 头）
     with open(out_path, 'wb') as f:
         f.write(data)
     return True
 
 
 def _chat_request(base_url, api_key, model, messages, timeout=90):
-    """POST {base_url}/chat/completions，返回回复文本。失败抛异常"""
+    """POST {base_url}/chat/completions，返回 (回复文本, usage dict)。
+    usage 形如：
+      {'prompt_tokens':n,'completion_tokens':n,'total_tokens':n,
+       'prompt_cache_hit_tokens':h,'prompt_cache_miss_tokens':m}
+    其中 prompt_cache_* 为 DeepSeek/OpenAI 系「前缀缓存」字段（兼容新/旧命名：
+    prompt_cache_hit_tokens / prompt_cache_miss_tokens 与
+    prompt_cache_hit / prompt_cache_miss）；服务商没返回则空 dict。失败抛异常。"""
     url = _norm_base_url(base_url) + '/chat/completions'
     body = json.dumps(
         {'model': model, 'messages': messages, 'stream': False},
@@ -259,9 +483,25 @@ def _chat_request(base_url, api_key, model, messages, timeout=90):
     with _open_url(req, timeout) as r:
         data = json.loads(r.read().decode('utf-8'))
     try:
-        return data['choices'][0]['message']['content']
+        text = data['choices'][0]['message']['content']
     except Exception:
-        return json.dumps(data, ensure_ascii=False)[:500]
+        text = json.dumps(data, ensure_ascii=False)[:500]
+    usage = {}
+    try:
+        u = data.get('usage') or {}
+        for k in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+            if k in u:
+                usage[k] = int(u[k] or 0)
+        # 缓存命中/未命中输入（DeepSeek 官方字段；部分中转/旧版命名不同）
+        hit = u.get('prompt_cache_hit_tokens', u.get('prompt_cache_hit'))
+        miss = u.get('prompt_cache_miss_tokens', u.get('prompt_cache_miss'))
+        if hit is not None:
+            usage['prompt_cache_hit_tokens'] = int(hit or 0)
+        if miss is not None:
+            usage['prompt_cache_miss_tokens'] = int(miss or 0)
+    except Exception:
+        usage = {}
+    return text, usage
 
 
 def _list_models(base_url, api_key, timeout=30):
@@ -324,7 +564,7 @@ async def _edge_synth(text, voice):
 # 后台线程：AI 对话请求
 # ============================================================================
 class AIWorker(QThread):
-    done = pyqtSignal(str, str)   # (回复文本, 错误信息；错误时文本为空)
+    done = pyqtSignal(str, str, object)   # (回复文本, 错误信息, usage dict)
 
     def __init__(self, base_url, api_key, model, messages, parent=None):
         super().__init__(parent)
@@ -335,13 +575,13 @@ class AIWorker(QThread):
 
     def run(self):
         try:
-            reply = _chat_request(self._base_url, self._api_key,
-                                  self._model, self._messages)
+            reply, usage = _chat_request(self._base_url, self._api_key,
+                                         self._model, self._messages)
             if not reply or not reply.strip():
                 reply = '（AI 没有返回内容）'
-            self.done.emit(reply, '')
+            self.done.emit(reply, '', usage)
         except Exception as e:
-            self.done.emit('', '%s' % e)
+            self.done.emit('', '%s' % e, {})
 
 
 # ============================================================================
@@ -350,11 +590,12 @@ class AIWorker(QThread):
 class TTSWorker(QThread):
     done = pyqtSignal(str, str)   # (音频文件路径, 错误信息；错误时路径为空)
 
-    def __init__(self, text, voice, seq, parent=None):
+    def __init__(self, text, voice, seq, parent=None, instruction=''):
         super().__init__(parent)
         self._text = text
         self._voice = voice or 'alloy'
         self._seq = seq
+        self._instruction = instruction or ''   # 情绪/人设（由改写稿自动补齐）
         self._last_err = ''
 
     def run(self):
@@ -380,10 +621,16 @@ class TTSWorker(QThread):
         if not api_base or not api_key or not api_model:
             self._last_err = '朗读服务未配置：请到 设置 → AI → 朗读服务 里填 地址/密钥/模型'
             return None
+        # 克隆音色：参考音频 + 参考转录（配置里填了才启用克隆）
+        ref = (cfg.get('tts_api_ref') or '').strip()
+        ref_text = (cfg.get('tts_api_ref_text') or '').strip()
+        instruction = self._instruction or (cfg.get('tts_api_instruction') or '').strip()
         try:
-            path = os.path.join(base, 'tts_%d_%d.mp3' % (self._seq, int(time.time() * 1000)))
+            path = os.path.join(base, 'tts_%d_%d.wav' % (self._seq, int(time.time() * 1000)))
             _api_speech_synth(api_base, api_key, api_model, self._text,
-                              self._voice or 'alloy', path)
+                              self._voice or 'alloy', path,
+                              ref_audio=ref, ref_text=ref_text,
+                              instruction=instruction)
             return path
         except Exception as e:
             self._last_err = '%s' % e
@@ -397,7 +644,7 @@ class TTSWorker(QThread):
 # ============================================================================
 _BUBBLE_MAX_W = 520
 _BUBBLE_MIN_W = 200
-_BUBBLE_LIFE_MS = 30000
+_BUBBLE_LIFE_MS = 5000   # 文字完全显示后停留 5 秒自动消失；点击可立即消失
 _FOLLOW_MS = 300
 _TYPE_MS = 18          # 每字显示间隔（ms）——约 55 字/秒，快速蹦出
 _THINK_MS = 280        # 思考三点跳动间隔
@@ -423,7 +670,7 @@ class BubbleWidget(QWidget):
         self._life.timeout.connect(self.hide)
         # 跟随桌宠移动（更密集轮询，桌宠拖动时文字贴住）
         self._follow = QTimer(self)
-        self._follow.setInterval(50)
+        self._follow.setInterval(16)   # ~60fps，减延迟感
         self._follow.timeout.connect(self._reposition)
         # 逐字蹦字定时器
         self._type_timer = QTimer(self)
@@ -469,9 +716,30 @@ class BubbleWidget(QWidget):
         self.show()
         self.raise_()
         self._follow.start()        # 跟随桌宠移动（拖动时贴住）
-        self._lift_life()
         self.update()
         self._type_timer.start()
+
+    def show_text_synced(self, text, duration_ms):
+        """文字与音频同步：按音频实际时长逐字蹦字（同始同终，速度贴合语速）。
+        duration_ms=音频时长(ms)；每字间隔 = 时长/字数。0 或异常则回退匀速。"""
+        self._stop_thinking()
+        self._type_text = text
+        self._type_pos = 0
+        self._size_for_full(text)
+        self._reposition()
+        self.show()
+        self.raise_()
+        self._follow.start()
+        self.update()
+        n = len(text)
+        if n <= 0:
+            return
+        if duration_ms and duration_ms > 0:
+            # 最小间隔防止过快/过慢导致卡顿或超时
+            interval = max(10, min(2000, int(duration_ms / n)))
+        else:
+            interval = _TYPE_MS
+        self._type_timer.start(interval)
 
     def _type_step(self):
         self._type_pos += 1
@@ -613,6 +881,12 @@ class CloseXButton(QPushButton):
 class ChatWindow(QWidget):
     """迷你打字条：一小段可输入的行（历史改为桌宠旁气泡展示，不再用大窗）"""
     sendRequested = pyqtSignal(str)
+    clearRequested = pyqtSignal()
+
+    # 窗口尺寸常量：带用量行高 / 隐藏用量行高
+    W_USAGE = 380
+    H_USAGE = 70
+    H_NO_USAGE = 46
 
     def __init__(self, pet):
         super().__init__(None, Qt.WindowType.FramelessWindowHint
@@ -622,16 +896,32 @@ class ChatWindow(QWidget):
         self.setWindowTitle("卡丘简易桌宠 · AI")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedSize(340, 46)
         self._drag_offset = None
+        self._user_dragged = False     # 用户手动拖过 → 取消自动跟随
+        # 跟随桌宠移动（桌宠拖动时输入条贴住；用户手动拖过则停）
+        self._follow = QTimer(self)
+        self._follow.setInterval(16)   # ~60fps，减延迟感
+        self._follow.timeout.connect(self._follow_pet)
         # 背景直接在 self 上画（圆角外区域因透明背景而透明）
         self.setStyleSheet(
             "ChatWindow{background:rgba(24,26,34,235); border-radius:14px;"
             " border:1px solid rgba(255,255,255,60);}")
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 8, 8)
-        lay.setSpacing(6)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 8, 8, 6)
+        root.setSpacing(3)
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        # 清理上下文按钮放在最左侧（在输入框左边）
+        self.btn_clear = QPushButton("清理上下文", self)
+        self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear.setToolTip("清理上下文（开始全新对话，AI 不再记得之前聊的）")
+        self.btn_clear.setStyleSheet(
+            "QPushButton{background:#5a3d3d; border:none; border-radius:9px;"
+            " color:#ffd9d9; font-size:12px; padding:5px 9px;}"
+            "QPushButton:hover{background:#7a4d4d;}")
+        self.btn_clear.clicked.connect(self._clear)
+        row1.addWidget(self.btn_clear)
         self.input = QLineEdit(self)
         self.input.setPlaceholderText("问桌宠…（回车发送，Esc 关闭）")
         self.input.setStyleSheet(
@@ -639,7 +929,7 @@ class ChatWindow(QWidget):
             " color:#ffffff; font-size:14px; padding:5px 10px;}"
             "QLineEdit:focus{background:rgba(255,255,255,30);}")
         self.input.returnPressed.connect(self._send)
-        lay.addWidget(self.input, 1)
+        row1.addWidget(self.input, 1)
         self.btn_send = QPushButton("发送", self)
         self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_send.setStyleSheet(
@@ -648,15 +938,29 @@ class ChatWindow(QWidget):
             "QPushButton:hover{background:#5480ff;}"
             "QPushButton:disabled{background:#4a4f63;}")
         self.btn_send.clicked.connect(self._send)
-        lay.addWidget(self.btn_send)
+        row1.addWidget(self.btn_send)
         self.btn_x = CloseXButton(self)
-        lay.addWidget(self.btn_x)
+        row1.addWidget(self.btn_x)
         self.btn_x.clicked.connect(self.hide)
+        root.addLayout(row1)
+        # 第二行：单次 token 消耗 + 金额（深色底小字）
+        self.lbl_usage = QLabel(self)
+        self.lbl_usage.setText("")
+        self.lbl_usage.setStyleSheet(
+            "color:#8fa3c8; font-size:11px; background:rgba(255,255,255,6);"
+            " border-radius:6px; padding:1px 8px;")
+        root.addWidget(self.lbl_usage)
+        self.setFixedSize(self.W_USAGE, self.H_USAGE)
 
-    # 窗口拖动（按住空白/输入框外区域）
+    # 窗口拖动（按住空白/输入框外区域）——拖动后取消自动跟随
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._user_dragged = True
+            try:
+                self._follow.stop()
+            except Exception:
+                pass
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -669,6 +973,32 @@ class ChatWindow(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag_offset = None
         super().mouseReleaseEvent(e)
+
+    def _follow_pet(self):
+        """跟随桌宠移动（用户未手动拖动时）"""
+        if self._user_dragged or self._pet is None:
+            self._follow.stop()
+            return
+        try:
+            pet_rect = self._pet.frameGeometry()
+        except Exception:
+            return
+        if pet_rect is None:
+            return
+        # 保持与桌宠的相对偏移
+        off = getattr(self, '_follow_offset', None)
+        if off is None:
+            off = self.pos() - pet_rect.topLeft()
+            self._follow_offset = off
+        nx = pet_rect.left() + off.x()
+        ny = pet_rect.top() + off.y()
+        # 限制在屏幕内
+        scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
+        if scr is not None:
+            geo = scr.availableGeometry()
+            nx = max(geo.left(), min(nx, geo.right() - self.width()))
+            ny = max(geo.top(), min(ny, geo.bottom() - self.height()))
+        self.move(nx, ny)
 
     # ---------- 交互 ----------
     def keyPressEvent(self, e):
@@ -693,7 +1023,7 @@ class ChatWindow(QWidget):
         self.btn_send.setText("…" if busy else "发送")
 
     def show_near(self, pet_rect):
-        """显示在桌宠旁边（优先下方/右侧，保持不遮宠物）"""
+        """显示在桌宠旁边（优先下方/右侧，保持不遮宠物），并开始跟随桌宠"""
         scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
         geo = scr.availableGeometry() if scr is not None else None
         x = pet_rect.left()
@@ -704,7 +1034,34 @@ class ChatWindow(QWidget):
             y = pet_rect.top() - self.height() - 10
             if y < geo.top():
                 y = pet_rect.bottom() + 10
+        self._follow_offset = None
+        self._user_dragged = False   # 每次重新打开都恢复跟随
         self.move(x, y)
+        self._follow.start()
+
+    def hideEvent(self, ev):
+        try:
+            self._follow.stop()
+        except Exception:
+            pass
+        super().hideEvent(ev)
+
+    def _clear(self):
+        """清理上下文按钮"""
+        self.clearRequested.emit()
+
+    def set_usage(self, text):
+        """在输入条下方显示单次 token 消耗与金额；空串则隐藏该行"""
+        if not hasattr(self, 'lbl_usage'):
+            return
+        if text:
+            self.lbl_usage.setText(text)
+            self.lbl_usage.show()
+            self.setFixedSize(self.W_USAGE, self.H_USAGE)
+        else:
+            self.lbl_usage.setText("")
+            self.lbl_usage.hide()
+            self.setFixedSize(self.W_USAGE, self.H_NO_USAGE)
 
 
 # ============================================================================
@@ -727,12 +1084,15 @@ class AiChatManager(QObject):
         self._rewrite_worker = None
         self._pending_tts_seq = 0
         self._seq = 0                 # 递增序号：新 TTS 打断旧 TTS
+        self._synced_text = ''        # 待朗读文本（音频就绪后随音频同步蹦字）
+        self._last_usage = {}         # 最近一次 token 用量
         self._player = None
         self._audio_out = None
         try:
             self._player = QMediaPlayer()
             self._audio_out = QAudioOutput()
             self._player.setAudioOutput(self._audio_out)
+            self._apply_tts_volume()   # 应用已保存的朗读音量
         except Exception:
             self._player = None
             self._audio_out = None
@@ -764,13 +1124,175 @@ class AiChatManager(QObject):
     def set_server(self, base_url, api_key, model):
         _save_ai_cfg(base_url=base_url, api_key=api_key, model=model)
 
-    def set_voice(self, voice):
+    def set_tts_voice(self, voice):
         _save_ai_cfg(tts_voice=voice)
 
-    def set_tts_api(self, base_url, api_key, model, voice=''):
-        """配置自定义 TTS API 服务（OpenAI 兼容 /audio/speech）"""
+    def set_tts_volume(self, vol):
+        """设置朗读音量 0-300。<=100 用 QAudioOutput(0~1)；
+        >100 用数字增益放大 wav（播放前对 PCM 乘系数）"""
+        vol = max(0, min(300, int(vol)))
+        _save_ai_cfg(tts_volume=vol)
+        self._apply_tts_volume()
+
+    def tts_volume(self):
+        try:
+            return max(0, min(300, int(self.cfg().get('tts_volume', 100) or 100)))
+        except Exception:
+            return 100
+
+    def _apply_tts_volume(self):
+        if self._audio_out is None:
+            return
+        try:
+            # QAudioOutput 上限 1.0（100%），>100% 的部分由 wav 数字增益承担
+            self._audio_out.setVolume(min(100, self.tts_volume()) / 100.0)
+        except Exception:
+            pass
+
+    # ------------- 用量与费用 -------------
+    # 默认按 deepseek-v4-flash 官网价（每百万 token，美元）：
+    #   输入（缓存未命中）0.14 / 输入（缓存命中）0.0028 / 输出 0.28
+    # 面板可覆盖（ai_price_in / ai_price_cache / ai_price_out）。
+    def input_price(self):
+        try:
+            return float(self.cfg().get('ai_price_in', 0.14) or 0.14)
+        except Exception:
+            return 0.14
+
+    def cache_price(self):
+        """输入缓存命中单价（$ / 百万 token）。默认 deepseek-v4-flash 缓存命中 0.0028"""
+        try:
+            return float(self.cfg().get('ai_price_cache', 0.0028) or 0.0028)
+        except Exception:
+            return 0.0028
+
+    def output_price(self):
+        try:
+            return float(self.cfg().get('ai_price_out', 0.28) or 0.28)
+        except Exception:
+            return 0.28
+
+    @staticmethod
+    def suggested_prices(model):
+        """按模型名猜测官方单价（进/出/缓存命中，$/M）。识别不出返回 None。
+        已收录 DeepSeek V4 系官方价（2026-09 官网）：
+          deepseek-v4-flash* → 0.14 / 0.28 / 0.0028（含 fast 版，前缀缓存命中 98% 折扣）
+          deepseek-v4-pro    → 0.435 / 0.87 / 0.003625
+        deepseek-chat / deepseek-reasoner 用 V3 价（0.14/0.28/0.0028 与 flash 同档）。"""
+        m = (model or '').strip().lower()
+        if not m:
+            return None
+        # pro 优先于 flash（避免 "flash" 匹配掉 "pro" 的子串歧义）
+        if 'v4-pro' in m or 'deepseek-pro' in m:
+            return (0.435, 0.87, 0.003625)
+        if 'v4-flash' in m or 'v4_flash' in m or 'flash' in m:
+            return (0.14, 0.28, 0.0028)
+        if 'deepseek-chat' in m or 'deepseek-reasoner' in m:
+            return (0.14, 0.28, 0.0028)
+        return None
+
+    def set_prices(self, price_in, price_out, price_cache=None):
+        """设置单价（每百万 token，美元），供面板调用。
+        price_cache 为输入缓存命中单价；不传则保持现值。"""
+        try:
+            pin = max(0.0, float(price_in))
+        except Exception:
+            pin = 0.14
+        try:
+            pout = max(0.0, float(price_out))
+        except Exception:
+            pout = 0.28
+        if price_cache is None:
+            _save_ai_cfg(ai_price_in=pin, ai_price_out=pout)
+        else:
+            try:
+                pc = max(0.0, float(price_cache))
+            except Exception:
+                pc = 0.0028
+            _save_ai_cfg(ai_price_in=pin, ai_price_out=pout, ai_price_cache=pc)
+
+    def calc_cost(self, usage):
+        """按用量与单价算美元费用。返回 (cost_usd, 描述str)。
+        输入费用拆两档：缓存命中×命中价 + 未命中×未命中价
+        （命中 token 从 prompt_tokens 里扣除后计未命中原价）。"""
+        usage = usage or {}
+        try:
+            pin = int(usage.get('prompt_tokens') or 0)
+            pout = int(usage.get('completion_tokens') or 0)
+            pcache = int(usage.get('prompt_cache_hit_tokens') or 0)
+        except Exception:
+            pin = pout = pcache = 0
+        pcache = min(pcache, pin) if pin else 0
+        miss = pin - pcache
+        cost = (miss / 1e6) * self.input_price() \
+            + (pcache / 1e6) * self.cache_price() \
+            + (pout / 1e6) * self.output_price()
+        desc = '↑%d [缓存%d] ↓%d' % (pin, pcache, pout)
+        return cost, desc
+
+    def _usage_text(self, usage):
+        """生成单次用量展示文本：'本次 输入token[缓存x] ↓输出token 共N tok ≈ $金额'"""
+        usage = usage or {}
+        try:
+            pin = int(usage.get('prompt_tokens') or 0)
+            pout = int(usage.get('completion_tokens') or 0)
+            total = int(usage.get('total_tokens') or (pin + pout))
+            pcache = int(usage.get('prompt_cache_hit_tokens') or 0)
+        except Exception:
+            pin = pout = total = pcache = 0
+        pcache = min(pcache, pin) if pin else 0   # 脏数据防护：缓存命中不应超过总输入
+        cost, _d = self.calc_cost(usage)
+        if pcache:
+            return '本次 ↑%d[缓存%d] ↓%d 共%d tok  ≈ $%.4f' % (pin, pcache, pout, total, cost)
+        return '本次 ↑%d ↓%d 共%d tok  ≈ $%.4f' % (pin, pout, total, cost)
+
+    def _sync_chat_usage(self):
+        """把上次用量显示到聊天条（打开聊天窗时恢复）"""
+        if self._chat is None or not hasattr(self._chat, 'set_usage'):
+            return
+        if self._last_usage:
+            try:
+                self._chat.set_usage(self._usage_text(self._last_usage))
+            except Exception:
+                pass
+
+    def _show_usage(self, usage):
+        """AI 回复后：更新用量/金额到聊天条并记录累计"""
+        self._last_usage = usage or {}
+        if self._chat is not None and hasattr(self._chat, 'set_usage'):
+            try:
+                if self._last_usage:
+                    self._chat.set_usage(self._usage_text(self._last_usage))
+            except Exception:
+                pass
+
+    @staticmethod
+    def gain_wav_if_needed(path, volume):
+        """音量 >100% 时对 wav PCM 做数字增益，生成同目录 _gain{vol}.wav 返回新路径；
+        <=100 原样返回。失败返回原路径。"""
+        if volume <= 100 or not HAS_SF:
+            return path
+        try:
+            data, sr = _sf.read(path, dtype='float32')
+            gain = volume / 100.0
+            data = data * gain
+            # 限幅防削波（软限幅）
+            data = _np.tanh(data)
+            newp = path[:-4] + '_gain%d.wav' % volume if path.lower().endswith('.wav') \
+                else path + '_gain%d.wav' % volume
+            _sf.write(newp, data, sr, subtype='PCM_16', format='WAV')
+            return newp
+        except Exception:
+            return path
+
+    def set_tts_api(self, base_url, api_key, model, voice='', ref='', ref_text='',
+                    instruction=''):
+        """配置自定义 TTS API 服务（OpenAI 兼容 /audio/speech）。
+        ref/ref_text 用于克隆音色（可选）；instruction 为默认情绪/人设（可选）。"""
         _save_ai_cfg(tts_api_base=base_url, tts_api_key=api_key,
-                     tts_api_model=model, tts_api_voice=voice)
+                     tts_api_model=model, tts_api_voice=voice,
+                     tts_api_ref=ref, tts_api_ref_text=ref_text,
+                     tts_api_instruction=instruction)
 
     def system_prompt(self):
         """当前系统提示词（用户可自定义，存配置 ai.system_prompt）"""
@@ -782,11 +1304,19 @@ class AiChatManager(QObject):
 
     @staticmethod
     def default_tts_prompt():
-        """TTS 系统提示词（朗读前把 AI 回答改写成适合朗读的稿子）"""
+        """TTS 系统提示词（朗读前把 AI 回答改写成朗读稿 + 自动补齐情绪）。
+        模型按要求输出两行：
+            情绪：<简短中文情绪/语气描述，10 字内>
+            朗读：<改写后适合朗读的文本>
+        情绪行会作为本地 TTS 引擎的 instruction（说话情绪），真正"模型自动补齐情绪"。"""
         return ('你是一名语音播报助手。请把下面这段文字改写成适合语音朗读的版本：'
                 '口语自然、句子完整通顺，去掉 markdown 符号、列表序号、表情符号和链接，'
                 '数字与英文按口语习惯读出，保留原意和关键信息。'
-                '只输出改写后的文本，不要任何解释或前缀。')
+                '同时根据这段文字的语气，判断朗读时应该带有的情绪/语气'
+                '（如：开心雀跃、难过低落、生气抱怨、平静温柔、撒娇俏皮、焦急担心等）。'
+                '严格按以下两行格式输出，不要输出任何其它内容或解释：\n'
+                '情绪：<简短中文情绪描述，10 字以内>\n'
+                '朗读：<改写后的文本>')
 
     def tts_prompt(self):
         return (self.cfg().get('tts_prompt') or '').strip() \
@@ -806,32 +1336,65 @@ class AiChatManager(QObject):
                 self.models_fetched.emit(False, '%s' % e)
         threading.Thread(target=_run, daemon=True).start()
 
-    def test_tts_api(self, base_url, api_key, model, voice, on_done):
-        """后台测试自定义 TTS API 服务。完成后发 tts_api_tested 信号。"""
+    def test_tts_api(self, base_url, api_key, model, voice, on_done,
+                     ref='', ref_text='', instruction=''):
+        """后台测试自定义 TTS API 服务：合成一段 → emit 带音频路径 → 面板播放。
+        失败 emit 错误。"""
         def _run():
             try:
-                path = os.path.join(_tts_dir() or '', 'tts_test.mp3')
-                _api_speech_synth(base_url, api_key, model, '语音服务测试成功',
-                                  voice or 'alloy', path, timeout=30)
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-                self.tts_api_tested.emit(True, '合成成功')
+                base = _tts_dir() or ''
+                path = os.path.join(base, 'tts_test_%d.wav' % int(time.time() * 1000))
+                _api_speech_synth(base_url, api_key, model,
+                                  '语音服务测试成功，你能听到我说话吗？',
+                                  voice or 'alloy', path, timeout=30,
+                                  ref_audio=ref, ref_text=ref_text,
+                                  instruction=instruction)
+                self.tts_api_tested.emit(True, path)
             except Exception as e:
                 self.tts_api_tested.emit(False, '%s' % e)
         threading.Thread(target=_run, daemon=True).start()
+
+    def play_audio_file(self, path):
+        """播放指定音频文件（用于测试语音试听）。"""
+        if self._player is None or not path or not os.path.exists(path):
+            return
+        try:
+            self._player.stop()
+            self._player.setSource(QUrl.fromLocalFile(path))
+            self._player.play()
+        except Exception:
+            pass
 
     # ------------- 聊天窗 -------------
     def open_chat(self):
         if self._chat is None:
             self._chat = ChatWindow(self._pet)
             self._chat.sendRequested.connect(self._on_send)
+            self._chat.clearRequested.connect(self.clear_context)
+            # 打开时把已保存的用量显示同步上去
+            try:
+                self._sync_chat_usage()
+            except Exception:
+                pass
         self._chat.show_near(self._pet.frameGeometry())
         self._chat.show()
         self._chat.raise_()
         self._chat.activateWindow()
         self._chat.input.setFocus()
+
+    def clear_context(self):
+        """清理多轮上下文（开始全新对话）"""
+        self._messages = []
+        self._last_usage = {}
+        if self._chat is not None:
+            try:
+                self._chat.set_usage('')
+            except Exception:
+                pass
+        try:
+            self._show_bubble('已清理上下文，开始全新对话 ✨')
+        except Exception:
+            pass
 
     def close_all(self):
         if self._bubble is not None:
@@ -841,6 +1404,19 @@ class AiChatManager(QObject):
         if self._player is not None:
             try:
                 self._player.stop()
+            except Exception:
+                pass
+
+    def pet_moved(self):
+        """桌宠拖动/移动时调用：气泡与输入条立即重定位（无轮询延迟，一体跟随）"""
+        if self._bubble is not None and self._bubble.isVisible():
+            try:
+                self._bubble._reposition()
+            except Exception:
+                pass
+        if self._chat is not None and self._chat.isVisible() and not getattr(self._chat, '_user_dragged', False):
+            try:
+                self._chat._follow_pet()
             except Exception:
                 pass
 
@@ -857,6 +1433,9 @@ class AiChatManager(QObject):
             return
         if self._chat is not None:
             self._chat.set_busy(True)
+            # 发送时清掉上一次用量显示（新请求的用量回来前保持干净）
+            self._chat.set_usage('')
+        self._last_usage = {}
         # 思考指示：AI 思考中在桌宠旁显示三点跳动
         self._show_thinking()
         # 多轮上下文：system（可自定义）+ 最近 20 条
@@ -901,7 +1480,7 @@ class AiChatManager(QObject):
         """AI 回复 → 逐字蹦字显示在桌宠旁"""
         self._get_bubble().show_text(text)
 
-    def _on_ai_done(self, reply, err):
+    def _on_ai_done(self, reply, err, usage=None):
         if self._chat is not None:
             self._chat.set_busy(False)
         self._ai_worker = None
@@ -909,11 +1488,14 @@ class AiChatManager(QObject):
         if err:
             self._bubble_msg('AI 请求失败：%s\n（检查 设置→AI 的服务器/密钥/模型）' % err)
             return
+        usage = usage or {}
+        # 单次用量：显示在桌宠旁的状态条
+        try:
+            self._show_usage(usage)
+        except Exception:
+            pass
         self._messages.append({'role': 'assistant', 'content': reply})
-        # 气泡逐字显示回复（桌宠旁边，字体显眼）
-        self._show_bubble(reply)
-        # TTS 依附 AI（且必须 AI 对话开启才生效）：先把回复交给"TTS 提示词"
-        # 改写为适合朗读的稿子，再朗读改写稿；改写失败直接朗读原文兜底
+        # TTS 依附 AI：若朗读开，则气泡文字等音频就绪后随音频同步蹦字（同始同终）
         if self.tts_enabled() and self.enabled():
             self._seq += 1
             self._pending_tts_seq = self._seq
@@ -921,15 +1503,57 @@ class AiChatManager(QObject):
                 self._player.stop()
             except Exception:
                 pass
+            # 朗读合成期间先显示"思考中…"，音频就绪播放时再随音频逐字蹦
+            self._show_thinking()
             self._rewrite_for_tts(reply, self._seq)
-        elif self.tts_enabled() and not self.enabled():
-            # AI 对话被关但 tts_enabled 仍开（历史配置）→ 不朗读
-            self.set_tts_enabled(False)
+        else:
+            # 不朗读 → 立即逐字蹦字显示
+            self._show_bubble(reply)
+            if self.tts_enabled() and not self.enabled():
+                # AI 对话被关但 tts_enabled 仍开（历史配置）→ 不朗读
+                self.set_tts_enabled(False)
 
-    # ------------- TTS（朗读 AI 回复） -------------
+    # ------------- TTS（朗读 AI 回复，情绪自动补齐） -------------
+    @staticmethod
+    def parse_tts_output(text):
+        """解析 TTS 改写输出「情绪：…\n朗读：…」→ (朗读稿, 情绪instruction)。
+        格式不符时回退：整段当朗读稿、情绪留空（由引擎默认）。"""
+        if not text:
+            return '', ''
+        emo = ''
+        speak = text.strip()
+        for line in speak.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            low = line
+            for pref in ('情绪', '情感', '语气'):
+                if low.startswith(pref + '：') or low.startswith(pref + ':'):
+                    emo = (line.split('：', 1)[-1] if '：' in line
+                           else line.split(':', 1)[-1]).strip()
+                    speak = speak.replace(line, '', 1)
+                    break
+            else:
+                continue
+            break   # 只认第一个情绪行
+        # 去掉可能的 朗读： 前缀
+        for pref in ('朗读', '朗读稿', '语音'):
+            for sep in ('：', ':'):
+                if speak.lstrip().startswith(pref + sep):
+                    speak = speak.split(sep, 1)[-1].strip()
+                    break
+        # 去掉残留标记（模型多输出的解释）
+        for junk in ('情绪：', '情绪:', '朗读：', '朗读:'):
+            speak = speak.replace(junk, '')
+        speak = speak.strip()
+        # 情绪规范化：给引擎可用的中文短语
+        emo = emo.strip().strip('。，,!！').strip()
+        if emo and len(emo) <= 30:
+            return speak, emo
+        return speak, ''
+
     def _rewrite_for_tts(self, reply, seq):
-        """用 TTS 系统提示词让 AI 把回答改写成朗读稿，再合成播放。
-        改写失败 → 直接朗读原文。"""
+        """用 TTS 系统提示词让 AI 把回答改写成朗读稿并判断情绪。"""
         cfg = self.cfg()
         base_url = cfg.get('base_url') or DEFAULT_BASE_URL
         api_key = cfg.get('api_key') or ''
@@ -940,7 +1564,7 @@ class AiChatManager(QObject):
                 {'role': 'user', 'content': reply}]
         w = AIWorker(base_url, api_key, model, msgs, self)
         self._rewrite_worker = w
-        w.done.connect(lambda txt, e, s=seq: self._on_rewrite_done(txt, e, s, reply))
+        w.done.connect(lambda txt, e, u, s=seq: self._on_rewrite_done(txt, e, s, reply))
         w.finished.connect(w.deleteLater)
         w.start()
 
@@ -948,17 +1572,24 @@ class AiChatManager(QObject):
         if seq != getattr(self, '_pending_tts_seq', 0) or not self.tts_enabled():
             return   # 期间有更新回复/关闭朗读 → 丢弃
         self._rewrite_worker = None
-        speak = (text.strip() if (text and text.strip() and not err) else original)
+        speak = ''
+        emo = ''
+        if text and text.strip() and not err:
+            speak, emo = self.parse_tts_output(text)
+        if not speak:                      # 改写失败 → 直接朗读原文
+            speak = original
         if not speak:
             return
-        self._speak_text(speak, seq)
+        self._speak_text(speak, seq, emo)
 
-    def _speak_text(self, text, seq):
+    def _speak_text(self, text, seq, instruction=''):
         if self._player is None or seq != getattr(self, '_pending_tts_seq', 0):
             return
         cfg = self.cfg()
         voice = (cfg.get('tts_api_voice') or cfg.get('tts_voice') or 'alloy')
-        self._tts_worker = TTSWorker(text, voice, seq, self)
+        # 记录将朗读的文本 → 音频就绪时按音频时长同步蹦字
+        self._synced_text = text
+        self._tts_worker = TTSWorker(text, voice, seq, self, instruction=instruction)
         self._tts_worker.done.connect(
             lambda path, err, s=seq: self._on_tts_done(path, err, s))
         self._tts_worker.finished.connect(self._tts_worker.deleteLater)
@@ -970,8 +1601,24 @@ class AiChatManager(QObject):
         if not path:
             self._bubble_msg('朗读失败：%s' % err)
             return
+        vol = self.tts_volume()
+        # 音量 >100% → 数字增益（QAudioOutput 上限 1.0）
+        gain_path = path
+        if vol > 100:
+            gain_path = self.gain_wav_if_needed(path, vol)
+        # 音频时长（同步蹦字用；失败回退默认间隔）
+        dur_ms = self._wav_duration_ms(gain_path)
+        # 文字随音频同步：按音频实际时长逐字蹦（同始同终）
+        pending_text = (getattr(self, '_synced_text', '') or '').strip()
+        self._synced_text = ''
+        if pending_text:
+            if self._bubble is not None:
+                self._bubble._stop_thinking()
+            self._get_bubble().show_text_synced(pending_text, dur_ms)
+        else:
+            self._hide_thinking()
         self._player.stop()
-        self._player.setSource(QUrl.fromLocalFile(path))
+        self._player.setSource(QUrl.fromLocalFile(gain_path))
         self._player.play()
         # 播完（或超时）后清理临时文件
         def _cleanup():
@@ -982,16 +1629,32 @@ class AiChatManager(QObject):
             try:
                 if os.path.exists(path):
                     os.remove(path)
+                if gain_path != path and os.path.exists(gain_path):
+                    os.remove(gain_path)
             except Exception:
                 pass
         QTimer.singleShot(30000, _cleanup)
+
+    def _wav_duration_ms(self, path):
+        """读取 wav 时长(ms)；失败返回 0"""
+        if not path or not os.path.exists(path):
+            return 0
+        try:
+            if HAS_SF:
+                with _sf.SoundFile(path) as f:
+                    return int(f.frames / f.samplerate * 1000)
+            import wave
+            with wave.open(path, 'rb') as w:
+                return int(w.getnframes() / w.getframerate() * 1000)
+        except Exception:
+            return 0
 
     # ------------- 测试连接（设置面板用） -------------
     def test_connection(self, base_url, api_key, model, on_done):
         def _run():
             try:
                 msgs = [{'role': 'user', 'content': '你好，请只回复：连接成功'}]
-                r = _chat_request(base_url, api_key, model, msgs, timeout=20)
+                r, _u = _chat_request(base_url, api_key, model, msgs, timeout=20)
                 self.conn_tested.emit(True, r.strip()[:60])
             except Exception as e:
                 self.conn_tested.emit(False, '%s' % e)

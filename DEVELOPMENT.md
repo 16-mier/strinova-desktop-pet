@@ -78,6 +78,153 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（清理上下文按钮左移+改名 / token统计记全输入·缓存命中·输出 / 单价补缓存命中档）
+- **需求（用户）**：①聊天窗「清空」改名「清理上下文」并移到**输入框左边**；②token 消耗不能只记输入/输出，要记全**缓存**（DeepSeek 前缀缓存命中）；③用户实际用模型 = commandcode 的 `deepseek/deepseek-v4-flash-fast`，单价要按 flash 缓存命中档补
+- **实现**（`ai_chat.py`）：
+  1. **按钮左移+改名**：ChatWindow 第一行布局由「输入框→清空→发送→✕」改为「**清理上下文**→输入框→发送→✕」；文案 `清空`→`清理上下文`，tooltip 同步；窗口 340px → **380px** 加宽（容纳 5 字按钮），`set_usage` 的 380×70 / 380×46 同步；气泡提示「已清空上下文」→「已清理上下文」，相关 docstring 统一
+  2. **usage 记全缓存**：`_chat_request` 解析 usage 时除 prompt/completion/total 外，新增 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（兼容旧名 `prompt_cache_hit` / `prompt_cache_miss`）
+  3. **费用拆分两档**：新增 `cache_price()`（默认 `ai_price_cache=0.0028`，flash 缓存命中官方价）；`calc_cost` 公式改为 **未命中输入×0.14 + 命中输入×0.0028 + 输出×0.28**（命中 token 从 prompt_tokens 扣出单独计价，脏数据截断防护：缓存命中≤prompt_tokens）；`set_prices` 扩展第三参 `price_cache`（不传保持现值，向后兼容）
+  4. **展示含缓存**：`_usage_text` 有缓存命中时显示「本次 ↑总输入[缓存N] ↓输出 共N tok ≈ $金额」，无缓存保持原样；`_usage_text` 与 `calc_cost` 的缓存值都做截断防护
+- **实现**（`settings_panel.py`）：单价区由两档改**三档**——「单价($/M)：进__ 缓存__ 出__」（进=未命中 0.14 / 缓存=命中 0.0028 / 出 0.28），新增 `ed_ai_price_cache` 输入框；`_ai_apply_prices` 读三值调 `set_prices(pin, pout, pcache)` 存 `ai.ai_price_cache`；refresh_all 三框回填
+- **验证**：
+  - 计价公式离线自测 4 场景全对（无缓存 0.42 / 全命中 0.2828 / 半命中 0.3514 / 超额缓存截断 0.2828）✅
+  - 新 `usage_layout_smoke.py` 11 项全 PASS（按钮文案/最左位置/尺寸 380×70×46/usage 含[缓存400]/费用公式/面板缓存输入框存在且回填 0.0028）✅
+  - gui_smoke 回归过 ✅；py_compile 三文件全过 ✅（ruff 仅 I001 import 排序历史遗留，与本次无关）
+- 涉及：`ai_chat.py`（ChatWindow 布局/按钮改名/usage 缓存解析/cache_price/calc_cost/_usage_text/set_prices/clear_context 文案）、`settings_panel.py`（单价三档输入框/_ai_apply_prices/refresh_all 回填）、新增 `usage_layout_smoke.py`
+- 备注：缓存命中单价默认 0.0028（deepseek-v4-flash 官方缓存命中价，约 98% 折扣）；用户 commandcode `deepseek/deepseek-v4-flash-fast` 中转若返回 `prompt_cache_hit_tokens` 则自动按优惠价算，不返回则退化为原全价计算（向下兼容）。面板已存旧配置无 ai_price_cache 时默认 0.0028 回填
+
+### 2026-09-07（Kimi-K3 审阅重构：去重复/删死代码/抽常量 + 按模型自动带单价 + 发送清旧用量 + 精度与框宽微调）
+- **背景（用户）**：要求由 Kimi-K3 对上一轮「清理上下文按钮+缓存计价」改动做 UI/架构审阅并落实改进点（用户选 1/2/4/5/6/7 全做，含按模型自动带价）
+- **实现**（`ai_chat.py`）：
+  1. **代码复用**：新增 `_parse_usage(usage)` 静态方法统一解析 `(pin, pout, pcache, total)` + 脏数据截断防护（缓存命中≤prompt_tokens），`calc_cost` 与 `_usage_text` 共用，消除重复解析
+  2. **删死代码**：`calc_cost` 返回值由 `(cost, desc)` 简化为只返回 `cost`（desc 从未被任何调用方读取），docstring 同步
+  3. **尺寸常量**：ChatWindow 加类常量 `W_USAGE=380 / H_USAGE=70 / H_NO_USAGE=46`，替换 `__init__` 与 `set_usage` 里 3 处魔法数字
+  4. **金额精度**：`_usage_text` 金额 `%.6f`→`%.4f`（微美元级 6 位过细，标签更易读）
+  5. **发送时清旧用量**：`_on_send` 发新消息时 `self._chat.set_usage('')` + `self._last_usage={}`，避免上一条用量残留误导
+  6. **按模型自动带单价**：新增 `AiChatManager.suggested_prices(model)` 静态映射——`v4-flash*`/`deepseek-chat`/`deepseek-reasoner`→(0.14, 0.28, 0.0028)；`v4-pro`→(0.435, 0.87, 0.003625)；未识别→None。pro 先于 flash 判断避免子串歧义
+- **实现**（`settings_panel.py`）：
+  1. `_ai_apply_model` 切换模型时调 `suggested_prices`，**仅当 `_prices_are_default()`（当前三单价仍是 flash/pro 默认组合之一）** 才联动填入官方价并持久化——用户人工改过的单价绝不被覆盖；新增 `_fmt_price` 去尾零格式化（0.435 不显示成 0.4350）
+  2. 单价区下加小字提示行：「选模型时若单价仍是默认值会自动按官方价带入…；改后不再联动」
+  3. 缓存命中输入框宽度 62→70（容纳 0.003625 等更长小数）
+- **验证**：
+  - `suggested_prices` 8 例映射全对（含 `deepseek/deepseek-v4-flash-fast`→flash 价、pro→pro 价、未知→None）✅
+  - `_fmt_price` 8 例格式化全对（0.0028/0.003625 保留精度、0.14 去尾零）✅
+  - 面板级联测：默认价切 pro 自动带入 pro 价；人工改价后切回 flash **不覆盖** ✅
+  - `usage_layout_smoke.py` 11 项 + `gui_smoke.py` 回归全 PASS ✅；py_compile 三文件过 ✅
+- 涉及：`ai_chat.py`（_parse_usage/calc_cost 简化/W_USAGE·H_USAGE·H_NO_USAGE 常量/_usage_text 精度/_on_send 清用量/suggested_prices）、`settings_panel.py`（_ai_apply_model 联动/_prices_are_default/_fmt_price/提示行/缓存框宽 70）、`DEVELOPMENT.md`
+- 备注：本次重构不改任何对外行为（除发送时清旧用量、金额精度、自动带价三处用户可感知优化）；自动带价只在「当前价=默认价」时触发，保护用户自定义
+
+### 2026-09-07（聊天窗升级：清空上下文按钮 + 单次token消耗/金额显示 + 气泡5秒消失；单价可配）
+- **需求（用户）**：①清理上下文按钮放聊天框旁；②查看单次 token 消耗并计算金额；③气泡文字完全显示后 5 秒消失、点击立即消失；④语音克隆流式（已确认 BreezeTTS2 不支持真流式——模型需 mode=streaming 才支持 SSE，Breeze 是整段合成，属模型本质限制）
+- **实现**（`ai_chat.py`）：
+  1. **ChatWindow 重构**：340×46 → **340×70 两行布局**——第一行 输入框+「清空」按钮+发送+✕；第二行用量小标签（深色底圆角）。「清空」发 `clearRequested` 信号
+  2. **清空上下文**：`AiChatManager.clear_context()` 清 `_messages`/`_last_usage`，聊天条用量标签清空，气泡提示"已清空上下文"；open_chat 连接信号
+  3. **token 消耗+金额**：`_chat_request` 返回 `(text, usage)`（从响应 usage 解析 prompt/completion/total）；`AIWorker.done` 信号加 usage；`_on_ai_done` 收到后 `_show_usage` 显示到聊天条第二行「本次 ↑输入 ↓输出 共N tok ≈ $金额」；`_last_usage` 记住供重开聊天窗 `_sync_chat_usage` 恢复
+  4. **金额计算**：单价默认 deepseek-v4-flash（输入$0.14/输出$0.28 每百万token，官网），`input_price/output_price/set_prices/calc_cost`；`_show_usage` 用单价×token/1e6 算美元
+  5. **气泡消失**：`_BUBBLE_LIFE_MS` 30000→**5000**（蹦字完成后 5 秒消失）；移除 show_text/show_text_synced 开蹦时过早 `_lift_life`（只保留蹦字完成 _type_step 触发）；点击气泡已可立即消失
+- **实现**（`settings_panel.py`）：AI 配置区系统提示词下加「单价($/M)：进__ 出__」两输入框（默认 0.14/0.28），`_ai_apply_prices` 存 `ai.ai_price_in/out`，refresh_all 回填
+- **验证**：ctx_usage_smoke 9 项全过（清空按钮/标签/触发/历史清空/用量显示/单价保存回填）✅；gui_smoke + ai_selftest 回归过 ✅；py_compile ✅
+- 涉及：`ai_chat.py`（ChatWindow 重构/clear_context/usage 全链路/单价/气泡5s）、`settings_panel.py`（单价输入）
+- 备注：用量金额按单次请求算（显示在聊天条）；单价可在设置→AI 改，换模型只需改单价
+
+### 2026-09-07（修复服务启动500：server启动完整流程[CUDA PATH+spec+load模型]；输入框/气泡跟随提速到60fps+拖动即时跟移）
+- **问题（用户反馈）**：点「停止服务」再「启动服务」后点「测试音频」报 **HTTP 500**；聊天输入框/文字跟随桌宠有明显延迟、不像一体
+- **排查根因**（读 audio.cpp server 源码 `runtime.cpp` + 实测）：
+  1. **server 启动即崩溃**：CUDA 版缺 DLL → 0xC0000135，必须把 CUDA Toolkit bin 注入 PATH（synth.py 早有此处理，服务函数漏了）
+  2. **漏 `--ui`**：报 `missing required --config argument (or use --ui for the native WebUI)` → 命令必须带 `--ui --ui-management`
+  3. **模型列表默认空**：`load_models()` 遍历 `config_.models`（来自 --config），**不扫描 models 目录** → 启动后 models=0 → 请求 breeze-tts-clone 报 500。正确做法：启动后 `POST /v1/models/load` 加载模型（body: id/family=breeze_tts/task=clon/mode=offline/path=具体gguf/model_spec_override）
+  4. **僵尸进程**：旧版「停止服务」taskkill 因非提权杀不掉桌宠(管理员)起的 server 子进程 → 坏进程(无模型)占 8080 → 重启的新 server 端口被占起不来
+  5. taskkill 输出 GBK → 用 `decode('gbk', errors='replace')`
+- **修复**（`ai_chat.py` 服务函数重写）：`_server_command`(CUDA PATH+spec+ui)、`_models_paths`(扫 bin-cuda\models 下 gguf，bf16 优先)、`tts_service_start` = 启动→等 health→POST /v1/models/load→确认 loaded；stop 修编码
+- **跟随优化**：BubbleWidget/ChatWindow 跟随 timer 50ms→**16ms(60fps)**；新增 `AiChatManager.pet_moved()`（气泡+输入条即时重定位），pet.py 拖动 mouseMoveEvent 与 set_pet_size 缩放处调用 → 拖动时气泡/输入条同步跟移、零轮询延迟、一体感
+- **验证**：18080 实测完整流程 server 起 + load breeze-tts-clone → models 0→1 ✅（path 须指到具体 gguf，目录含2个gguf会报错）；py_compile + ai_selftest + gui_smoke 回归过 ✅；打包 61.1MB
+- 涉及：`ai_chat.py`（服务启动全流程/stop 编码/pet_moved/16ms）、`pet.py`（拖动与缩放处调 pet_moved）
+- **用户操作（关键）**：旧桌宠为管理员权限运行，僵尸 server(42168) 是其子进程、非提权杀不掉 → **必须完全退出旧桌宠**（连带清掉僵尸 server）→ 用桌面 `卡丘简易桌宠_新版.exe` 替换 `卡丘简易桌宠.exe` 再启动 → 点「启动服务」应显示模型已加载 → 测试语音出声
+
+### 2026-09-07（朗读体验大升级：音量0-300% / 文字随音频同步 / 输入框跟随 / 测试真播放 / 服务启停 + UI重排）
+- **需求（用户连提）**：①音量可到 300%；②聊天输入框要随桌宠移动；③测试语音要真播出来听；④加 TTS 服务启动/停止按钮；⑤重排朗读 UI；⑥文字应与音频同始同终、随音频语速蹦字（不能文字先蹦完音频还在播）
+- **实现**：
+  1. **音量 0-300%**（`ai_chat.py`）：`set_tts_volume/tts_volume` 上限 300；QAudioOutput 只到 1.0（100%），>100 用 `gain_wav_if_needed` 播放前对 wav PCM 数字增益（soundfile 读→×gain→tanh 软限幅防削波→写 _gainN.wav）；面板滑块+数字 range 0-300
+  2. **文字随音频同步**（核心，`ai_chat.py`）：`_on_ai_done` 朗读开时**不再立即蹦字**，改显示"思考中…"；TTS 合成完 `_on_tts_done` 用 `_wav_duration_ms` 读音频时长 → `BubbleWidget.show_text_synced(text, dur_ms)` **每字间隔=时长/字数** → 文字与音频同始同终、语速贴合；`_synced_text` 记录朗读稿；无朗读仍即时蹦字
+  3. **ChatWindow 输入框跟随桌宠**：加 `_follow` QTimer(50ms) `_follow_pet` 保持相对偏移跟随；用户手动拖动后停（`_user_dragged`）；重新打开恢复
+  4. **测试语音真播放**：`test_tts_api` 合成后**不删文件**、emit 路径；`_on_tts_api_tested` 调 `pet.ai.play_audio_file(path)` 播放试听
+  5. **TTS 服务启停**（`ai_chat.py` 模块级）：`tts_service_url/health/start/stop` 管理 audiocpp_server.exe（写死路径 `breeze-tts-local\audio-cpp\bin-cuda\audiocpp_server.exe`，Popen CREATE_NO_WINDOW + 等 60s health 就绪；stop taskkill）；面板「朗读 AI 回复」下加服务状态行（●绿运行/○橙停止）+ ▶启动/■停止按钮 + 5s 定时探测
+  6. **UI 重排**：朗读服务控件分组为「TTS 开关 → 服务状态与启停 → 地址/密钥/模型/音色+测试 → 克隆三件套 → 音量 0-300%」清晰层级
+- **验证**：功能冒烟 8 项全过（音量0-300/存200/audio_out钳1.0/服务控件/health/同步方法/url解析）✅；ai_selftest + gui_smoke 回归过 ✅；py_compile 全过 ✅；打包部署 ✅
+- 涉及：`ai_chat.py`（音量300+增益/同步蹦字/_on_ai_done 时序/输入框跟随/test_tts_api+play_audio_file/服务管理函数）、`settings_panel.py`（服务状态+启停按钮/音量 range 300/刷新回填/import threading/svc timer）
+- 备注：桌面 exe 已部署（61.1MB）；服务按钮启动的是写死路径的 audiocpp_server，若换机器/路径需改 `_AUDIO_CPP_SERVER`
+
+### 2026-09-07（修复克隆音色变男声/诡异：坏参考 wav + 错误字段名；新增朗读音量调节）
+- **问题1（用户反馈）**：桌宠接 audio.cpp 克隆星绘后，合成出来是**男声/诡异**，不是星绘女声；而 WebUI 里手动跑同一参考音频是正常女声
+- **排查路径**：
+  1. 抓 WebUI 前端 JS + audio.cpp server 源码 `runtime.cpp`（139KB）逐行核对请求协议 → 发现**两个字段错误**：① server 只认顶层复数 `instructions`（单数 `instruction` 被静默忽略）；② 克隆请求带了 `voice: "alloy"` 会让 server 设 `cached_voice_id`（内置音色）与 `voice_ref`(克隆音频) 冲突 → **克隆失效走内置音色**
+  2. **真正元凶**：`references\star_ref.wav` 被错误转码——原始 mp3 是 **8.39s**，坏 wav 却是 **15.41s（拉长一倍）** → 音调压低变慢 → 克隆出男声+诡异（用 soundfile 解码对比 mp3/wav 时长实锤；坏 wav 有效语音 0.27~14.89s 占满全条）
+  3. 用 scipy `resample_poly` 从原始 mp3 重采样出干净 `star_ref.wav`（8.39s / 24kHz / 单声道，语音 0.15~8.11s）
+- **代码修复**（`ai_chat.py`）：`_api_speech_synth` payload 改造——**克隆时（有 ref_audio）绝不带 `voice`**（避免与 voice_ref 冲突）；指令字段改**复数 `instructions`**；无克隆才发 `voice`。与 WebUI 请求结构完全对齐
+- **对照验证**：同 seed 下 路径版 vs base64 内联版 **md5 完全一致**（证明 server 读路径正常、非路径问题）；修复后合成正常（WebUI 手动跑女声 = 桌宠 API 输出）✅
+- **问题2（用户需求）**：新增可调整**播报音量**
+- **实现**（`ai_chat.py` + `settings_panel.py`）：朗读服务表单加「朗读音量」滑块(0-100)+数字，`set_tts_volume/tts_volume/_apply_tts_volume`（QAudioOutput.setVolume 0~1），实时生效+持久化（配置 `ai.tts_volume`）；播放器初始化即应用音量；refresh_all 回填
+- **验证**：音量冒烟 8 项全过（控件/默认100/滑块40同步spin/配置存40/audio_out=0.4/spin75同步/0.75/refresh回填30）✅；py_compile ✅；新 exe 打包部署 ✅
+- 涉及：`ai_chat.py`（payload 重构/音量三方法/init 应用）、`settings_panel.py`（音量行+handler+回填）、`references\star_ref.wav`（重新生成）、`references\fix_ref_wav.py`
+- 备注：旧桌宠进程需完全退出再开新版（提权运行 Stop-Process 会 Access denied，需手动退出）
+
+
+### 2026-09-07（桌宠接入 audio.cpp 本地克隆音色 TTS：星绘音色 + 情绪模型自动补齐）
+- **需求（用户）**：桌宠朗读接 audio.cpp（本地 BreezeTTS 2 Clone，8080）**克隆星绘音色**；说话情绪不要手动填，由**模型自动判断补齐**
+- **背景**：audio.cpp server 原生 `POST /v1/audio/speech` 就支持 `voice_ref`(参考音频路径) + `reference_text`(转录) + `instruction`(情绪/人设) → **桌宠零代理直连 8080**（原 8081 官方 Breeze 代理方案仍保留未删，但不再需要）
+  - 实测：`{model:"breeze-tts-clone", voice_ref:<star_ref.wav>, reference_text:"初次见面…", instruction:"难过的说…"}` → **星绘克隆难过语气 9s 出 418KB wav** ✅
+  - 注意：audio.cpp 忽略 `response_format`，**总是返回 RIFF/WAV**（哪怕请求 mp3）；桌宠改为存 `.wav`
+- **实现**（`ai_chat.py`）：
+  1. `_api_speech_synth` 扩展参数 `ref_audio/ref_text/instruction`：填了 `ref_audio` 才带 `voice_ref`+`reference_text`（克隆）；`instruction` 为情绪/人设（BreezeTTS2 支持中文情绪短语）；统一存 `.wav`
+  2. `TTSWorker` 构造新增 `instruction`；`_synth_once` 从配置读克隆三件套 `tts_api_ref/tts_api_ref_text/tts_api_instruction`
+  3. **情绪自动补齐**：`default_tts_prompt` 改造——让 LLM 输出两行「情绪：<中文情绪>」「朗读：<改写稿>」；`parse_tts_output` 解析；`_on_rewrite_done` 把解析出的情绪作为 `instruction` 传给 TTSWorker（改写失败→朗读原文、情绪留空）
+  4. `set_tts_api/test_tts_api` 扩展支持 ref/ref_text/instruction
+- **实现**（`settings_panel.py`）：朗读服务表单在「音色」下新增三字段——**参考音频**(带「浏览…」按钮，选完自动找同目录同名 `.txt` 填转录)、**参考转录**、**默认情绪**(留空=AI 自动判断)；`_ai_apply_tts_api/_ai_pick_tts_ref/_ai_test_tts_api/refresh_all` 同步
+- **配置**（桌面 `卡丘简易桌宠数据\pet_config.json` ai 段）：`tts_api_base=http://127.0.0.1:8080/v1`、`tts_api_model=breeze-tts-clone`、`tts_api_ref=<…>\audio-cpp\references\star_ref.wav`、`tts_api_ref_text=初次见面，我叫星绘。这个名字可不是代号哦。请多关照了。`、`tts_api_instruction=`(空=自动)
+- **验证**：`parse_tts_output` 单测 6 例全过 ✅；克隆三件套 GUI 冒烟 7 项全过（控件/保存/回填/浏览自动填转录）✅；**真实 LLM(commandcode)+audio.cpp 端到端**：回复「我又把钥匙弄丢了…」→ LLM 改写自动判「懊恼自责」→ 星绘克隆懊恼语气合成 510KB wav ✅；ai_selftest/gui_smoke 回归过 ✅；py_compile 全过 ✅
+- 涉及：`ai_chat.py`、`settings_panel.py`；冒烟脚本 `tts_parse_test.py`/`tts_clone_smoke.py`（验证后已删）
+- 备注：打包 exe 后需完全退出旧桌宠再运行新版；情绪强弱可后续在面板「默认情绪」微调（如填「温柔地轻声」），留空则走 AI 每句自动判断
+
+
+### 2026-09-06（本地 TTS 部署：Breeze TTS 2 接入桌宠朗读）
+- **需求（用户）**：桌宠朗读要支持**本地 TTS**（不依赖云端）；调研后选定当前开源榜一 **Breeze TTS 2**（中英双语、3.48B、Apache 权重研究/非商用）
+- **调研结论**：Breeze TTS 2 官方 PyTorch 在 Windows 原生只能 **eager/sdpa**（约 40s/句）；**fast path（CUDA Graph + Triton）需要 Linux**——Windows 无 Triton wheel（已实测 `TritonMissing` 失败）
+- **部署尝试（最终落 Windows 原生 sdpa + OpenAI 兼容代理）**：
+  1. Windows 原生：Python 3.12 venv + **torch 2.9.1+cu128**（RTX 5060 Ti Blackwell 必须 cu128）+ modelscope 下载权重 7.4GB → `python -m breeze_infer.api <模型> --host 127.0.0.1:7860` 跑通，sdpa 合成 5.7s 音频 37.6s
+  2. **WSL2 fast path 验证**：转 WSL2（Linux 自带 triton 3.5.1），`--fast-all` CUDA Graph 全捕获，**4.2s 音频只用 3.5s（RTF ~0.83，比 sdpa 快 11 倍）**——但因本机嵌套虚拟化 + WSL2 与 Windows 网络隔离（127.0.0.1 / eth0 均不通），桌宠（Windows）无法访问 WSL 内服务，**故接入用 Windows 原生**
+  3. **OpenAI 兼容代理** `server/breeze_openai_proxy.py`（8081）：把桌宠的 JSON `{model,input,voice,response_format}` → 官方 Breeze multipart → PCM 封装 wav 返回；`voice` 空=默认中文女声，填文案=人设描述（Breeze voice-design 特色）；坑：响应头不能放中文（latin-1 报错）
+- **接线桌宠**（零代码改动，只写配置）：桌面 `卡丘简易桌宠数据\pet_config.json` 的 `ai` 段：`tts_api_base=http://127.0.0.1:8081/v1`、`tts_api_model=Breeze-TTS-2`、`tts_enabled=true`、`tts_mode=api` → 桌宠「设置→AI→朗读服务」即用本地 Breeze
+- **验证**：Windows 原生 sdpa 合成 ✅；代理端到端（模拟桌宠请求 → wav 返回 218KB）✅；代理 /health 显示 upstream ok ✅；配置已写入 ✅
+- 涉及（外部目录 `breeze-tts-local/`）：`repo/`（官方代码 + api.py 加 BREEZE_ATTN 环境变量支持 sdpa）、`venv/`（torch cu128）、`server/breeze_openai_proxy.py`、`test_synth*.py`、`manage.py`
+- **遗留（用户可后续优化）**：WSL2 fast 虽快但 Windows 连不通（需 netsh 转发 + WSL 防火墙放行，本机嵌套虚拟化难通）；当前用 Windows 原生 sdpa（40s/句可用但慢），如需更快建议后续试 Breeze-TTS-2.cpp（Vulkan/GGUF，Windows 原生跨平台）
+- **用户验证**：需完全退出桌宠再双击桌面 exe → 设置→AI→朗读服务 点「测试语音」听本地 Breeze 朗读
+
+
+### 2026-09-06（转 ComfyUI 部署 Breeze TTS 2：节点 + cuda_graphs 加速 + 中文工作流）
+- **需求（用户）**：不要独立 Python 进程，改为**在已有的 ComfyUI 里部署** Breeze TTS 2，体验 WebUI/工作流
+- **关键背景**：本机 ComfyUI = **Comfy Desktop 桌面版**，真实运行目录 `C:\Users\mier\AppData\Local\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI\`（.venv = Python 3.13.12），模型目录映射到 `Comfy-Desktop\ComfyUI-Shared\models\`（inst-*.yaml）。**D:\ComfyUI 只是源码副本，不是运行目录**（custom_nodes/模型都要放运行目录 + 共享 models 才生效）
+- **WSL 涂味（显存元凶）**：WSL 里多次启动 Breeze fast 后，残留 CUDA context 占 GPU ~14.5GB，导致 ComfyUI/本地一切卡顿 → **彻底关停 WSL 立即释放**（显存 15786→1254 MiB）。教训：WSL 内跑 GPU 模型要防僵尸进程吞显存
+- **部署**：装社区节点 **Saganaki22/ComfyUI-Breeze-TTS-2**（60⭐，node-del/grad）+ 下模型 **Breeze-TTS-2-int8-hybrid.safetensors**（4.5GB，INT8 ConvRot=bf16音质+省27%显存，适用16GB卡）到 `ComfyUI-Shared\models\breezetts2\drbaph_Breeze-TTS-2-comfyui\`（含 audio_tokenizer）
+- **节点亮点（免 Triton 加速）**：LoadModel 的 `decode_mode="cuda_graphs"` **手动捕获 eager 步骤**（绕过 torch.compile/triton 限制，Windows 原生可用）+ `attention` 可选 sdpa/flash_attention/sageattention → 这是本机 ComfyUI 里吃满 GPU 的加速正解
+- **验证**：重启 ComfyUI → 7 节点全部注册（LoadModel/VoiceClone/VoiceDesign/VoiceDirection/Speaker/MultiSpeaker/WhisperTranscribe）✅；API 提交 int8-hybrid+sdpa+cuda_graphs 工作流 → VoiceDesign 中文合成 **success ~22s**（含首次模型加载）✅
+- **交付**：中文体验工作流 `BreezeTTS2_中文体验.json`（LoadModel→VoiceDesign→PreviewAudio，已放桌面）→ ComfyUI 拖动加载即用，改文本/人设可复用
+- 涉及（外部 `breeze-tts-local/`）：`downloads/ComfyUI-Breeze-TTS-2`（节点源码）、`download_breeze_model.py`、`comfy_breeze_test.py`、`BreezeTTS2_中文体验.json`；Comfy Desktop 运行目录与 ComfyUI-Shared\models
+- 备注：桌宠朗读接入暂未做（此次聚焦 ComfyUI 体验）；如需桌宠用本地 Breeze 仍可回退第 1 条方案（Windows 原生 sdpa + 代理）
+
+
+### 2026-09-06（audio.cpp 版 Breeze TTS 2：Windows 原生 1.8-3.2x 实时，GPU 占用仍~60%）
+- **需求（用户）**：ComfyUI 节点 GPU 占用仅 ~50%，想用 audio.cpp（GGML/C++ 引擎）试吃满 GPU + 更快
+- **调研结论**：ComfyUI 节点（Saganaki22）README 明说"官方 CUDA-graph fast path intentionally not ported"——它用 eager 循环重写官方 runtime（DynamicCache 非 CUDA Graph），GPU 50% 是设计使然。真正吃满要 audio.cpp 或官方 fast path
+- **部署 audio.cpp v0.7.2（2026-09-04 release 起正式支持 breeze_tts）**：
+  1. 下载 `audio-v0.7.2-bin-windows-x64-vulkan.zip`（256MB 预编译）→ `breeze-tts-local\audio-cpp\bin-vulkan\`
+  2. 下模型 `breeze-tts-2-q8_0.gguf`（4.8GB，audio-cpp 官方 HF repo）→ 配 config.json/tokenizer/audio_tokenizer（从 HF 原模型复制）
+  3. **踩坑**：①v0.7.2 CUDA 版缺 cuda.dll/nvcudart_hybrid64.dll（ggml-cuda 依赖，torch 不带）→ 用 **vulkan 版**免 CUDA runtime；②vulkan bin 原本没 model_specs → 从 cuda 版复制；③预编译 bin 的 **builtin spec 没启用 breeze_tts**（报 "no safetensors source"）→ 必须 `--model-spec-override <model_specs目录>`；④中文别走 cmd/bat（GBK 切命令）→ 用 Python subprocess 传参；⑤人设用 `--request-option instruction=...`
+- **验证（RTX 5060 Ti Vulkan）**：英文短句 2.16s 音频 7.0s（3.25x 实时）；中文 12.56s 音频 22.7s（1.8x 实时）✅；wav 正常生成
+- **GPU 占用实测**：推理期 55-61%、功耗 65-68W——**仍非 100%**。结论：TTS 自回归逐帧串行解码（每帧依赖上帧）是瓶颈本质，C++ 消除 Python 开销后 ~60% 已是该模型/单 batch 的合理水平，非配置问题
+- 涉及（外部 `breeze-tts-local/audio-cpp/`）：`bin-vulkan/`（v0.7.2 vulkan 版 + model_specs）、`models/breeze-tts-2/`（q8_0 gguf + 配套）、`run_breeze.bat`（英文）、`run_zh.py`（中文）、`README.md`
+- 备注：audio.cpp 有 server WebUI（`audiocpp_server --ui`）；CLI 已可出 wav。若用户要更吃 GPU，只能等官方 fast path 的 Windows 支持（dev 分支/未来 release）
+
+
 ### 2026-09-07（气泡改版：透明背景 + 描边白字 + 跟随桌宠移动）
 - **需求（用户反馈）**：①AI 输出文字气泡的背景要透明（不要深色底）；②气泡要随着桌宠移动
 - **实现**（`ai_chat.py` BubbleWidget 重构）：
