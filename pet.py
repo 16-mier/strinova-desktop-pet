@@ -66,6 +66,16 @@ except Exception as _e:
     HAS_PANEL = False
     print('settings_panel import fail:', _e)
 
+# AI 对话 + TTS（云端 edge-tts / 本地 SAPI）——可选模块，缺失不影响桌宠本体
+try:
+    import ai_chat as _ai_mod
+    _ai_mod.bind_pet_module(sys.modules[__name__])
+    HAS_AI = True
+except Exception as _e:
+    _ai_mod = None
+    HAS_AI = False
+    print('ai_chat import fail:', _e)
+
 
 PET_VERSION = "1.6.0"
 DEFAULT_ROLE = "星绘"
@@ -1261,6 +1271,14 @@ class PetWindow(QWidget):
         self.load_role(self.role)
         self.init_tray()
         self.place_default()
+        # AI 对话 + TTS（可选；右键桌宠 → 聊天窗 + 气泡）
+        self.ai = None
+        if HAS_AI:
+            try:
+                self.ai = _ai_mod.AiChatManager(self)
+            except Exception as _e:
+                self.ai = None
+                print('AiChatManager init fail:', _e)
         # 小键盘 1-9 全局热键（注册在窗口句柄上；show 后 winId 才有效）
         self._hotkey_ids = {}
         self._custom_hk_map = {}   # hid → audio_key（自定义音频快捷键）
@@ -1468,6 +1486,12 @@ class PetWindow(QWidget):
             pass
         try:
             self._numpad_hook_stop()
+        except Exception:
+            pass
+        try:
+            ai = getattr(self, 'ai', None)
+            if ai is not None and hasattr(ai, 'close_all'):
+                ai.close_all()
         except Exception:
             pass
         try:
@@ -2613,6 +2637,13 @@ class PetWindow(QWidget):
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            # 右键桌宠：AI 对话开启时打开聊天窗（否则仍走默认什么都不做）
+            ai = getattr(self, 'ai', None)
+            if ai is not None and ai.enabled():
+                ai.open_chat()
+                e.accept()
+                return
         if e.button() == Qt.MouseButton.LeftButton:
             lp = e.position().toPoint()
             if self._hovering and self._on_menu_btn(lp):

@@ -1,0 +1,645 @@
+# ai_chat.py —— 卡丘简易桌宠 · AI 对话 + TTS 朗读
+# ============================================================================
+# 功能：
+#   1) AI 对话：OpenAI 兼容 /chat/completions（base_url / api_key / model 可配置，
+#      纯标准库 urllib 实现，零新增依赖；走系统代理/环境变量）
+#   2) TTS 朗读（依附 AI）：朗读的始终是 AI 回复文本，两种引擎：
+#         cloud = edge-tts（微软 Edge 免费云端语音，需联网，走 HTTPS_PROXY 代理）
+#         local = Windows 自带 SAPI（comtypes 直调 SpVoice → 写 wav，离线可用）
+#      云端失败自动回退本地（边缘场景不失声）
+#   3) UI：右键桌宠弹出聊天窗（深色无边框、历史+输入框）；AI 回复以气泡
+#      显示在桌宠旁边 + 可选朗读。AI 与 TTS 各自独立开关，TTS 的输入
+#      永远来自 AI 回复文本。
+# ============================================================================
+import asyncio
+import html
+import json
+import os
+import socket
+import threading
+import time
+import urllib.error
+import urllib.request
+
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PyQt6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+
+# ---------- 可选依赖（都失败也能聊天，只是没有朗读） ----------
+try:
+    import edge_tts
+    HAS_EDGE = True
+except Exception:
+    edge_tts = None
+    HAS_EDGE = False
+
+try:
+    import comtypes
+    from comtypes.client import CreateObject
+    from comtypes.gen import SpeechLib as _SL
+    HAS_SAPI = True
+except Exception:
+    comtypes = None
+    CreateObject = None
+    _SL = None
+    HAS_SAPI = False
+
+# pet.py 启动时注入模块引用（避免循环导入），与 settings_panel 同模式
+pet_mod = None
+
+
+def bind_pet_module(mod):
+    global pet_mod
+    pet_mod = mod
+
+
+DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
+TTS_MODE_CLOUD = 'cloud'   # edge-tts 云端（默认）
+TTS_MODE_LOCAL = 'local'   # Windows 自带 SAPI（离线）
+
+CHAT_QSS = """
+QWidget#chatRoot { background: #1a1c24; }
+QLabel { color: #e6e8f0; }
+QTextBrowser {
+    background: #191b23; border: 1px solid #33374a; border-radius: 8px;
+    color: #e6e8f0; font-size: 13px; padding: 6px;
+}
+QLineEdit {
+    background: #2c3142; border: 1px solid #3a4057; border-radius: 8px;
+    padding: 7px 10px; color: #e6e8f0;
+}
+QPushButton {
+    background: #2c3142; border: 1px solid #3a4057; border-radius: 8px;
+    padding: 7px 14px; color: #e6e8f0;
+}
+QPushButton:hover { background: #38405a; }
+QPushButton:disabled { color: #666b80; background: #22252f; }
+"""
+
+
+# ============================================================================
+# 配置读写（pet_config.json 里 "ai" 段）
+# ============================================================================
+def _ai_cfg():
+    if pet_mod is not None:
+        cfg = pet_mod.load_config()
+        ai = cfg.get('ai') or {}
+        return ai if isinstance(ai, dict) else {}
+    return {}
+
+
+def _save_ai_cfg(**kw):
+    if pet_mod is None:
+        return
+    cfg = pet_mod.load_config()
+    ai = cfg.get('ai') or {}
+    if not isinstance(ai, dict):
+        ai = {}
+    ai.update(kw)
+    cfg['ai'] = ai
+    pet_mod.save_config(cfg)
+
+
+def _tts_dir():
+    """TTS 合成产物临时目录（用户数据目录下，可写持久）"""
+    if pet_mod is None:
+        return None
+    try:
+        d = os.path.join(pet_mod.base_dir(), 'tts_cache')
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return None
+
+
+def _detect_proxy():
+    """自动探测可用的 HTTP 代理：优先环境变量（HTTP_PROXY/HTTPS_PROXY），
+    否则探测本机常见代理端口（Clash 7890 等）。返回 'http://host:port' 或 None。
+    避免用户没配系统代理时 edge-tts 云语音 403/超时。只探测一次。"""
+    env = (os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY')
+           or os.environ.get('https_proxy') or os.environ.get('http_proxy') or '')
+    if env:
+        return env.strip()
+    if getattr(_detect_proxy, '_done', False):
+        return getattr(_detect_proxy, '_result', None)
+    _detect_proxy._done = True
+    # 本机快速探测常见代理端口（只连本机 loopback，秒级超时）
+    result = None
+    for port in (7890, 7897, 10809, 1080, 8080, 8888):
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=0.3):
+                result = 'http://127.0.0.1:%d' % port
+                break
+        except Exception:
+            continue
+    _detect_proxy._result = result
+    return result
+
+
+# ============================================================================
+# OpenAI 兼容请求（纯 urllib，零新依赖）
+# ============================================================================
+def _chat_request(base_url, api_key, model, messages, timeout=90):
+    """POST {base_url}/chat/completions，返回回复文本。失败抛异常"""
+    url = str(base_url or '').rstrip('/') + '/chat/completions'
+    body = json.dumps(
+        {'model': model, 'messages': messages, 'stream': False},
+        ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(url, data=body, method='POST')
+    req.add_header('Content-Type', 'application/json')
+    req.add_header('Authorization', 'Bearer %s' % (api_key or ''))
+    # urllib 默认 ProxyHandler 会读环境变量 HTTP_PROXY/HTTPS_PROXY（走代理）
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode('utf-8'))
+    try:
+        return data['choices'][0]['message']['content']
+    except Exception:
+        return json.dumps(data, ensure_ascii=False)[:500]
+
+
+# ============================================================================
+# 本地 SAPI 合成（comtypes 直调 SpVoice → 写 wav）
+# 关键坑：SpFileStream.Format.Type 必须先设、再 Open（反了报 0x80045002）
+# ============================================================================
+def _sapi_synth(text, out_wav, rate=0):
+    comtypes.CoInitialize()
+    voice = CreateObject('SAPI.SpVoice')
+    fs = CreateObject('SAPI.SpFileStream')
+    fs.Format.Type = _SL.SAFT22kHz16BitMono   # 22kHz/16bit/mono
+    fs.Open(out_wav, _SL.SSFMCreateForWrite)
+    voice.AudioOutputStream = fs
+    voice.Rate = rate
+    voice.Volume = 100
+    voice.Speak(text)
+    fs.Close()
+
+
+# ============================================================================
+# edge-tts 云端合成（async，在 QThread 里 asyncio.run；兼容 6.x dict / 7.x dataclass）
+# ============================================================================
+async def _edge_synth(text, voice):
+    proxy = _detect_proxy()
+    com = edge_tts.Communicate(text, voice, rate='+0%',
+                               proxy=proxy or None)
+    buf = bytearray()
+    async for ev in com.stream():
+        if isinstance(ev, dict):                       # edge-tts 6.x
+            if ev.get('type') == 'audio':
+                buf += ev['data']
+        elif isinstance(ev, edge_tts.AudioDataEvent):  # edge-tts 7.x
+            buf += ev.data
+    if not buf:
+        raise RuntimeError('edge-tts 返回空音频')
+    return bytes(buf)
+
+
+# ============================================================================
+# 后台线程：AI 对话请求
+# ============================================================================
+class AIWorker(QThread):
+    done = pyqtSignal(str, str)   # (回复文本, 错误信息；错误时文本为空)
+
+    def __init__(self, base_url, api_key, model, messages, parent=None):
+        super().__init__(parent)
+        self._base_url = base_url
+        self._api_key = api_key
+        self._model = model
+        self._messages = messages
+
+    def run(self):
+        try:
+            reply = _chat_request(self._base_url, self._api_key,
+                                  self._model, self._messages)
+            if not reply or not reply.strip():
+                reply = '（AI 没有返回内容）'
+            self.done.emit(reply, '')
+        except Exception as e:
+            self.done.emit('', '%s' % e)
+
+
+# ============================================================================
+# 后台线程：TTS 合成（cloud=edge-tts / local=SAPI），云端失败自动回退本地
+# ============================================================================
+class TTSWorker(QThread):
+    done = pyqtSignal(str, str)   # (音频文件路径, 错误信息；错误时路径为空)
+
+    def __init__(self, text, mode, voice, seq, parent=None):
+        super().__init__(parent)
+        self._text = text
+        self._mode = mode if mode in (TTS_MODE_CLOUD, TTS_MODE_LOCAL) else TTS_MODE_CLOUD
+        self._voice = voice or DEFAULT_VOICE
+        self._seq = seq
+
+    def run(self):
+        # 云端路径：微软端点偶发抖动 → 自动重试 1 次
+        if self._mode == TTS_MODE_CLOUD:
+            path = self._synth_once(TTS_MODE_CLOUD)
+            if not path:
+                time.sleep(0.5)
+                path = self._synth_once(TTS_MODE_CLOUD)
+            if path:
+                self.done.emit(path, '')
+                return
+            # 云端失败 → 自动回退本地（若可用）
+            path = self._synth_once(TTS_MODE_LOCAL)
+            if path:
+                self.done.emit(path, '')
+                return
+            self.done.emit('', '语音合成失败（云端不可用且本地语音不可用）')
+            return
+        path = self._synth_once(self._mode)
+        if path:
+            self.done.emit(path, '')
+            return
+        self.done.emit('', '语音合成失败（%s 不可用）' % self._mode)
+
+    def _synth_once(self, mode):
+        base = _tts_dir()
+        if not base:
+            return None
+        try:
+            if mode == TTS_MODE_CLOUD and HAS_EDGE:
+                path = os.path.join(base, 'tts_%d_%d.mp3' % (self._seq, int(time.time() * 1000)))
+                data = asyncio.run(_edge_synth(self._text, self._voice))
+                with open(path, 'wb') as f:
+                    f.write(data)
+                return path
+            if mode == TTS_MODE_LOCAL and HAS_SAPI:
+                path = os.path.join(base, 'tts_%d_%d.wav' % (self._seq, int(time.time() * 1000)))
+                _sapi_synth(self._text, path)
+                return path
+        except Exception:
+            return None
+        return None
+
+
+# ============================================================================
+# 回复气泡：显示在桌宠旁边（跟随桌宠、自动消失、点击关闭）
+# ============================================================================
+_BUBBLE_MAX_W = 380
+_BUBBLE_MIN_W = 180
+_BUBBLE_LIFE_MS = 20000
+_FOLLOW_MS = 300
+
+
+class BubbleWidget(QWidget):
+    def __init__(self, pet):
+        super().__init__(None,
+                         Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        self._pet = pet
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(False)
+        self._label = QLabel(self)
+        self._label.setWordWrap(True)
+        self._label.setStyleSheet(
+            'color:#f0f2f8; background:transparent; font-size:12px;')
+        self._label.setMargin(10)
+        # 自动消失
+        self._life = QTimer(self)
+        self._life.setSingleShot(True)
+        self._life.setInterval(_BUBBLE_LIFE_MS)
+        self._life.timeout.connect(self.hide)
+        # 跟随桌宠移动
+        self._follow = QTimer(self)
+        self._follow.setInterval(_FOLLOW_MS)
+        self._follow.timeout.connect(self._reposition)
+
+    def show_text(self, text):
+        self._label.setText(text)
+        self._label.adjustSize()
+        w = min(_BUBBLE_MAX_W, max(_BUBBLE_MIN_W, self._label.sizeHint().width() + 24))
+        self._label.setFixedWidth(w)
+        self._label.adjustSize()
+        self.resize(w + 20, self._label.height() + 20)
+        self._reposition()
+        self.show()
+        self.raise_()
+        self._life.start()
+        self._follow.start()
+
+    def hideEvent(self, ev):
+        self._follow.stop()
+        super().hideEvent(ev)
+
+    def mousePressEvent(self, ev):
+        """点气泡 → 关闭"""
+        self.hide()
+        ev.accept()
+
+    def _reposition(self):
+        if self._pet is None:
+            return
+        try:
+            anchor = self._pet.frameGeometry()
+        except Exception:
+            return
+        scr = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
+        geo = scr.availableGeometry() if scr is not None else None
+        # 默认放桌宠右边；放不下则放左边
+        x = anchor.right() + 12
+        if geo is not None and x + self.width() > geo.right():
+            x = anchor.left() - 12 - self.width()
+        y = anchor.top()
+        if geo is not None:
+            if y + self.height() > geo.bottom():
+                y = geo.bottom() - self.height()
+            y = max(y, geo.top())
+            x = max(geo.left(), min(x, geo.right() - self.width()))
+        self.move(x, y)
+
+
+# ============================================================================
+# 聊天窗口（右键桌宠弹出）
+# ============================================================================
+class ChatWindow(QWidget):
+    sendRequested = pyqtSignal(str)
+
+    def __init__(self, pet):
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self._pet = pet
+        self.setWindowTitle("卡丘简易桌宠 · AI 对话")
+        self.setObjectName("chatRoot")
+        self.setStyleSheet(CHAT_QSS)
+        self.setFixedSize(400, 480)
+        self._drag_offset = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        # 标题行（可拖动）
+        title = QHBoxLayout()
+        t = QLabel("💬 与 AI 对话")
+        t.setStyleSheet("font-size:14px; font-weight:bold;")
+        title.addWidget(t)
+        title.addStretch(1)
+        btn_x = QPushButton("✕")
+        btn_x.setFixedSize(28, 24)
+        btn_x.clicked.connect(self.hide)
+        title.addWidget(btn_x)
+        root.addLayout(title)
+
+        # 历史
+        self.history = QTextBrowser()
+        self.history.setOpenExternalLinks(False)
+        root.addWidget(self.history, 1)
+
+        # 输入行
+        row = QHBoxLayout()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("问问桌宠…（回车发送）")
+        self.input.returnPressed.connect(self._send)
+        row.addWidget(self.input, 1)
+        self.btn_send = QPushButton("发送")
+        self.btn_send.clicked.connect(self._send)
+        row.addWidget(self.btn_send)
+        root.addLayout(row)
+
+        self.append_html('<div style="color:#8fa3c8;">你好呀，我是桌宠里的 AI 小伙伴～右键打开设置可调整 AI 服务与朗读开关。</div>')
+
+    # ---------- 窗口拖动 ----------
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() < 40:
+            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_offset is not None and e.buttons() & Qt.MouseButton.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_offset = None
+        super().mouseReleaseEvent(e)
+
+    # ---------- 交互 ----------
+    def _send(self):
+        text = self.input.text().strip()
+        if not text:
+            return
+        self.input.clear()
+        self.sendRequested.emit(text)
+
+    def set_busy(self, busy):
+        self.input.setEnabled(not busy)
+        self.btn_send.setEnabled(not busy)
+        self.btn_send.setText("思考中…" if busy else "发送")
+
+    def append_msg(self, who, text):
+        color = '#9fb0d9' if who == '你' else '#ffd76e'
+        esc = html.escape(text).replace('\n', '<br>')
+        self.append_html(
+            '<div style="color:%s; font-weight:bold; margin-top:8px;">%s</div>'
+            '<div style="color:#e6e8f0;">%s</div>' % (color, who, esc))
+
+    def append_err(self, err):
+        self.append_html('<div style="color:#e06c75; margin-top:6px;">⚠ %s</div>' % html.escape(err))
+
+    def append_html(self, h):
+        self.history.append(h)
+        bar = self.history.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def show_near(self, pet_rect):
+        """显示在桌宠旁边（放不下则居中）"""
+        scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
+        geo = scr.availableGeometry() if scr is not None else None
+        x = pet_rect.left() - self.width() - 14
+        if geo is None or x < geo.left():
+            x = pet_rect.right() + 14
+        if geo is not None and x + self.width() > geo.right():
+            x = geo.left() + (geo.width() - self.width()) // 2
+        y = pet_rect.top()
+        if geo is not None:
+            y = max(geo.top(), min(y, geo.bottom() - self.height()))
+        self.move(x, y)
+
+
+# ============================================================================
+# AI 聊天管理器（右键打开聊天窗 + 气泡 + TTS 播放）
+# ============================================================================
+class AiChatManager(QObject):
+    def __init__(self, pet):
+        super().__init__()
+        self._pet = pet
+        self._chat = None
+        self._bubble = None
+        self._messages = []           # 多轮上下文（不含 system，由发送时补）
+        self._ai_worker = None
+        self._tts_worker = None
+        self._seq = 0                 # 递增序号：新 TTS 打断旧 TTS
+        self._player = None
+        self._audio_out = None
+        try:
+            self._player = QMediaPlayer()
+            self._audio_out = QAudioOutput()
+            self._player.setAudioOutput(self._audio_out)
+        except Exception:
+            self._player = None
+            self._audio_out = None
+        self._system_prompt = (
+            '你是桌宠「卡丘」里的 AI 小伙伴，活泼友善，'
+            '回答简洁亲切，用中文。')
+
+    # ------------- 配置 -------------
+    def cfg(self):
+        return _ai_cfg()
+
+    def enabled(self):
+        return bool(self.cfg().get('enabled', False))
+
+    def tts_enabled(self):
+        return bool(self.cfg().get('tts_enabled', True))
+
+    def set_enabled(self, on):
+        _save_ai_cfg(enabled=bool(on))
+
+    def set_tts_enabled(self, on):
+        _save_ai_cfg(tts_enabled=bool(on))
+
+    def set_tts_mode(self, mode):
+        _save_ai_cfg(tts_mode=mode)
+
+    def set_server(self, base_url, api_key, model):
+        _save_ai_cfg(base_url=base_url, api_key=api_key, model=model)
+
+    def set_voice(self, voice):
+        _save_ai_cfg(tts_voice=voice)
+
+    # ------------- 聊天窗 -------------
+    def open_chat(self):
+        if self._chat is None:
+            self._chat = ChatWindow(self._pet)
+            self._chat.sendRequested.connect(self._on_send)
+        self._chat.show_near(self._pet.frameGeometry())
+        self._chat.show()
+        self._chat.raise_()
+        self._chat.activateWindow()
+        self._chat.input.setFocus()
+
+    def close_all(self):
+        if self._bubble is not None:
+            self._bubble.hide()
+        if self._chat is not None:
+            self._chat.hide()
+        if self._player is not None:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+
+    # ------------- 发送 / 回复 -------------
+    def _on_send(self, text):
+        cfg = self.cfg()
+        base_url = cfg.get('base_url') or DEFAULT_BASE_URL
+        api_key = cfg.get('api_key') or ''
+        model = cfg.get('model') or DEFAULT_MODEL
+        if not api_key:
+            self._chat.append_err('还没有填 API 密钥：右键打开设置 → AI 功能 里填写。')
+            return
+        if self._ai_worker is not None and self._ai_worker.isRunning():
+            return
+        self._chat.append_msg('你', text)
+        self._chat.set_busy(True)
+        # 多轮上下文：system + 最近 20 条
+        msgs = [{'role': 'system', 'content': self._system_prompt}]
+        msgs += self._messages[-20:]
+        msgs.append({'role': 'user', 'content': text})
+        self._messages.append({'role': 'user', 'content': text})
+        self._ai_worker = AIWorker(base_url, api_key, model, msgs, self)
+        self._ai_worker.done.connect(self._on_ai_done)
+        self._ai_worker.finished.connect(self._ai_worker.deleteLater)
+        self._ai_worker.start()
+
+    def _on_ai_done(self, reply, err):
+        if self._chat is not None:
+            self._chat.set_busy(False)
+        self._ai_worker = None
+        if err:
+            if self._chat is not None:
+                self._chat.append_err('AI 请求失败：%s\n（检查 设置→AI功能 的服务器地址/密钥/模型，及网络代理）' % err)
+            return
+        self._messages.append({'role': 'assistant', 'content': reply})
+        if self._chat is not None:
+            self._chat.append_msg('AI', reply)
+        # 气泡显示回复（桌宠旁边）
+        self._show_bubble(reply)
+        # TTS 依附 AI：朗读的就是这段 AI 回复
+        if self.tts_enabled():
+            self._speak(reply)
+
+    # ------------- 气泡 -------------
+    def _show_bubble(self, text):
+        if self._bubble is None:
+            self._bubble = BubbleWidget(self._pet)
+        self._bubble.show_text(text)
+
+    # ------------- TTS（朗读 AI 回复） -------------
+    def _speak(self, text):
+        if self._player is None:
+            return
+        cfg = self.cfg()
+        mode = cfg.get('tts_mode') or TTS_MODE_CLOUD
+        voice = cfg.get('tts_voice') or DEFAULT_VOICE
+        self._seq += 1
+        seq = self._seq
+        # 打断上一段
+        try:
+            self._player.stop()
+        except Exception:
+            pass
+        self._tts_worker = TTSWorker(text, mode, voice, seq, self)
+        self._tts_worker.done.connect(
+            lambda path, err, s=seq: self._on_tts_done(path, err, s))
+        self._tts_worker.finished.connect(self._tts_worker.deleteLater)
+        self._tts_worker.start()
+
+    def _on_tts_done(self, path, err, seq):
+        if seq != self._seq:
+            return   # 已有更新的朗读，丢弃旧合成
+        if not path:
+            if self._chat is not None:
+                self._chat.append_err('朗读失败：%s' % err)
+            return
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(path))
+        self._player.play()
+        # 播完（或超时）后清理临时文件
+        def _cleanup():
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        QTimer.singleShot(30000, _cleanup)
+
+    # ------------- 测试连接（设置面板用） -------------
+    def test_connection(self, base_url, api_key, model, on_done):
+        def _run():
+            try:
+                msgs = [{'role': 'user', 'content': '你好，请只回复：连接成功'}]
+                r = _chat_request(base_url, api_key, model, msgs, timeout=20)
+                on_done(True, r.strip()[:60])
+            except Exception as e:
+                on_done(False, '%s' % e)
+        threading.Thread(target=_run, daemon=True).start()

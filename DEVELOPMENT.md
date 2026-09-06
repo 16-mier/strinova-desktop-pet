@@ -78,6 +78,23 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（新增「AI 功能」：AI 对话 + TTS 语音朗读（云端/本地双引擎））
+- **需求**：桌宠加 AI 对话；回答文字显示在桌宠旁并朗读（TTS 云端+本地都支持）；设置面板新增「AI 功能」模块，**默认关闭**；TTS 依附 AI（朗读文本=AI 回复），AI 与朗读各自独立开关
+- **交互（用户拍板）**：右键桌宠 → 弹聊天窗打字 → AI 回复以**气泡显示在桌宠旁边** + 朗读
+- **技术选型（子代理调研 + 本机实测）**：
+  - AI：OpenAI 兼容 `/chat/completions`（纯 urllib 实现，零新依赖；走系统代理/环境变量）
+  - 云端 TTS：**edge-tts 7.2.8**（微软 Edge 免费语音，24kHz mp3 流；大陆直连 403 → **自动探测代理**（环境变量→本机常见 7890/7897/10809 端口），传 `proxy=` 给 Communicate）
+  - 本地 TTS：**comtypes 直调 SAPI.SpVoice → SpFileStream 写 wav**（零新依赖，SpeechLib 类型库随包；**关键坑：Format.Type 必须先设再 Open**，否则 0x80045002）
+  - 播放：TTS 合成产物（tts_cache/ 目录）由 QMediaPlayer 播放（mp3/wav 通吃）；云端失败自动重试 1 次 + 回退本地
+- **新文件 `ai_chat.py`**：AIWorker（对话）/ TTSWorker（合成，QThread + asyncio.run 隔离线程，序列号 seq 打断旧朗读）/ BubbleWidget（桌宠旁跟随气泡，20s 自动消失，点关闭，出屏自动翻转）/ ChatWindow（右键聊天窗，可拖动，多轮上下文）/ AiChatManager（配置读写 `pet_config.json` 的 `ai` 段 + 播放）
+- **`pet.py`**：import ai_chat（try/except 可选）；构造 `self.ai = AiChatManager(self)`；`mousePressEvent` 右键 → `ai.open_chat()`（仅 AI 开启时）；closeEvent → `ai.close_all()`
+- **`settings_panel.py`** 新增模块5「AI 功能（对话 + 语音朗读）」：启用 AI 对话开关（默认关）/ 服务器地址 / API 密钥（密码框）/ 模型名 / 保存 + 测试连接 / 朗读开关 / 引擎（云端/本地）/ 云端音色下拉（晓晓等 6 个）/ 提示文案（AI 可单独聊天不开朗读；云端失败自动回退本地）
+- **spec**：hiddenimports + `ai_chat`、`comtypes.gen.SpeechLib`；datas + `collect_data_files('edge_tts')`（voices.json 必须随包）
+- **验证**：py_compile ✅；ai_selftest（模块加载/配置读写/云端合成 17KB 1.4s/本地合成 wav/代理探测 7890）✅；gui_smoke（聊天窗构造/缺 key 提示/气泡可见）✅；ruff 自动修复 ✅；exe 打包后启动正常
+- 涉及：`ai_chat.py`（新建）、`pet.py`（HAS_AI/self.ai/右键/closeEvent）、`settings_panel.py`（模块5+AI handlers）、`卡丘简易桌宠.spec`（hiddenimports+datas）
+- 备注：桌面 exe 已部署；用户需在面板填**服务器地址/API 密钥/模型**并保存后可用（key 明文存 pet_config.json 的 ai 段）
+
+
 ### 2026-09-06（设置面板：大小可填数字 + 面板不再一直置顶）
 - **需求**：①桌宠大小处要能直接填数字；②设置面板（选项框）不要一直置顶
 - **实现**（`settings_panel.py`）：

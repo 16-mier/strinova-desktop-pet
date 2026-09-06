@@ -335,6 +335,75 @@ class SettingsPanel(QWidget):
         hl.addWidget(tip3)
         bl.addWidget(gb_hk)
 
+        # ---- 模块5：AI 功能（AI 对话 + TTS 朗读，默认关闭）----
+        gb_ai = QGroupBox("AI 功能（对话 + 语音朗读）")
+        ail = QVBoxLayout(gb_ai)
+        # 主开关：AI 对话（默认关）
+        self.chk_ai_enabled = QCheckBox("启用 AI 对话（右键桌宠打开聊天窗）")
+        self.chk_ai_enabled.toggled.connect(self._ai_apply_enabled)
+        ail.addWidget(self.chk_ai_enabled)
+        # AI 服务：OpenAI 兼容接口
+        r_base = QHBoxLayout()
+        r_base.addWidget(QLabel("服务器地址："))
+        self.ed_ai_base = QLineEdit()
+        self.ed_ai_base.setPlaceholderText("https://api.deepseek.com/v1")
+        r_base.addWidget(self.ed_ai_base, 1)
+        ail.addLayout(r_base)
+        r_key = QHBoxLayout()
+        r_key.addWidget(QLabel("API 密钥："))
+        self.ed_ai_key = QLineEdit()
+        self.ed_ai_key.setPlaceholderText("sk-…")
+        self.ed_ai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        r_key.addWidget(self.ed_ai_key, 1)
+        ail.addLayout(r_key)
+        r_model = QHBoxLayout()
+        r_model.addWidget(QLabel("模型名："))
+        self.ed_ai_model = QLineEdit()
+        self.ed_ai_model.setPlaceholderText("deepseek-chat")
+        r_model.addWidget(self.ed_ai_model, 1)
+        ail.addLayout(r_model)
+        r_btn_ai = QHBoxLayout()
+        btn_ai_save = QPushButton("保存 AI 设置")
+        btn_ai_save.clicked.connect(self._ai_save)
+        r_btn_ai.addWidget(btn_ai_save)
+        btn_ai_test = QPushButton("测试连接")
+        btn_ai_test.clicked.connect(self._ai_test)
+        r_btn_ai.addWidget(btn_ai_test)
+        r_btn_ai.addStretch(1)
+        ail.addLayout(r_btn_ai)
+        self.lbl_ai_status = QLabel("💡 填好服务器地址/密钥/模型后点「保存」，再点「测试连接」验证")
+        self.lbl_ai_status.setStyleSheet("color:#7a8099; font-size:11px;")
+        ail.addWidget(self.lbl_ai_status)
+        # 朗读（TTS，依附 AI：朗读 AI 回复）
+        self.chk_ai_tts = QCheckBox("朗读 AI 回复（TTS）")
+        self.chk_ai_tts.toggled.connect(self._ai_apply_tts)
+        ail.addWidget(self.chk_ai_tts)
+        r_tts = QHBoxLayout()
+        r_tts.addWidget(QLabel("朗读引擎："))
+        self.cmb_ai_tts_mode = NoWheelComboBox()
+        self.cmb_ai_tts_mode.addItem("云端（微软语音，需联网）", 'cloud')
+        self.cmb_ai_tts_mode.addItem("本地（Windows 自带语音，离线）", 'local')
+        self.cmb_ai_tts_mode.currentIndexChanged.connect(self._ai_apply_tts_mode)
+        r_tts.addWidget(self.cmb_ai_tts_mode, 1)
+        ail.addLayout(r_tts)
+        r_voice = QHBoxLayout()
+        r_voice.addWidget(QLabel("云端音色："))
+        self.cmb_ai_voice = NoWheelComboBox()
+        for _v, _n in [('zh-CN-XiaoxiaoNeural', '晓晓 (女·标准)'),
+                       ('zh-CN-XiaoyiNeural', '晓伊 (女·活泼)'),
+                       ('zh-CN-YunxiNeural', '云希 (男·青年)'),
+                       ('zh-CN-YunjianNeural', '云健 (男·沉稳)'),
+                       ('zh-CN-YunyangNeural', '云扬 (男·专业)'),
+                       ('zh-CN-YunxiaNeural', '云夏 (男·少年)')]:
+            self.cmb_ai_voice.addItem(_n, _v)
+        self.cmb_ai_voice.currentIndexChanged.connect(self._ai_apply_voice)
+        r_voice.addWidget(self.cmb_ai_voice, 1)
+        ail.addLayout(r_voice)
+        tip5 = QLabel("朗读的文本始终是 AI 的回复；AI 可单独聊天不开朗读。云端失败会自动回退本地语音。")
+        tip5.setStyleSheet("color:#7a8099; font-size:11px;")
+        ail.addWidget(tip5)
+        bl.addWidget(gb_ai)
+
         # 底部按钮
         bottom = QHBoxLayout()
         btn_refresh = QPushButton("↻ 刷新")
@@ -603,6 +672,32 @@ class SettingsPanel(QWidget):
         if idx >= 0:
             self.cmb_pttkey.setCurrentIndex(idx)
         self.cmb_pttkey.blockSignals(False)
+
+        # AI 模块
+        ai = {}
+        ai_mgr = getattr(pet, 'ai', None)
+        if ai_mgr is not None and hasattr(ai_mgr, 'cfg'):
+            ai = ai_mgr.cfg() or {}
+        self.chk_ai_enabled.blockSignals(True)
+        self.chk_ai_enabled.setChecked(bool(ai.get('enabled', False)))
+        self.chk_ai_enabled.blockSignals(False)
+        self.chk_ai_tts.blockSignals(True)
+        self.chk_ai_tts.setChecked(bool(ai.get('tts_enabled', True)))
+        self.chk_ai_tts.blockSignals(False)
+        self.ed_ai_base.setText(ai.get('base_url', ''))
+        self.ed_ai_key.setText(ai.get('api_key', ''))
+        self.ed_ai_model.setText(ai.get('model', ''))
+        mode = ai.get('tts_mode', 'cloud') or 'cloud'
+        mi = self.cmb_ai_tts_mode.findData(mode)
+        self.cmb_ai_tts_mode.blockSignals(True)
+        self.cmb_ai_tts_mode.setCurrentIndex(mi if mi >= 0 else 0)
+        self.cmb_ai_tts_mode.blockSignals(False)
+        voice = ai.get('tts_voice', '') or ''
+        vi = self.cmb_ai_voice.findData(voice)
+        self.cmb_ai_voice.blockSignals(True)
+        self.cmb_ai_voice.setCurrentIndex(vi if vi >= 0 else 0)
+        self.cmb_ai_voice.blockSignals(False)
+        self._ai_status("")
 
     def _refresh_audio_list(self):
         pet = self._current_pet()
@@ -1030,6 +1125,61 @@ class SettingsPanel(QWidget):
         if pet is not None:
             pet._toast_text = "已绑定: %s → %s" % (os.path.basename(audio_key) if audio_key else "开麦键", key_name)
             pet.update()
+
+    # ---------------- AI 功能 ----------------
+    def _ai_status(self, msg, color="#8fa3c8"):
+        self.lbl_ai_status.setText(msg if msg else "💡 填好服务器地址/密钥/模型后点「保存」，再点「测试连接」验证")
+        self.lbl_ai_status.setStyleSheet("color:%s; font-size:11px;" % color)
+
+    def _ai_apply_enabled(self, on):
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            pet.ai.set_enabled(on)
+        self._ai_status("AI 对话已" + ("开启" if on else "关闭"), "#7ae0a3" if on else "#7a8099")
+
+    def _ai_apply_tts(self, on):
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            pet.ai.set_tts_enabled(on)
+
+    def _ai_apply_tts_mode(self, idx):
+        mode = self.cmb_ai_tts_mode.itemData(idx) or 'cloud'
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            pet.ai.set_tts_mode(mode)
+
+    def _ai_apply_voice(self, idx):
+        voice = self.cmb_ai_voice.itemData(idx) or ''
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            pet.ai.set_voice(voice)
+
+    def _ai_save(self):
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            self._ai_status("AI 模块不可用", "#e06c75")
+            return
+        pet.ai.set_server(self.ed_ai_base.text().strip(),
+                          self.ed_ai_key.text().strip(),
+                          self.ed_ai_model.text().strip())
+        self._ai_status("已保存 ✅（服务器/密钥/模型）", "#7ae0a3")
+
+    def _ai_test(self):
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        base_url = self.ed_ai_base.text().strip() or "https://api.deepseek.com/v1"
+        api_key = self.ed_ai_key.text().strip()
+        model = self.ed_ai_model.text().strip() or "deepseek-chat"
+        if not api_key:
+            self._ai_status("请先填 API 密钥", "#e06c75")
+            return
+        self._ai_status("测试中…", "#8fa3c8")
+
+        def _done(ok, msg):
+            self._ai_status(("✅ 连接成功：" if ok else "❌ 失败：") + str(msg)[:80],
+                            "#7ae0a3" if ok else "#e06c75")
+        pet.ai.test_connection(base_url, api_key, model, _done)
 
 
 # 供 pet.py import 使用
