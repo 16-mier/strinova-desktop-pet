@@ -198,6 +198,12 @@ class SettingsPanel(QWidget):
 
     # ---------------- AI 后台回调（主线程） ----------------
     def _on_models_fetched(self, ok, result):
+        # 诊断日志：无论成败都记录详细原因（写 pet_debug.log）
+        try:
+            if pet_mod is not None and hasattr(pet_mod, '_dbg'):
+                pet_mod._dbg('[AI刷新模型] ok=%s result=%s' % (ok, str(result)[:200]))
+        except Exception:
+            pass
         if not ok:
             msg = str(result)
             if '403' in msg or 'Forbidden' in msg:
@@ -1400,6 +1406,12 @@ class SettingsPanel(QWidget):
             self._ai_status("填好服务器地址与 API 密钥后会自动检测模型", "#7a8099")
             return
         self._ai_status("正在检测可用模型…", "#8fa3c8")
+        # 诊断日志：记录实际发出的请求参数（key 只记前 8 位）
+        try:
+            if pet_mod is not None and hasattr(pet_mod, '_dbg'):
+                pet_mod._dbg('[AI刷新模型] base=%s key前缀=%s...' % (base_url, api_key[:8]))
+        except Exception:
+            pass
         pet.ai.fetch_models(base_url, api_key, None)
 
     def _ai_test(self):

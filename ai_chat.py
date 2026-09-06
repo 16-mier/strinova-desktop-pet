@@ -21,7 +21,8 @@ import time
 import urllib.error
 import urllib.request
 
-from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, QRect, QPoint, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -185,6 +186,42 @@ def _norm_base_url(base_url):
     return s.rstrip('/')
 
 
+# 统一 opener：显式构造，避免打包态环境变量代理导致的
+# "unknown url type: https" 类问题；commandcode 等直连可达。
+# 若环境变量设了代理则尊重（部分服务需代理），未设则直连。
+_OPENER = None
+
+
+def _get_opener():
+    """构造带浏览器头的 opener（首次调用后复用）"""
+    global _OPENER
+    if _OPENER is not None:
+        return _OPENER
+    handlers = []
+    # 尊重系统/环境代理（urllib 默认行为），仅当环境变量存在
+    proxies = urllib.request.getproxies()
+    if proxies:
+        handlers.append(urllib.request.ProxyHandler(proxies))
+    handlers.append(urllib.request.HTTPSHandler())
+    _OPENER = urllib.request.build_opener(*handlers)
+    return _OPENER
+
+
+def _open_url(req, timeout):
+    """带诊断的 urlopen：失败写日志（含堆栈）+ 重新抛出"""
+    try:
+        return _get_opener().open(req, timeout=timeout)
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        if pet_mod is not None and hasattr(pet_mod, '_dbg'):
+            try:
+                pet_mod._dbg('[请求] %s %s\n%s' % (req.get_method(), req.full_url, tb))
+            except Exception:
+                pass
+        raise
+
+
 def _api_speech_synth(base_url, api_key, model, text, voice, out_path, timeout=60):
     """调 OpenAI 兼容 {base}/audio/speech 合成 mp3 到 out_path。
     返回 True/False；失败抛异常（由调用方兜底）。"""
@@ -199,7 +236,7 @@ def _api_speech_synth(base_url, api_key, model, text, voice, out_path, timeout=6
     for k, v in _browser_headers({'Content-Type': 'application/json',
                                   'Authorization': 'Bearer %s' % (api_key or '')}).items():
         req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _open_url(req, timeout) as r:
         data = r.read()
     if not data:
         raise RuntimeError('语音服务返回空音频')
@@ -219,7 +256,7 @@ def _chat_request(base_url, api_key, model, messages, timeout=90):
                                   'Authorization': 'Bearer %s' % (api_key or '')}).items():
         req.add_header(k, v)
     # urllib 默认 ProxyHandler 会读环境变量 HTTP_PROXY/HTTPS_PROXY（走代理）
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _open_url(req, timeout) as r:
         data = json.loads(r.read().decode('utf-8'))
     try:
         return data['choices'][0]['message']['content']
@@ -234,8 +271,11 @@ def _list_models(base_url, api_key, timeout=30):
     req = urllib.request.Request(url, method='GET')
     for k, v in _browser_headers({'Authorization': 'Bearer %s' % (api_key or '')}).items():
         req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode('utf-8'))
+    try:
+        with _open_url(req, timeout) as r:
+            data = json.loads(r.read().decode('utf-8'))
+    except Exception:
+        raise
     out = []
     for m in (data.get('data') or []):
         mid = str(m.get('id') or '').strip()
@@ -351,12 +391,16 @@ class TTSWorker(QThread):
 
 
 # ============================================================================
-# 回复气泡：显示在桌宠旁边（跟随桌宠、自动消失、点击关闭）
+# 回复气泡/思考指示：显示在桌宠旁边（跟随桌宠、自动消失、点击关闭）
+#  - show_thinking(): 三点跳动思考动画
+#  - show_text(text): 逐字蹦字输出（快速），字体显眼
 # ============================================================================
-_BUBBLE_MAX_W = 380
-_BUBBLE_MIN_W = 180
-_BUBBLE_LIFE_MS = 20000
+_BUBBLE_MAX_W = 520
+_BUBBLE_MIN_W = 200
+_BUBBLE_LIFE_MS = 30000
 _FOLLOW_MS = 300
+_TYPE_MS = 18          # 每字显示间隔（ms）——约 55 字/秒，快速蹦出
+_THINK_MS = 280        # 思考三点跳动间隔
 
 
 class BubbleWidget(QWidget):
@@ -369,11 +413,13 @@ class BubbleWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(False)
+        # 主标签：大字号粗体白字，显眼
         self._label = QLabel(self)
         self._label.setWordWrap(True)
         self._label.setStyleSheet(
-            'color:#f0f2f8; background:transparent; font-size:12px;')
-        self._label.setMargin(10)
+            'color:#ffffff; background:transparent; font-size:17px;'
+            'font-weight:bold;')
+        self._label.setMargin(12)
         # 自动消失
         self._life = QTimer(self)
         self._life.setSingleShot(True)
@@ -383,22 +429,107 @@ class BubbleWidget(QWidget):
         self._follow = QTimer(self)
         self._follow.setInterval(_FOLLOW_MS)
         self._follow.timeout.connect(self._reposition)
+        # 逐字蹦字定时器
+        self._type_timer = QTimer(self)
+        self._type_timer.setInterval(_TYPE_MS)
+        self._type_timer.timeout.connect(self._type_step)
+        self._type_text = ''
+        self._type_pos = 0
+        # 思考动画
+        self._think = 0
+        self._think_timer = QTimer(self)
+        self._think_timer.setInterval(_THINK_MS)
+        self._think_timer.timeout.connect(self._think_step)
 
-    def show_text(self, text):
-        self._label.setText(text)
-        self._label.adjustSize()
-        w = min(_BUBBLE_MAX_W, max(_BUBBLE_MIN_W, self._label.sizeHint().width() + 24))
-        self._label.setFixedWidth(w)
-        self._label.adjustSize()
-        self.resize(w + 20, self._label.height() + 20)
+    # ---------- 思考指示（三点跳动） ----------
+    def show_thinking(self):
+        self._stop_type()
+        self._label.setText("")
+        self._resize_to_text("···")
         self._reposition()
         self.show()
         self.raise_()
+        self._lift_life()
+        self._think = 0
+        self._think_timer.start()
+
+    def _think_step(self):
+        self._think = (self._think + 1) % 4
+        dots = '。·'[: max(0, self._think)]
+        self._label.setText(dots)
+        self._resize_to_text(dots)
+        self._reposition()
+
+    # ---------- 逐字蹦字 ----------
+    def show_text(self, text):
+        self._stop_thinking()
+        self._type_text = text
+        self._type_pos = 0
+        self._label.setText("")
+        self._size_for_full(text)   # 按全文定好窗口大小（避免逐字跳动）
+        self._reposition()
+        self.show()
+        self.raise_()
+        self._lift_life()
+        self._type_timer.start()
+
+    def _type_step(self):
+        self._type_pos += 1
+        self._label.setText(self._type_text[:self._type_pos])
+        if self._type_pos >= len(self._type_text):
+            self._type_timer.stop()
+            self._lift_life()   # 蹦字完成后重新计时自动消失
+
+    def _size_for_full(self, text):
+        """按全文计算窗口尺寸：宽=min(需要宽, MAX)；高按换行行数"""
+        font = QFont('Microsoft YaHei', 17)
+        font.setBold(True)
+        fm = QFontMetrics(font)
+        # 目标宽：需要宽 + 边距，clamp 到 [MIN, MAX]
+        need = fm.horizontalAdvance(text) + 48
+        w = int(min(_BUBBLE_MAX_W, max(_BUBBLE_MIN_W, need)))
+        usable = w - 48
+        # 中文逐字断行：行数 = ceil(文本宽 / 可用宽)
+        tw = fm.horizontalAdvance(text)
+        lines = max(1, -(-tw // max(1, usable)))
+        h = lines * fm.height() + 40
+        self.resize(w, int(h))
+        self._label.setFont(font)
+        self._label.setWordWrap(True)
+        # label 撑满内部（减去边距），setGeometry 精确控制
+        self._label.setGeometry(14, 8, w - 28, h - 16)
+
+    def _resize_to_text(self, text):
+        # 兼容旧调用：思考动画用（三点短文本直接算）
+        self._size_for_full(text)
+
+    def _stop_type(self):
+        self._type_timer.stop()
+        self._type_text = ''
+        self._type_pos = 0
+
+    def _stop_thinking(self):
+        self._think_timer.stop()
+        self._think = 0
+
+    def _lift_life(self):
         self._life.start()
-        self._follow.start()
+
+    # ---------- 通用 ----------
+    def paintEvent(self, ev):
+        """画深色半透明圆角底（白字高对比、显眼）"""
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 70), 1))
+        p.setBrush(QColor(18, 20, 28, 235))
+        p.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, 14, 14)
+        p.end()
+        super().paintEvent(ev)
 
     def hideEvent(self, ev):
         self._follow.stop()
+        self._stop_type()
+        self._stop_thinking()
         super().hideEvent(ev)
 
     def mousePressEvent(self, ev):
@@ -431,64 +562,96 @@ class BubbleWidget(QWidget):
 
 
 # ============================================================================
-# 聊天窗口（右键桌宠弹出）
+# 迷你输入条（右键桌宠弹出的一小段打字横条）
 # ============================================================================
+class CloseXButton(QPushButton):
+    """自绘 ✕ 关闭按钮：用 QPainter 画两条交叉线，任何系统字体都清晰
+    （不依赖字体里有没有 ✕ 字形——部分中文字体缺它导致只显示一个点）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("关闭")
+        self._hover = False
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, e):
+        from PyQt6.QtGui import QPainter as _P
+        p = _P(self)
+        p.setRenderHint(_P.RenderHint.Antialiasing)
+        # 圆底：hover 变红提示
+        if self._hover:
+            p.setBrush(QColor(220, 70, 70, 230))
+        else:
+            p.setBrush(QColor(200, 60, 60, 190))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect(), 6, 6)
+        # 画两条交叉线（白、粗、圆头）→ 任何系统都清晰可见
+        pad = 7
+        pen = QPen(QColor(255, 255, 255, 245), 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(pad, pad, self.width() - pad, self.height() - pad)
+        p.drawLine(self.width() - pad, pad, pad, self.height() - pad)
+        p.end()
+
+
 class ChatWindow(QWidget):
+    """迷你打字条：一小段可输入的行（历史改为桌宠旁气泡展示，不再用大窗）"""
     sendRequested = pyqtSignal(str)
 
     def __init__(self, pet):
-        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        super().__init__(None, Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
         self._pet = pet
-        self.setWindowTitle("卡丘简易桌宠 · AI 对话")
-        self.setObjectName("chatRoot")
-        self.setStyleSheet(CHAT_QSS)
-        self.setFixedSize(400, 480)
+        self.setWindowTitle("卡丘简易桌宠 · AI")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFixedSize(340, 46)
         self._drag_offset = None
+        # 背景直接在 self 上画（圆角外区域因透明背景而透明）
+        self.setStyleSheet(
+            "ChatWindow{background:rgba(24,26,34,235); border-radius:14px;"
+            " border:1px solid rgba(255,255,255,60);}")
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
-
-        # 标题行（可拖动）
-        title = QHBoxLayout()
-        t = QLabel("💬 与 AI 对话")
-        t.setStyleSheet("font-size:14px; font-weight:bold;")
-        title.addWidget(t)
-        title.addStretch(1)
-        btn_x = QPushButton("✕")
-        btn_x.setFixedSize(30, 26)
-        btn_x.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_x.setToolTip("关闭聊天窗")
-        btn_x.setStyleSheet(
-            "QPushButton{background:#c0392b; border:none; border-radius:6px;"
-            " color:white; font-size:15px; font-weight:bold;}"
-            "QPushButton:hover{background:#e74c3c;}"
-            "QPushButton:pressed{background:#a93226;}")
-        btn_x.clicked.connect(self.hide)
-        title.addWidget(btn_x)
-        root.addLayout(title)
-
-        # 历史
-        self.history = QTextBrowser()
-        self.history.setOpenExternalLinks(False)
-        root.addWidget(self.history, 1)
-
-        # 输入行
-        row = QHBoxLayout()
-        self.input = QLineEdit()
-        self.input.setPlaceholderText("问问桌宠…（回车发送）")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 8, 8)
+        lay.setSpacing(6)
+        self.input = QLineEdit(self)
+        self.input.setPlaceholderText("问桌宠…（回车发送，Esc 关闭）")
+        self.input.setStyleSheet(
+            "QLineEdit{background:rgba(255,255,255,20); border:none; border-radius:9px;"
+            " color:#ffffff; font-size:14px; padding:5px 10px;}"
+            "QLineEdit:focus{background:rgba(255,255,255,30);}")
         self.input.returnPressed.connect(self._send)
-        row.addWidget(self.input, 1)
-        self.btn_send = QPushButton("发送")
+        lay.addWidget(self.input, 1)
+        self.btn_send = QPushButton("发送", self)
+        self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_send.setStyleSheet(
+            "QPushButton{background:#3d6ef7; border:none; border-radius:9px;"
+            " color:white; font-size:13px; font-weight:bold; padding:5px 12px;}"
+            "QPushButton:hover{background:#5480ff;}"
+            "QPushButton:disabled{background:#4a4f63;}")
         self.btn_send.clicked.connect(self._send)
-        row.addWidget(self.btn_send)
-        root.addLayout(row)
+        lay.addWidget(self.btn_send)
+        self.btn_x = CloseXButton(self)
+        lay.addWidget(self.btn_x)
+        self.btn_x.clicked.connect(self.hide)
 
-        self.append_html('<div style="color:#8fa3c8;">你好呀，我是桌宠里的 AI 小伙伴～右键打开设置可调整 AI 服务与朗读开关。</div>')
-
-    # ---------- 窗口拖动 ----------
+    # 窗口拖动（按住空白/输入框外区域）
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton and e.position().y() < 40:
+        if e.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
         super().mousePressEvent(e)
 
@@ -504,6 +667,14 @@ class ChatWindow(QWidget):
         super().mouseReleaseEvent(e)
 
     # ---------- 交互 ----------
+    def keyPressEvent(self, e):
+        # Esc 关闭迷你条
+        if e.key() == Qt.Key.Key_Escape:
+            self.hide()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
     def _send(self):
         text = self.input.text().strip()
         if not text:
@@ -512,37 +683,23 @@ class ChatWindow(QWidget):
         self.sendRequested.emit(text)
 
     def set_busy(self, busy):
+        # 迷你条：思考中时输入框禁用、按钮变灰
         self.input.setEnabled(not busy)
         self.btn_send.setEnabled(not busy)
-        self.btn_send.setText("思考中…" if busy else "发送")
-
-    def append_msg(self, who, text):
-        color = '#9fb0d9' if who == '你' else '#ffd76e'
-        esc = html.escape(text).replace('\n', '<br>')
-        self.append_html(
-            '<div style="color:%s; font-weight:bold; margin-top:8px;">%s</div>'
-            '<div style="color:#e6e8f0;">%s</div>' % (color, who, esc))
-
-    def append_err(self, err):
-        self.append_html('<div style="color:#e06c75; margin-top:6px;">⚠ %s</div>' % html.escape(err))
-
-    def append_html(self, h):
-        self.history.append(h)
-        bar = self.history.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self.btn_send.setText("…" if busy else "发送")
 
     def show_near(self, pet_rect):
-        """显示在桌宠旁边（放不下则居中）"""
+        """显示在桌宠旁边（优先下方/右侧，保持不遮宠物）"""
         scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
         geo = scr.availableGeometry() if scr is not None else None
-        x = pet_rect.left() - self.width() - 14
-        if geo is None or x < geo.left():
-            x = pet_rect.right() + 14
+        x = pet_rect.left()
         if geo is not None and x + self.width() > geo.right():
-            x = geo.left() + (geo.width() - self.width()) // 2
-        y = pet_rect.top()
-        if geo is not None:
-            y = max(geo.top(), min(y, geo.bottom() - self.height()))
+            x = geo.right() - self.width()
+        y = pet_rect.bottom() + 10
+        if geo is not None and y + self.height() > geo.bottom():
+            y = pet_rect.top() - self.height() - 10
+            if y < geo.top():
+                y = pet_rect.bottom() + 10
         self.move(x, y)
 
 
@@ -690,12 +847,14 @@ class AiChatManager(QObject):
         api_key = cfg.get('api_key') or ''
         model = cfg.get('model') or DEFAULT_MODEL
         if not api_key:
-            self._chat.append_err('还没有填 API 密钥：右键打开设置 → AI 功能 里填写。')
+            self._bubble_msg('还没有填 API 密钥：右键桌宠 → 设置 → AI 功能 里填写。')
             return
         if self._ai_worker is not None and self._ai_worker.isRunning():
             return
-        self._chat.append_msg('你', text)
-        self._chat.set_busy(True)
+        if self._chat is not None:
+            self._chat.set_busy(True)
+        # 思考指示：AI 思考中在桌宠旁显示三点跳动
+        self._show_thinking()
         # 多轮上下文：system（可自定义）+ 最近 20 条
         msgs = [{'role': 'system', 'content': self.system_prompt()}]
         msgs += self._messages[-20:]
@@ -706,24 +865,47 @@ class AiChatManager(QObject):
         self._ai_worker.finished.connect(self._ai_worker.deleteLater)
         self._ai_worker.start()
 
-    # ------------- 气泡 -------------
-    def _show_bubble(self, text):
+    # ------------- 气泡 / 思考 -------------
+    def _get_bubble(self):
         if self._bubble is None:
             self._bubble = BubbleWidget(self._pet)
-        self._bubble.show_text(text)
+        return self._bubble
+
+    def _bubble_msg(self, text):
+        """错误/提示信息：直接整段显示在气泡（不走逐字，避免长错误慢慢蹦）"""
+        b = self._get_bubble()
+        b._stop_type()
+        b._stop_thinking()
+        b._label.setText(text)
+        b._type_text = ''
+        b._type_pos = 0
+        b._size_for_full(text)
+        b._reposition()
+        b.show()
+        b.raise_()
+        b._lift_life()
+
+    def _show_thinking(self):
+        self._get_bubble().show_thinking()
+
+    def _hide_thinking(self):
+        if self._bubble is not None:
+            self._bubble._stop_thinking()
+
+    def _show_bubble(self, text):
+        """AI 回复 → 逐字蹦字显示在桌宠旁"""
+        self._get_bubble().show_text(text)
 
     def _on_ai_done(self, reply, err):
         if self._chat is not None:
             self._chat.set_busy(False)
         self._ai_worker = None
+        self._hide_thinking()
         if err:
-            if self._chat is not None:
-                self._chat.append_err('AI 请求失败：%s\n（检查 设置→AI功能 的服务器地址/密钥/模型，及网络代理）' % err)
+            self._bubble_msg('AI 请求失败：%s\n（检查 设置→AI 的服务器/密钥/模型）' % err)
             return
         self._messages.append({'role': 'assistant', 'content': reply})
-        if self._chat is not None:
-            self._chat.append_msg('AI', reply)
-        # 气泡显示回复（桌宠旁边）
+        # 气泡逐字显示回复（桌宠旁边，字体显眼）
         self._show_bubble(reply)
         # TTS 依附 AI（且必须 AI 对话开启才生效）：先把回复交给"TTS 提示词"
         # 改写为适合朗读的稿子，再朗读改写稿；改写失败直接朗读原文兜底
@@ -781,8 +963,7 @@ class AiChatManager(QObject):
         if seq != getattr(self, '_pending_tts_seq', 0):
             return   # 已有更新的朗读，丢弃旧合成
         if not path:
-            if self._chat is not None:
-                self._chat.append_err('朗读失败：%s' % err)
+            self._bubble_msg('朗读失败：%s' % err)
             return
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(path))
