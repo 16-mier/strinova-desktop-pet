@@ -53,28 +53,100 @@ except Exception as _e:
     print('settings_panel import fail:', _e)
 
 
-PET_VERSION = "1.5.0"
+PET_VERSION = "1.6.0"
 DEFAULT_ROLE = "星绘"
 BASE_SIZE = 200
 
-# 配置（绑定输出设备等）存放：与 exe 同目录 pet_config.json（打包后在 _MEIPASS 只读，
-# 故优先写 exe 所在目录，其次 home）
-def config_dir():
-    if hasattr(sys, "_MEIPASS"):
-        base = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    try:
-        os.makedirs(base, exist_ok=True)
-        test = os.path.join(base, '.pet_write_test')
-        with open(test, 'w') as f:
-            f.write('1')
-        os.remove(test)
-        return base
-    except Exception:
-        return os.path.expanduser('~')
+# ── 用户数据目录 ─────────────────────────────────────────────
+# 打包后所有可写数据（pet_config.json / assets 角色与语音 / pet_debug.log）
+# 统一收纳到 exe 同目录下的「卡丘简易桌宠数据」子文件夹，exe 旁只留一个数据夹，
+# 不再把多个文件散落在桌面/目录里。
+USER_DATA_DIR = '卡丘简易桌宠数据'
 
-CONFIG_FILE = os.path.join(config_dir(), 'pet_config.json')
+
+def _pick_writable(candidates):
+    """从候选目录里挑第一个可写可建目录的；全部失败返回 None"""
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            test = os.path.join(d, '.pet_write_test')
+            with open(test, 'w', encoding='utf-8') as f:
+                f.write('1')
+            os.remove(test)
+            return d
+        except Exception:
+            continue
+    return None
+
+
+def base_dir():
+    """用户数据根目录（可写持久）：
+    - 打包后 = exe 同目录下的「卡丘简易桌宠数据」子文件夹；exe 目录不可写时
+      依次回落：用户主目录下同名文件夹 → 用户主目录
+    - 未打包 = 脚本目录（开发时资源/配置就在源码仓库里）
+    用户导入的角色/音频/通用语音、pet_config.json、pet_debug.log 都在此。"""
+    if hasattr(sys, "_MEIPASS"):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        chosen = _pick_writable([
+            os.path.join(exe_dir, USER_DATA_DIR),
+            os.path.join(os.path.expanduser('~'), USER_DATA_DIR),
+            os.path.expanduser('~'),
+        ])
+        return chosen if chosen is not None else os.path.expanduser('~')
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def bundle_dir():
+    """内置资源目录（只读，打包后=_MEIPASS 临时解压；未打包=脚本目录）"""
+    if hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _migrate_legacy_layout():
+    """v1.5.0 及更早：数据直接散在 exe 同目录（pet_config.json / assets /
+    pet_debug.log）。启动时若发现 exe 同目录仍存在这些旧文件，且新数据目录
+    里还没有对应项，就把它们移进去（只移一次，之后由新目录接管）。"""
+    if not hasattr(sys, "_MEIPASS"):
+        return
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    data_dir = os.path.join(exe_dir, USER_DATA_DIR)
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except Exception:
+        return
+    legacy_items = ['pet_config.json', 'assets', 'pet_debug.log']
+    for name in legacy_items:
+        src = os.path.join(exe_dir, name)
+        dst = os.path.join(data_dir, name)
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                shutil.move(src, dst)
+            except Exception:
+                pass
+
+
+# 模块加载即执行一次旧版布局迁移（在任何 load/save_config 读写前把
+# exe 旁旧文件收进数据目录；base_dir() 会先建好空目录，不影响移动）
+_migrate_legacy_layout()
+
+
+def _log(*args):
+    # 保留空实现，便于未来排查（不再默认密集打点）
+    pass
+
+
+def _dbg(msg):
+    """调试日志：写 pet_debug.log 到用户数据目录（GUI 无控制台，print 不可见）"""
+    try:
+        logpath = os.path.join(base_dir(), 'pet_debug.log')
+        with open(logpath, 'a', encoding='utf-8') as f:
+            f.write(str(msg) + '\n')
+    except Exception:
+        pass
+
+
+CONFIG_FILE = os.path.join(base_dir(), 'pet_config.json')
 
 
 def load_config():
@@ -121,46 +193,6 @@ QMenu::separator {
     margin: 6px 10px;
 }
 """
-
-
-def _log(*args):
-    # 保留空实现，便于未来排查（不再默认密集打点）
-    pass
-
-
-def _dbg(msg):
-    """调试日志：写 pet_debug.log（GUI 无控制台，print 不可见）"""
-    try:
-        logpath = os.path.join(base_dir(), 'pet_debug.log')
-        with open(logpath, 'a', encoding='utf-8') as f:
-            f.write(str(msg) + '\n')
-    except Exception:
-        pass
-
-
-def bundle_dir():
-    """内置资源目录（只读，打包后=_MEIPASS 临时解压；未打包=脚本目录）"""
-    if hasattr(sys, "_MEIPASS"):
-        return sys._MEIPASS
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def base_dir():
-    """用户数据目录（可写持久）：打包后=exe 同目录（与 pet_config.json 一致），
-    未打包=脚本目录。用户导入的角色/音频/通用语音都在此，重启不丢"""
-    if hasattr(sys, "_MEIPASS"):
-        base = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    try:
-        os.makedirs(base, exist_ok=True)
-        test = os.path.join(base, '.pet_write_test')
-        with open(test, 'w') as f:
-            f.write('1')
-        os.remove(test)
-        return base
-    except Exception:
-        return os.path.expanduser('~')
 
 
 _seeded = False

@@ -78,6 +78,18 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-06（用户数据收纳到独立文件夹：桌面不再散落文件；旧版自动迁移；重新打包 exe）
+- **问题**：桌面版 exe 把 `pet_config.json` / `assets` / `pet_debug.log` 直接散在 exe 同目录（桌面），用户觉得乱
+- **修复**（`pet.py`）：
+  1. 新增 `USER_DATA_DIR = '卡丘简易桌宠数据'`：打包后所有可写数据统一收进 **exe 同目录下的「卡丘简易桌宠数据」子文件夹**（exe 旁只留一个数据夹）；exe 目录不可写时依次回落：用户主目录下同名文件夹 → 用户主目录
+  2. `base_dir()`：改为返回数据子文件夹（打包态）；未打包仍 = 脚本目录（开发不变）
+  3. `_pick_writable()`：候选目录逐个做写入测试，挑第一个可用的
+  4. `_migrate_legacy_layout()`：模块加载即执行，发现 exe 旁旧版散件（pet_config.json/assets/pet_debug.log）且数据夹没有同名项时移入（只移一次）；设置面板走 `pet.base_dir()` 动态取路径自动跟随
+  5. `CONFIG_FILE`/`_dbg` 全部基于 `base_dir()`，自动指向数据夹
+- **打包**：`python -m PyInstaller --noconfirm --clean 卡丘简易桌宠.spec` → `dist\卡丘简易桌宠.exe`（65MB）
+- **验证**：py_compile ✅；模拟打包迁移单测 9 项全 PASS ✅；隔离目录实测：旧散件自动移入数据夹、旧角色保留、默认角色星绘/白墨/艾卡 + 通用语音 seed、exe 旁无残留 ✅；桌面 exe 替换后实测：桌面从 4 项 → 「exe + 卡丘简易桌宠数据/」2 项，配置/角色/语音完整保留 ✅
+- 涉及：`pet.py`（USER_DATA_DIR/_pick_writable/base_dir/bundle_dir/_migrate_legacy_layout/CONFIG_FILE/_dbg 模块加载顺序重排）
+
 ### 2026-09-06（修复打包后资源目录只读：base_dir 改为 exe 同目录 + 首次运行 seed 默认资源；重新打包 exe）
 - **问题**：`base_dir()` 打包后返回 `sys._MEIPASS`（PyInstaller 临时解压目录，**只读、每次启动重建**）；而新版设置面板的导入角色、拖放导入、通用语音、删除操作全部基于 `base_dir()` 写 assets → 打包成 exe 后这些功能会写入临时目录、**退出即丢甚至写失败**。v1.4.0 时代只有内置只读角色（读 _MEIPASS 没问题），加了用户导入功能后必须区分「内置资源（只读）」与「用户数据（可写持久）」
 - **修复**（`pet.py`）：
