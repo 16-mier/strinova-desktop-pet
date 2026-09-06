@@ -78,6 +78,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（关键修复：模型「刷不出来」元凶 = 后台线程操作 Qt 控件；改信号跨线程回调）
+- **用户反馈**：换了真 key（user_2W4u...，实测模型 67 个+对话全通）但桌宠里点「刷新模型」仍刷不出来
+- **根因（隐蔽 bug）**：`AiChatManager.fetch_models/test_tts_api/test_connection` 在**后台线程**里直接调用面板回调 `_done`，而回调里操作 QComboBox/QLabel 等 Qt 控件 → **Qt 控件禁止跨线程操作**，UI 更新被 Qt 丢弃/无效 → 模型早已查到但**永远填不进下拉框**
+  - 曾试 QTimer.singleShot(0) 从后台线程投递 → 无效（无接收者时投递到调用线程自己的事件循环，后台线程没有事件循环）
+- **修复**（`ai_chat.py` + `settings_panel.py`）：
+  1. `AiChatManager` 新增 3 个 Qt 信号：`models_fetched(bool,object)` / `tts_api_tested(bool,str)` / `conn_tested(bool,str)`；三个后台方法改为线程内 `self.xxx.emit(...)`（**信号跨线程 emit 自动排队回主线程**，Qt 标准做法）
+  2. `SettingsPanel._connect_ai_signals()`：`__init__` 连接三个信号到固定槽 `_on_models_fetched` / `_on_tts_api_tested` / `_on_conn_tested`（主线程安全操作 UI）
+  3. `_ai_auto_fetch`/`_ai_test`/`_ai_test_tts_api` 去掉局部 `_done` 直传，只发请求，结果走信号槽
+- **验证**：py_compile ✅；**端到端（真实面板+真实 commandcode key 点刷新）→ 下拉框 67 个模型 + 「✅ 检测到 67 个模型」PASS** ✅；新 key 实测对话也通（deepseek/deepseek-v4-pro 回「通了」）✅
+- 涉及：`ai_chat.py`（3 信号/fetch_models/test_tts_api/test_connection 改 emit）、`settings_panel.py`（_connect_ai_signals/3 个信号槽/_ai_auto_fetch 等去 _done）
+- 备注：桌面 exe 重新打包部署；**用户刷新模型前若面板一直开着，需重新点一次「↻ 刷新模型」**（面板打开时读的是旧输入框值的情况已无——现在直接读输入框实时值）
+
+
 ### 2026-09-07（关键修复：commandcode Cloudflare 1010 拦截 → 加浏览器头；TTS 引擎精简为唯一「填地址」服务）
 - **用户反馈**：①换新 key 仍刷不出模型；②朗读引擎微软的不要；③本地引擎也不要（Windows 自带），所有朗读都要填 API 地址
 - **根因（重大）**：commandcode.ai 用 **Cloudflare 拦截缺浏览器指纹的脚本请求**（响应 body `error code: 1010`），与 key/套餐无关！models 与 chat/completions 都被拦 → 表现为「模型刷不出来」。

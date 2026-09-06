@@ -178,8 +178,64 @@ class SettingsPanel(QWidget):
         self._auto_refresh_timer.setInterval(250)
         self._auto_refresh_timer.timeout.connect(self._delayed_refresh)
         self._build_ui()
+        self._connect_ai_signals()
         self.refresh_all()
         self._watch_current_dir()
+
+    def _connect_ai_signals(self):
+        """连接 AI 管理器的跨线程信号（后台线程 emit → 主线程槽执行，安全操作 UI）。
+        在 __init__ 连接一次，槽内从当前输入框取值。"""
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        ai = pet.ai
+        try:
+            ai.models_fetched.connect(self._on_models_fetched)
+            ai.tts_api_tested.connect(self._on_tts_api_tested)
+            ai.conn_tested.connect(self._on_conn_tested)
+        except Exception:
+            pass
+
+    # ---------------- AI 后台回调（主线程） ----------------
+    def _on_models_fetched(self, ok, result):
+        if not ok:
+            msg = str(result)
+            if '403' in msg or 'Forbidden' in msg:
+                tip = "服务商未开放模型列表接口（403），可直接在下方手动输入模型名"
+            elif '401' in msg or 'Unauthorized' in msg:
+                tip = "API 密钥无效或没有权限（401），请检查密钥"
+            elif '404' in msg or 'Not Found' in msg:
+                tip = "服务地址不对（404），请检查是否填了完整 /v1 地址"
+            else:
+                tip = msg[:80]
+            self._ai_status("模型检测失败：%s" % tip, "#e06c75")
+            return
+        models = result
+        if not models:
+            self._ai_status("服务未返回模型列表，可手动输入模型名", "#e06c75")
+            return
+        pet = self._current_pet()
+        self.cmb_ai_model.blockSignals(True)
+        self.cmb_ai_model.clear()
+        for m in models:
+            self.cmb_ai_model.addItem(m)
+        cur = (pet.ai.cfg().get('model') or '') if pet is not None else ''
+        if cur and cur in models:
+            self.cmb_ai_model.setCurrentText(cur)
+        self.cmb_ai_model.blockSignals(False)
+        self._ai_status("✅ 检测到 %d 个模型，请选择" % len(models), "#7ae0a3")
+
+    def _on_tts_api_tested(self, ok, msg):
+        if ok:
+            self.lbl_tts_api_status.setText("✅ 语音合成成功（服务配置可用）")
+            self.lbl_tts_api_status.setStyleSheet("color:#7ae0a3; font-size:11px;")
+        else:
+            self.lbl_tts_api_status.setText("❌ %s" % str(msg)[:90])
+            self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
+
+    def _on_conn_tested(self, ok, msg):
+        self._ai_status(("✅ 连接成功：" if ok else "❌ 失败：") + str(msg)[:80],
+                        "#7ae0a3" if ok else "#e06c75")
 
     # ---------------- UI 构建 ----------------
     def _build_ui(self):
@@ -1303,15 +1359,7 @@ class SettingsPanel(QWidget):
             return
         self.lbl_tts_api_status.setText("测试中…")
         self.lbl_tts_api_status.setStyleSheet("color:#8fa3c8; font-size:11px;")
-
-        def _done(ok, msg):
-            if ok:
-                self.lbl_tts_api_status.setText("✅ 语音合成成功（服务配置可用）")
-                self.lbl_tts_api_status.setStyleSheet("color:#7ae0a3; font-size:11px;")
-            else:
-                self.lbl_tts_api_status.setText("❌ %s" % str(msg)[:90])
-                self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
-        pet.ai.test_tts_api(base, key, model, voice, _done)
+        pet.ai.test_tts_api(base, key, model, voice, None)
 
     def _ai_apply_model(self, text):
         pet = self._current_pet()
@@ -1341,7 +1389,8 @@ class SettingsPanel(QWidget):
         self._ai_status("已保存 ✅（服务器/密钥/模型）", "#7ae0a3")
 
     def _ai_auto_fetch(self):
-        """填好服务器+密钥后自动检测模型列表，填入下拉框"""
+        """填好服务器+密钥后自动检测模型列表，填入下拉框
+        （结果由 models_fetched 信号回主线程 _on_models_fetched 处理）"""
         pet = self._current_pet()
         if pet is None or not hasattr(pet, 'ai'):
             return
@@ -1351,35 +1400,7 @@ class SettingsPanel(QWidget):
             self._ai_status("填好服务器地址与 API 密钥后会自动检测模型", "#7a8099")
             return
         self._ai_status("正在检测可用模型…", "#8fa3c8")
-
-        def _done(ok, result):
-            if not ok:
-                msg = str(result)
-                if '403' in msg or 'Forbidden' in msg:
-                    tip = "服务商未开放模型列表接口（403），可直接在下方手动输入模型名"
-                elif '401' in msg or 'Unauthorized' in msg:
-                    tip = "API 密钥无效或没有权限（401），请检查密钥"
-                elif '404' in msg or 'Not Found' in msg:
-                    tip = "服务地址不对（404），请检查是否填了完整 /v1 地址"
-                else:
-                    tip = msg[:80]
-                self._ai_status("模型检测失败：%s" % tip, "#e06c75")
-                return
-            models = result
-            if not models:
-                self._ai_status("服务未返回模型列表，可手动输入模型名", "#e06c75")
-                return
-            self.cmb_ai_model.blockSignals(True)
-            self.cmb_ai_model.clear()
-            for m in models:
-                self.cmb_ai_model.addItem(m)
-            # 保留当前已选模型（若存在）
-            cur = (pet.ai.cfg().get('model') or '') if pet is not None else ''
-            if cur and cur in models:
-                self.cmb_ai_model.setCurrentText(cur)
-            self.cmb_ai_model.blockSignals(False)
-            self._ai_status("✅ 检测到 %d 个模型，请选择" % len(models), "#7ae0a3")
-        pet.ai.fetch_models(base_url, api_key, _done)
+        pet.ai.fetch_models(base_url, api_key, None)
 
     def _ai_test(self):
         pet = self._current_pet()
@@ -1392,11 +1413,7 @@ class SettingsPanel(QWidget):
             self._ai_status("请先填 API 密钥", "#e06c75")
             return
         self._ai_status("测试中…", "#8fa3c8")
-
-        def _done(ok, msg):
-            self._ai_status(("✅ 连接成功：" if ok else "❌ 失败：") + str(msg)[:80],
-                            "#7ae0a3" if ok else "#e06c75")
-        pet.ai.test_connection(base_url, api_key, model, _done)
+        pet.ai.test_connection(base_url, api_key, model, None)
 
 
 # 供 pet.py import 使用

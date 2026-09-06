@@ -543,6 +543,11 @@ class ChatWindow(QWidget):
 # AI 聊天管理器（右键打开聊天窗 + 气泡 + TTS 播放）
 # ============================================================================
 class AiChatManager(QObject):
+    # 后台任务完成信号（跨线程 emit，Qt 自动排队回主线程槽执行）
+    models_fetched = pyqtSignal(bool, object)    # (ok, 模型列表 或 错误串)
+    tts_api_tested = pyqtSignal(bool, str)       # (ok, 消息)
+    conn_tested = pyqtSignal(bool, str)          # (ok, 消息)
+
     def __init__(self, pet):
         super().__init__()
         self._pet = pet
@@ -623,17 +628,18 @@ class AiChatManager(QObject):
         _save_ai_cfg(tts_prompt=text.strip())
 
     def fetch_models(self, base_url, api_key, on_done):
-        """后台拉取模型列表（OpenAI 兼容 /models）。on_done(ok, result)"""
+        """后台拉取模型列表。完成后发 models_fetched 信号（跨线程安全），
+        面板连接该信号后在其槽里操作 UI。on_done 由面板收到信号后调用。"""
         def _run():
             try:
                 ms = _list_models(base_url, api_key)
-                on_done(True, ms)
+                self.models_fetched.emit(True, ms)
             except Exception as e:
-                on_done(False, '%s' % e)
+                self.models_fetched.emit(False, '%s' % e)
         threading.Thread(target=_run, daemon=True).start()
 
     def test_tts_api(self, base_url, api_key, model, voice, on_done):
-        """后台测试自定义 TTS API 服务：合成一小段。on_done(ok, msg)"""
+        """后台测试自定义 TTS API 服务。完成后发 tts_api_tested 信号。"""
         def _run():
             try:
                 path = os.path.join(_tts_dir() or '', 'tts_test.mp3')
@@ -643,9 +649,9 @@ class AiChatManager(QObject):
                     os.remove(path)
                 except Exception:
                     pass
-                on_done(True, '合成成功')
+                self.tts_api_tested.emit(True, '合成成功')
             except Exception as e:
-                on_done(False, '%s' % e)
+                self.tts_api_tested.emit(False, '%s' % e)
         threading.Thread(target=_run, daemon=True).start()
 
     # ------------- 聊天窗 -------------
@@ -793,7 +799,7 @@ class AiChatManager(QObject):
             try:
                 msgs = [{'role': 'user', 'content': '你好，请只回复：连接成功'}]
                 r = _chat_request(base_url, api_key, model, msgs, timeout=20)
-                on_done(True, r.strip()[:60])
+                self.conn_tested.emit(True, r.strip()[:60])
             except Exception as e:
-                on_done(False, '%s' % e)
+                self.conn_tested.emit(False, '%s' % e)
         threading.Thread(target=_run, daemon=True).start()
