@@ -168,6 +168,22 @@ def _chat_request(base_url, api_key, model, messages, timeout=90):
         return json.dumps(data, ensure_ascii=False)[:500]
 
 
+def _list_models(base_url, api_key, timeout=30):
+    """GET {base_url}/models，返回模型 ID 列表（OpenAI 兼容标准接口）。
+    失败抛异常（401 未授权 / 网络 / 超时等）。"""
+    url = str(base_url or '').rstrip('/') + '/models'
+    req = urllib.request.Request(url, method='GET')
+    req.add_header('Authorization', 'Bearer %s' % (api_key or ''))
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode('utf-8'))
+    out = []
+    for m in (data.get('data') or []):
+        mid = str(m.get('id') or '').strip()
+        if mid:
+            out.append(mid)
+    return out
+
+
 # ============================================================================
 # 本地 SAPI 合成（comtypes 直调 SpVoice → 写 wav）
 # 关键坑：SpFileStream.Format.Type 必须先设、再 Open（反了报 0x80045002）
@@ -345,6 +361,8 @@ class BubbleWidget(QWidget):
             return
         try:
             anchor = self._pet.frameGeometry()
+            if anchor is None:
+                return
         except Exception:
             return
         scr = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
@@ -483,6 +501,8 @@ class AiChatManager(QObject):
         self._messages = []           # 多轮上下文（不含 system，由发送时补）
         self._ai_worker = None
         self._tts_worker = None
+        self._rewrite_worker = None
+        self._pending_tts_seq = 0
         self._seq = 0                 # 递增序号：新 TTS 打断旧 TTS
         self._player = None
         self._audio_out = None
@@ -493,9 +513,11 @@ class AiChatManager(QObject):
         except Exception:
             self._player = None
             self._audio_out = None
-        self._system_prompt = (
-            '你是桌宠「卡丘」里的 AI 小伙伴，活泼友善，'
-            '回答简洁亲切，用中文。')
+
+    @staticmethod
+    def default_system_prompt():
+        return ('你是桌宠「卡丘」里的 AI 小伙伴，活泼友善，'
+                '回答简洁亲切，用中文。')
 
     # ------------- 配置 -------------
     def cfg(self):
@@ -521,6 +543,39 @@ class AiChatManager(QObject):
 
     def set_voice(self, voice):
         _save_ai_cfg(tts_voice=voice)
+
+    def system_prompt(self):
+        """当前系统提示词（用户可自定义，存配置 ai.system_prompt）"""
+        return (self.cfg().get('system_prompt') or '').strip() \
+            or self.default_system_prompt()
+
+    def set_system_prompt(self, text):
+        _save_ai_cfg(system_prompt=text.strip())
+
+    @staticmethod
+    def default_tts_prompt():
+        """TTS 系统提示词（朗读前把 AI 回答改写成适合朗读的稿子）"""
+        return ('你是一名语音播报助手。请把下面这段文字改写成适合语音朗读的版本：'
+                '口语自然、句子完整通顺，去掉 markdown 符号、列表序号、表情符号和链接，'
+                '数字与英文按口语习惯读出，保留原意和关键信息。'
+                '只输出改写后的文本，不要任何解释或前缀。')
+
+    def tts_prompt(self):
+        return (self.cfg().get('tts_prompt') or '').strip() \
+            or self.default_tts_prompt()
+
+    def set_tts_prompt(self, text):
+        _save_ai_cfg(tts_prompt=text.strip())
+
+    def fetch_models(self, base_url, api_key, on_done):
+        """后台拉取模型列表（OpenAI 兼容 /models）。on_done(ok, result)"""
+        def _run():
+            try:
+                ms = _list_models(base_url, api_key)
+                on_done(True, ms)
+            except Exception as e:
+                on_done(False, '%s' % e)
+        threading.Thread(target=_run, daemon=True).start()
 
     # ------------- 聊天窗 -------------
     def open_chat(self):
@@ -557,8 +612,8 @@ class AiChatManager(QObject):
             return
         self._chat.append_msg('你', text)
         self._chat.set_busy(True)
-        # 多轮上下文：system + 最近 20 条
-        msgs = [{'role': 'system', 'content': self._system_prompt}]
+        # 多轮上下文：system（可自定义）+ 最近 20 条
+        msgs = [{'role': 'system', 'content': self.system_prompt()}]
         msgs += self._messages[-20:]
         msgs.append({'role': 'user', 'content': text})
         self._messages.append({'role': 'user', 'content': text})
@@ -566,6 +621,12 @@ class AiChatManager(QObject):
         self._ai_worker.done.connect(self._on_ai_done)
         self._ai_worker.finished.connect(self._ai_worker.deleteLater)
         self._ai_worker.start()
+
+    # ------------- 气泡 -------------
+    def _show_bubble(self, text):
+        if self._bubble is None:
+            self._bubble = BubbleWidget(self._pet)
+        self._bubble.show_text(text)
 
     def _on_ai_done(self, reply, err):
         if self._chat is not None:
@@ -580,30 +641,53 @@ class AiChatManager(QObject):
             self._chat.append_msg('AI', reply)
         # 气泡显示回复（桌宠旁边）
         self._show_bubble(reply)
-        # TTS 依附 AI：朗读的就是这段 AI 回复
-        if self.tts_enabled():
-            self._speak(reply)
-
-    # ------------- 气泡 -------------
-    def _show_bubble(self, text):
-        if self._bubble is None:
-            self._bubble = BubbleWidget(self._pet)
-        self._bubble.show_text(text)
+        # TTS 依附 AI（且必须 AI 对话开启才生效）：先把回复交给"TTS 提示词"
+        # 改写为适合朗读的稿子，再朗读改写稿；改写失败直接朗读原文兜底
+        if self.tts_enabled() and self.enabled():
+            self._seq += 1
+            self._pending_tts_seq = self._seq
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+            self._rewrite_for_tts(reply, self._seq)
+        elif self.tts_enabled() and not self.enabled():
+            # AI 对话被关但 tts_enabled 仍开（历史配置）→ 不朗读
+            self.set_tts_enabled(False)
 
     # ------------- TTS（朗读 AI 回复） -------------
-    def _speak(self, text):
-        if self._player is None:
+    def _rewrite_for_tts(self, reply, seq):
+        """用 TTS 系统提示词让 AI 把回答改写成朗读稿，再合成播放。
+        改写失败 → 直接朗读原文。"""
+        cfg = self.cfg()
+        base_url = cfg.get('base_url') or DEFAULT_BASE_URL
+        api_key = cfg.get('api_key') or ''
+        model = cfg.get('model') or DEFAULT_MODEL
+        if not api_key:
+            return
+        msgs = [{'role': 'system', 'content': self.tts_prompt()},
+                {'role': 'user', 'content': reply}]
+        w = AIWorker(base_url, api_key, model, msgs, self)
+        self._rewrite_worker = w
+        w.done.connect(lambda txt, e, s=seq: self._on_rewrite_done(txt, e, s, reply))
+        w.finished.connect(w.deleteLater)
+        w.start()
+
+    def _on_rewrite_done(self, text, err, seq, original):
+        if seq != getattr(self, '_pending_tts_seq', 0) or not self.tts_enabled():
+            return   # 期间有更新回复/关闭朗读 → 丢弃
+        self._rewrite_worker = None
+        speak = (text.strip() if (text and text.strip() and not err) else original)
+        if not speak:
+            return
+        self._speak_text(speak, seq)
+
+    def _speak_text(self, text, seq):
+        if self._player is None or seq != getattr(self, '_pending_tts_seq', 0):
             return
         cfg = self.cfg()
         mode = cfg.get('tts_mode') or TTS_MODE_CLOUD
         voice = cfg.get('tts_voice') or DEFAULT_VOICE
-        self._seq += 1
-        seq = self._seq
-        # 打断上一段
-        try:
-            self._player.stop()
-        except Exception:
-            pass
         self._tts_worker = TTSWorker(text, mode, voice, seq, self)
         self._tts_worker.done.connect(
             lambda path, err, s=seq: self._on_tts_done(path, err, s))
@@ -611,7 +695,7 @@ class AiChatManager(QObject):
         self._tts_worker.start()
 
     def _on_tts_done(self, path, err, seq):
-        if seq != self._seq:
+        if seq != getattr(self, '_pending_tts_seq', 0):
             return   # 已有更新的朗读，丢弃旧合成
         if not path:
             if self._chat is not None:

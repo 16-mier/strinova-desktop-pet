@@ -95,7 +95,25 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 - 备注：桌面 exe 已部署；用户需在面板填**服务器地址/API 密钥/模型**并保存后可用（key 明文存 pet_config.json 的 ai 段）
 
 
-### 2026-09-06（设置面板：大小可填数字 + 面板不再一直置顶）
+### 2026-09-07（AI 功能升级：入口置顶折叠「AI」页 + 模型自动检测下拉 + 系统提示词/TTS 提示词可自定义 + TTS 强制依附 AI）
+- **需求（用户连提）**：
+  1. 填好服务器地址+API 密钥后应**自动检测可用模型**，下拉挑选（不再手填模型名）
+  2. 「AI 功能」应显示在设置面板**最上面**，显示「AI」，点开是**配置页面**
+  3. **系统提示词**可自定义
+  4. **TTS 必须 AI 对话打开才能开**（否则无法写 TTS 提示词）；开 TTS 时 AI 需加载一份 **TTS 系统提示词**，把直接输出给用户的结果先改写成适合朗读的稿子再朗读
+- **实现**（`ai_chat.py` + `settings_panel.py`）：
+  1. **模型自动检测**：新增 `_list_models(base_url, api_key)`（GET `{base}/models`，OpenAI 兼容标准接口，401 实测确认存在）+ `AiChatManager.fetch_models(on_done)`（后台线程）；面板填完地址/密钥 editingFinished 或点「↻ 刷新模型」→ 自动拉取模型列表填进可编辑下拉 `cmb_ai_model`
+  2. **AI 入口置顶**：滚动区**最上面**新增折叠头大按钮「🤖 AI」（checkable、深蓝高亮），点击 `_toggle_ai_page` 展开/收起 `ai_box` 配置容器（默认收起）；原底部 gb_ai 模块移除
+  3. **系统提示词可编辑**：`ed_ai_sysprompt`（QPlainTextEdit，默认填充桌宠人设，textChanged 即存配置 `ai.system_prompt`）；对话请求 system 用 `system_prompt()`（未填回退默认）
+  4. **TTS 提示词**：`default_tts_prompt()`（语音播报助手提示词：口语化/去 markdown/表情/链接/符号）+ `ed_ai_ttsprompt` 编辑（存 `ai.tts_prompt`）
+  5. **朗读改稿链路**：AI 回复 `_on_ai_done` → 若 TTS 开且 AI 开 → `_rewrite_for_tts` 用 TTS 提示词 + AI 回复发起第二次 LLM 改写 → `_on_rewrite_done` 朗读改写稿（改写失败自动朗读原文兜底）；`_pending_tts_seq` 序号防串读
+  6. **TTS 强制依附 AI**：面板 AI 关 → TTS 自动取消勾选并置灰（`setEnabled(False)`）；AI 开才恢复可勾；`_ai_apply_tts` 勾选时校验 AI 开否则拒；`ai_chat._on_ai_done` 也兜底 `tts_enabled and not enabled → set_tts_enabled(False)`
+  7. **健壮性**：`BubbleWidget._reposition` 对 pet 无几何容错（防 None frameGeometry）
+- **验证**：py_compile ✅；面板冒烟：AI 折叠展开 visible True↔False、AI 关时勾 TTS 被拒、AI 开→TTS 可勾、AI 关→TTS 自动取消+置灰 ✅；模型检测（填假 key → 401 提示不崩）✅；改稿链路（无 key 静默/坏 key 改写失败回退原文→云端合成播放真实走通）✅；ai_selftest 全过（云端合成 17KB/本地 wav/代理探测）✅
+- 涉及：`ai_chat.py`（_list_models/fetch_models/system_prompt/set_system_prompt/tts_prompt/set_tts_prompt/_rewrite_for_tts/_on_rewrite_done/_speak_text/_pending_tts_seq/_on_tts_done/BubbleWidget 容错）、`settings_panel.py`（AI 折叠头+ai_box 置顶/cmb_ai_model/ed_ai_sysprompt/ed_ai_ttsprompt/handlers 重构/refresh_all 依赖联动）
+- 备注：**尚未重新打包 exe**（源码已自测，待用户确认后打包部署）
+
+
 - **需求**：①桌宠大小处要能直接填数字；②设置面板（选项框）不要一直置顶
 - **实现**（`settings_panel.py`）：
   1. 大小行：数值标签换成 **QSpinBox**（60–600 可手填 + 上下箭头微调，后缀 "px"），与滑块双向联动（blockSignals 防循环），`_on_size_changed` 按 sender 同步另一控件并实时调 `pet.set_pet_size`
