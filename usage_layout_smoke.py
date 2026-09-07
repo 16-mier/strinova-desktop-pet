@@ -74,16 +74,25 @@ ck("有用量时用量行可见", cw.lbl_usage.isVisible() and cw.lbl_usage.text
 cw.set_usage("")
 ck("隐藏用量时用量行隐藏", not cw.lbl_usage.isVisible())
 
-# usage 文本含缓存
-mgr.cfg = lambda: {'ai_price_in': 0.14, 'ai_price_out': 0.28, 'ai_price_cache': 0.0028}
+# usage 文本含缓存 + 费用公式（时段无关：显式关闭峰谷计价，恒用面板满价）
+mgr.cfg = lambda: {'ai_price_in': 0.14, 'ai_price_out': 0.28, 'ai_price_cache': 0.0028,
+                   'peak_pricing': False}
+mgr.peak_pricing_enabled = lambda: False   # 固定满价，避免高峰/空闲时段影响手算
 u = {'prompt_tokens': 1000, 'completion_tokens': 200, 'total_tokens': 1200,
      'prompt_cache_hit_tokens': 400, 'prompt_cache_miss_tokens': 600}
 txt = mgr._usage_text(u)
 ck("usage 文本含缓存读取标记 [缓存读400]", "[缓存读400]" in txt)
 cost, desc = mgr.calc_cost(u)
-# 手算：未命中600×0.14/1e6 + 命中400×0.0028/1e6 + 输出200×0.28/1e6
+# 手算（满价）：未命中600×0.14/1e6 + 命中400×0.0028/1e6 + 输出200×0.28/1e6
 expect = 600*0.14/1e6 + 400*0.0028/1e6 + 200*0.28/1e6
 ck("费用公式正确(未命中原价+命中优惠价+输出)", abs(cost - expect) < 1e-12)
+# 峰谷逻辑：空闲时段开启峰谷应半价（用与当前时段无关的固定时间判断）
+import datetime as _dt
+ai_mod = __import__('ai_chat')
+_peak = ai_mod.AiChatManager.is_peak_time(_dt.datetime(2026, 9, 7, 10, 0))   # 周一10:00→高峰
+_off = ai_mod.AiChatManager.is_peak_time(_dt.datetime(2026, 9, 7, 13, 0))    # 周一13:00→空闲
+ck("高峰判断：周一10点=高峰", _peak is True)
+ck("空闲判断：周一13点=空闲", _off is False)
 
 # 设置面板单价三档输入框存在
 try:
