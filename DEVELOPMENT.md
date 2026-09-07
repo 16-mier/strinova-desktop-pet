@@ -78,6 +78,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（世界书编辑器支持「全局/当前角色」双范围 + 管理按钮调大）
+- **需求**：①「管理世界书」按钮太小；②每个角色单独世界书要能自己编辑/补充
+- **实现**（`settings_panel.py`）：
+  1. `_world_book_paths(fname, role)` 支持指定文件名/角色（全局 world_book.json / role_worldbooks/<角色名>.json）
+  2. `WorldBookEditor(role=)` 支持角色范围——标题/提示注明当前编辑范围；`_load/_write` 按 role 指向对应文件；`_open_worldbook_editor` 弹 QInputDialog 选「全局世界书」或「当前角色：XX」再打开
+  3. 「管理世界书」按钮调大：高 22→28、宽 132、金色描边样式、文案「📖 管理世界书…」
+- **验证**：全局编辑器 21 条 / 米雪儿角色编辑器 10 条（路径正确）✅；全量回归（session16/usage16/history23/gui/panel2）全绿 ✅
+- 涉及：`settings_panel.py`
+- git：（待提交）
+
 ### 2026-09-07（会话重构 v2：每角色独立上下文文件/只删不建 + 每角色专属世界书 + 桌宠正下方延迟价格小字）
 - **需求（用户）**：①每个角色独立上下文文件（磁盘持久化）；②会话不可以创建只能删；③选角色看上下文文件不出现默认会话；④每角色单独世界书（去 wiki 搜，可花更多时间）；⑤删掉某角色上下文后切回该角色自动恢复；⑥每次对话在桌宠正下方显示 LLM/TTS 延迟与 API 价格（两行，延迟用秒）
 - **会话重构**（`ai_chat.py`）：

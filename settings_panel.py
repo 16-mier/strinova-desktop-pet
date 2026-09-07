@@ -106,37 +106,47 @@ class NoWheelList(QListWidget):
         event.accept()
 
 
-def _world_book_paths():
-    """世界书 json 路径（数据目录优先，源码兜底）→ (读路径, 写路径)"""
+def _world_book_paths(fname='world_book.json', role=None):
+    """世界书 json 路径（数据目录优先，源码兜底）→ 列表。
+    fname 指定文件名（全局 world_book.json / 角色 role_worldbooks/<角色名>.json）。"""
     out = []
     if pet_mod is not None:
         try:
             assets = (pet_mod.assets_dir() if hasattr(pet_mod, 'assets_dir')
                       else os.path.join(pet_mod.base_dir(), 'assets'))
-            out.append(os.path.join(assets, 'world_book.json'))
+            if role:
+                out.append(os.path.join(assets, 'role_worldbooks', role + '.json'))
+            else:
+                out.append(os.path.join(assets, fname))
         except Exception:
             pass
     try:
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'world_book.json')
-        out.append(src)
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+        if role:
+            out.append(os.path.join(src, 'role_worldbooks', role + '.json'))
+        else:
+            out.append(os.path.join(src, fname))
     except Exception:
         pass
-    return out or [os.path.join(os.getcwd(), 'assets', 'world_book.json')]
+    return out or [os.path.join(os.getcwd(), 'assets', fname)]
 
 
 class WorldBookEditor(QDialog):
     """世界书条目编辑器：列出/新增/删除/修改条目（关键词、内容、常驻勾选），
     保存写回 world_book.json（数据目录 + 源码 assets 双写）。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, role=None):
         super().__init__(parent)
-        self.setWindowTitle("世界书管理")
-        self.resize(680, 460)
+        self.role = role or ''   # 空=全局世界书；否则编辑该角色专属世界书
+        self.setWindowTitle("世界书管理" + ((" · " + role) if role else "（全局）"))
+        self.resize(680, 480)
         self.setStyleSheet("background:#1b1e28; color:#e8eaf0;")
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         tip = QLabel("世界书：对话时按关键词自动把角色剧情/世界观注入 AI 上下文。"
-                     "「常驻」条目每次对话都会注入；其余仅关键词命中时注入。")
+                     "「常驻」条目每次对话都会注入；其余仅关键词命中时注入。"
+                     + ("【当前正在编辑：%s 的角色世界书，其条目每次对话都注入】" % role if role
+                        else "【当前编辑：全局世界书】"))
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#8fa3c8;")
         root.addWidget(tip)
@@ -184,7 +194,7 @@ class WorldBookEditor(QDialog):
 
     # ---------- 数据加载/保存 ----------
     def _load(self):
-        self.paths = _world_book_paths()
+        self.paths = _world_book_paths(role=self.role or None)
         self.data = {'entries': {}}
         for p in self.paths:
             try:
@@ -516,8 +526,13 @@ class SettingsPanel(QWidget):
         self.chk_ai_worldbook = QCheckBox("📖 启用世界书（角色剧情/世界观自动注入）")
         self.chk_ai_worldbook.toggled.connect(self._ai_apply_worldbook)
         r_wb.addWidget(self.chk_ai_worldbook, 1)
-        self.btn_worldbook_edit = QPushButton("管理条目…")
-        self.btn_worldbook_edit.setFixedHeight(22)
+        self.btn_worldbook_edit = QPushButton("📖 管理世界书…")
+        self.btn_worldbook_edit.setFixedHeight(28)
+        self.btn_worldbook_edit.setFixedWidth(132)
+        self.btn_worldbook_edit.setStyleSheet(
+            "QPushButton{background:#2f3a57; border:1px solid #5a6ea8; border-radius:8px;"
+            " color:#cfe0ff; font-size:12px; font-weight:bold; padding:2px 8px;}"
+            "QPushButton:hover{background:#3d4d75;}")
         self.btn_worldbook_edit.clicked.connect(self._open_worldbook_editor)
         r_wb.addWidget(self.btn_worldbook_edit)
         ail.addLayout(r_wb)
@@ -1850,9 +1865,28 @@ class SettingsPanel(QWidget):
         return bool(pet.ai.cfg().get('enabled', False))
 
     def _open_worldbook_editor(self):
-        """打开世界书编辑器（增删改条目）"""
+        """打开世界书编辑器：可选择编辑「全局世界书」或「当前角色世界书」。"""
+        pet = self._current_pet()
+        cur_role = ''
         try:
-            dlg = WorldBookEditor(self)
+            if pet is not None and hasattr(pet, 'role'):
+                parts = [p for p in str(pet.role).replace('\\', '/').split('/') if p]
+                cur_role = parts[-2] if len(parts) >= 3 else (parts[-1] if parts else '')
+        except Exception:
+            pass
+        # 范围选择：全局 / 当前角色
+        from PyQt6.QtWidgets import QInputDialog as _QID
+        if cur_role:
+            items = ['全局世界书', '当前角色：%s' % cur_role]
+            choice, ok = _QID.getItem(self, "编辑世界书", "选择要编辑的范围：",
+                                      items, 1 if cur_role else 0, False)
+            if not ok:
+                return
+            role = cur_role if choice == '当前角色：%s' % cur_role else ''
+        else:
+            role = ''
+        try:
+            dlg = WorldBookEditor(self, role=role)
             dlg.exec()
         except Exception as e:
             QMessageBox.critical(self, "错误", "世界书编辑器打开失败：%s" % e)
