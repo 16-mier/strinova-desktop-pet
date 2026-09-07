@@ -86,13 +86,14 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   2. 目标进程名单：`calabiyau-win64-shipping` / 含 `calabiyau` 的进程名（官方版 + WeGame 都覆盖）
   3. PetWindow 新增配置：`_meow_enabled`（default False）、`_meow_word`（default 喵）、`_meow_hook`，方法 `_meow_hook_start/stop`、`set_meow_enabled`、`set_meow_word`；退出时在 closeEvent 停止钩子
   4. 设置面板新增独立折叠栏「🎮 卡丘游戏设置」（置于 快捷键/开麦 之后）：`chk_meow` 开关 + `ed_meow_word` 自定义补词输入框；refresh_all 回填状态
+  5. **首版实测无效修复**：v1 的 `_send_unicode_text()` 直接在低层钩子【回调内部】执行 SendInput 注入并 `time.sleep(0.02)`——在钩子回调里阻塞会拖死全局键盘管线，且回调内注入的键常被系统丢弃/重入，导致"补词没反应"。v2 重构为：回调只【检测并吞掉发送回车】置 pending（return 1），真正注入推迟到钩子线程【消息循环空闲时】（PeekMessage 轮询 + `_process_pending()`）执行"补词 → 模拟回车 down/up"；并收紧可打印字符判定（排除方向键/F1-F12/编辑键），加 `_dbg` 日志便于实测
 - **验证**：
-  - MeowHook 状态机四场景单元级全过：未打字回车不补 ✓ / 打字后回车补"喵" ✓ / 发送后再直接回车不补 ✓ / 失焦重置后回车不补 ✓
+  - MeowHook 状态机五场景单元级全过：直接回车不吞不放行 ✓ / 打字后回车吞键(pending) ✓ / 注入序列=补词+回车down/up ✓ / 发送后再回车不补 ✓ / 失焦重置不补 ✓
   - 设置面板「卡丘游戏设置」栏构建、开关与词输入、折叠开合、refresh_all 回填全部正常 ✅
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
-- 涉及：`pet.py`（MeowHook/_foreground_exe/_send_unicode_text/配置字段与方法/closeEvent）、`settings_panel.py`（卡丘游戏设置折叠栏）
+- 涉及：`pet.py`（MeowHook/_foreground_exe/_send_unicode_text v2/配置字段与方法/closeEvent）、`settings_panel.py`（卡丘游戏设置折叠栏）
 - **部署**：打包后替换桌面 exe（默认关闭该功能；需在 设置→卡丘游戏设置 手动开启）
-- git：`ffd428a`
+- git：`ffd428a`（v1）+ `_next`（v2 注入重构）
 
 ### 2026-09-07（交互收敛：悬停收起改 0.5s + 右键菜单去 AI 对话项只留用量 + 修复设置面板打开卡 2 秒）
 - **需求**：① 鼠标离开桌宠后对话条改为 **0.5 秒**收起；② 右键桌宠的 AI 对话/新建/记录/清理功能都不需要了，**只留「查看用量」**（AI 交互已全由悬停对话条承担）；③ 打开设置面板等待变长、点 ✕ 收起也卡 → 需优化
