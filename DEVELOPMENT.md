@@ -91,7 +91,8 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 悬停分支受控验证：在桌宠上/输入条上不隐藏、离开才隐藏 ✅；0.5s 定时生效
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
 - 涉及：`pet.py`（_build_ai_menu/AI 用量入口）、`ai_chat.py`（500ms）、`settings_panel.py`（_refresh_tts_svc_state 异步化 + _probe_result）
-- **部署**：桌面 exe 重新打包替换（下一步）
+- **部署**：桌面 exe 已打包替换 `C:\Users\mier\Desktop\卡丘简易桌宠_最新.exe`（13:24，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
+- git：`646094a`（交互收敛 + 面板提速）
 
 ### 2026-09-07（AI 对话条悬停交互：鼠标移到桌宠上自动展开、离开 1 秒后收起）
 - **需求**：鼠标移到桌宠身上 → 直接显示下方对话条；鼠标离开桌宠 → 1 秒后对话条消失
