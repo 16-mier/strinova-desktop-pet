@@ -93,7 +93,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
 - 涉及：`pet.py`（MeowHook/_foreground_exe/_send_unicode_text v2/配置字段与方法/closeEvent）、`settings_panel.py`（卡丘游戏设置折叠栏）
 - **部署**：打包后替换桌面 exe（默认关闭该功能；需在 设置→卡丘游戏设置 手动开启）
-- git：`ffd428a`（v1）+ `_next`（v2 注入重构）
+- git：`ffd428a`（v1）+ `84c9e57`（v2 注入重构）
 
 ### 2026-09-07（交互收敛：悬停收起改 0.5s + 右键菜单去 AI 对话项只留用量 + 修复设置面板打开卡 2 秒）
 - **需求**：① 鼠标离开桌宠后对话条改为 **0.5 秒**收起；② 右键桌宠的 AI 对话/新建/记录/清理功能都不需要了，**只留「查看用量」**（AI 交互已全由悬停对话条承担）；③ 打开设置面板等待变长、点 ✕ 收起也卡 → 需优化
