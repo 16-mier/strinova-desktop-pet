@@ -2203,12 +2203,12 @@ class AiChatManager(QObject):
             pass
 
     def chat_bar_on_leave(self):
-        """鼠标离开桌宠：1 秒后若仍未回来则隐藏输入条。"""
+        """鼠标离开桌宠：0.5 秒后若仍未回来则隐藏输入条。"""
         try:
             if self._hover_hide_timer is None:
                 self._hover_hide_timer = QTimer(self)
                 self._hover_hide_timer.setSingleShot(True)
-                self._hover_hide_timer.setInterval(1000)
+                self._hover_hide_timer.setInterval(500)
                 self._hover_hide_timer.timeout.connect(self._do_hide_bar)
         except Exception:
             return

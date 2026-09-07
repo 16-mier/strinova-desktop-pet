@@ -1676,15 +1676,42 @@ class SettingsPanel(QWidget):
             pet.ai.set_tts_volume(target)
 
     # ---------------- 本地 TTS 服务控制 ----------------
-    def _refresh_tts_svc_state(self):
-        """探测本地 TTS 服务状态并刷新 UI（状态灯 + 按钮启停）"""
+    def _refresh_tts_svc_state(self, async_ok=True):
+        """探测本地 TTS 服务状态并刷新 UI（状态灯 + 按钮启停）。
+        async_ok=True（默认）时在后台线程探测，避免服务未启动时
+        socket 超时（约 2s）卡住主线程（打开设置面板会明显变慢）；
+        探测完成后回主线程更新控件。async_ok=False 用于已在线程里的场景。"""
         if not hasattr(self, 'lbl_tts_svc_state'):
             return
         try:
             ai_mod = sys.modules.get('ai_chat')
             if ai_mod is None:
                 return
-            ok, msg = ai_mod.tts_service_health()
+        except Exception:
+            return
+
+        def _probe():
+            try:
+                ok, msg = ai_mod.tts_service_health()
+                # 回到主线程刷新 UI（跨线程 emit 由 Qt 排队，安全）
+                self._probe_result(ok, msg)
+            except Exception:
+                self._probe_result(False, '')
+
+        if async_ok:
+            threading.Thread(target=_probe, daemon=True).start()
+        else:
+            try:
+                ok, msg = ai_mod.tts_service_health()
+            except Exception:
+                ok, msg = False, ''
+            self._probe_result(ok, msg)
+
+    def _probe_result(self, ok, msg):
+        """主线程：把 TTS 服务探测结果刷到 UI"""
+        try:
+            if not hasattr(self, 'lbl_tts_svc_state'):
+                return
             if ok:
                 self.lbl_tts_svc_state.setText("● %s" % msg)
                 self.lbl_tts_svc_state.setStyleSheet("color:#7ae0a3; font-size:11px;")

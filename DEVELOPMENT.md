@@ -78,6 +78,21 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（交互收敛：悬停收起改 0.5s + 右键菜单去 AI 对话项只留用量 + 修复设置面板打开卡 2 秒）
+- **需求**：① 鼠标离开桌宠后对话条改为 **0.5 秒**收起；② 右键桌宠的 AI 对话/新建/记录/清理功能都不需要了，**只留「查看用量」**（AI 交互已全由悬停对话条承担）；③ 打开设置面板等待变长、点 ✕ 收起也卡 → 需优化
+- **实现**：
+  1. `ai_chat.py`：`chat_bar_on_leave()` 延迟从 1000ms → **500ms**
+  2. `pet.py`：`_build_ai_menu()` 瘦身为「📊 用量·积分 + 📈 查看统计详情」两项（删除 快速提问/新建会话/完整对话记录/清理上下文）；主菜单入口改名「AI 用量」；右键弹 AI 用量菜单不变
+  3. **面板卡顿根因**：`settings_panel.py` 构造 `SettingsPanel` 时末尾**同步**调 `_refresh_tts_svc_state()` → `ai_chat.tts_service_health(timeout=2.0)`；本地 TTS 服务未启动时 socket 探测**等满 2 秒超时**才返回 → 主线程被阻塞 2 秒（打开面板卡、连点击响应都延迟）
+  4. 修复：`_refresh_tts_svc_state(async_ok=True)` 改为**后台线程探测**，完成回主线程 `_probe_result()` 刷 UI；`__init__` 与 5s 定时器都走异步 → 构造不再阻塞
+- **验证**：
+  - 面板构造耗时实测 **2134ms → 93ms**（约 23 倍提速）；`refresh_all` 0ms；hide 2-3ms 立即收起 ✅
+  - 首帧 show ~500ms（Windows 原生窗口+首帧样式渲染固有开销；后续 show/hide 均 <10ms）
+  - 悬停分支受控验证：在桌宠上/输入条上不隐藏、离开才隐藏 ✅；0.5s 定时生效
+  - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
+- 涉及：`pet.py`（_build_ai_menu/AI 用量入口）、`ai_chat.py`（500ms）、`settings_panel.py`（_refresh_tts_svc_state 异步化 + _probe_result）
+- **部署**：桌面 exe 重新打包替换（下一步）
+
 ### 2026-09-07（AI 对话条悬停交互：鼠标移到桌宠上自动展开、离开 1 秒后收起）
 - **需求**：鼠标移到桌宠身上 → 直接显示下方对话条；鼠标离开桌宠 → 1 秒后对话条消失
 - **实现**：

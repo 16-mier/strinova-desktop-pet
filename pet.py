@@ -1998,8 +1998,8 @@ class PetWindow(QWidget):
         act_switch.setMenu(self._switch_submenu)   # 关联子菜单 → 原生"指向即开"
         menu.addAction(act_switch)
 
-        # ①-AI 对话子菜单（打开对话/记录/清理/用量积分；三横与托盘共用）
-        act_ai = QAction("AI（对话·用量）", menu)
+        # ①-AI 用量子菜单（仅展示累计用量/详情；对话条已改悬停自动弹出）
+        act_ai = QAction("AI 用量", menu)
         act_ai.setMenu(self._build_ai_menu(menu))
         menu.addAction(act_ai)
 
@@ -2234,40 +2234,20 @@ class PetWindow(QWidget):
 
     # ---------- AI 子菜单（右键/三横/托盘共用） ----------
     def _build_ai_menu(self, parent):
-        """构建 AI 子菜单（三横/托盘/右键共用）：
-        💬 打开对话 / 📜 完整对话 / 🧹 清理上下文 / 📊 用量·积分
-        AI 未启用 → 整项置灰并提示去设置开启。"""
+        """构建 AI 用量子菜单（右键/三横/托盘共用）：
+        📊 用量·积分（累计）+ 📈 查看统计详情
+        AI 交互（对话条）已改为鼠标悬停桌宠自动弹出，不再需要菜单入口。"""
         ai = getattr(self, 'ai', None)
         enabled = ai is not None and ai.enabled()
         menu = QMenu(parent)
         menu.setStyleSheet(MENU_QSS)
-        menu.setTitle("AI")
+        menu.setTitle("AI 用量")
 
         if not enabled:
             act_off = QAction("AI 未启用（去 设置→AI 开启）", menu)
             act_off.setEnabled(False)
             menu.addAction(act_off)
             return menu
-
-        act_chat = QAction("✏️ 快速提问", menu)
-        act_chat.setToolTip("在桌宠下方弹出输入条；发送后自动收起，AI 回复以大字气泡显示在右侧")
-        act_chat.triggered.connect(lambda _c: ai.open_chat())
-        menu.addAction(act_chat)
-
-        act_new = QAction("＋ 新建会话", menu)
-        act_new.setToolTip("新建一个独立会话（各自保留上下文，可切换继续聊）")
-        act_new.triggered.connect(lambda _c: ai.new_session())
-        menu.addAction(act_new)
-
-        act_hist = QAction("📜 完整对话记录", menu)
-        act_hist.triggered.connect(lambda _c: ai.show_history())
-        menu.addAction(act_hist)
-
-        act_clear = QAction("🧹 清理上下文", menu)
-        act_clear.triggered.connect(lambda _c: ai.clear_context())
-        menu.addAction(act_clear)
-
-        menu.addSeparator()
 
         # 用量·积分（仅展示不可点）
         try:
