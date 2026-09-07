@@ -7,6 +7,7 @@ import sys
 import shutil
 import ctypes
 import threading
+import json
 from ctypes import wintypes
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QFileSystemWatcher, QRectF, QPoint
@@ -16,6 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QGroupBox, QScrollArea, QFrame, QCheckBox,
     QComboBox, QLineEdit, QSizePolicy, QSlider, QSpinBox, QPlainTextEdit,
+    QDialog,
 )
 
 # 无边框窗口缩放：WM_NCHITTEST 命中测试常量（仅 Windows 生效）
@@ -89,6 +91,208 @@ class NoWheelSlider(QSlider):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class NoWheelList(QListWidget):
+    """滚轮只滚动本列表、不带动外层页面（列表滚到头后不再穿透 QScrollArea）。
+    解决：设置面板在滚动区里，鼠标在角色/音频列表上滚轮到头会滑动整个面板。"""
+
+    def wheelEvent(self, event):
+        # 先让列表自己滚一档；随后吞掉事件，阻止传播到外层滚动区
+        try:
+            super().wheelEvent(event)
+        except Exception:
+            pass
+        event.accept()
+
+
+def _world_book_paths():
+    """世界书 json 路径（数据目录优先，源码兜底）→ (读路径, 写路径)"""
+    out = []
+    if pet_mod is not None:
+        try:
+            assets = (pet_mod.assets_dir() if hasattr(pet_mod, 'assets_dir')
+                      else os.path.join(pet_mod.base_dir(), 'assets'))
+            out.append(os.path.join(assets, 'world_book.json'))
+        except Exception:
+            pass
+    try:
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'world_book.json')
+        out.append(src)
+    except Exception:
+        pass
+    return out or [os.path.join(os.getcwd(), 'assets', 'world_book.json')]
+
+
+class WorldBookEditor(QDialog):
+    """世界书条目编辑器：列出/新增/删除/修改条目（关键词、内容、常驻勾选），
+    保存写回 world_book.json（数据目录 + 源码 assets 双写）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("世界书管理")
+        self.resize(680, 460)
+        self.setStyleSheet("background:#1b1e28; color:#e8eaf0;")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        tip = QLabel("世界书：对话时按关键词自动把角色剧情/世界观注入 AI 上下文。"
+                     "「常驻」条目每次对话都会注入；其余仅关键词命中时注入。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#8fa3c8;")
+        root.addWidget(tip)
+        body = QHBoxLayout()
+        # 左侧条目列表
+        self.lst = QListWidget()
+        self.lst.currentItemChanged.connect(self._on_select)
+        body.addWidget(self.lst, 1)
+        # 右侧编辑区
+        right = QVBoxLayout()
+        r_k = QHBoxLayout()
+        r_k.addWidget(QLabel("键名："))
+        self.ed_key = QLineEdit()
+        self.ed_key.setPlaceholderText("唯一标识（如：欧泊）")
+        r_k.addWidget(self.ed_key)
+        right.addLayout(r_k)
+        r_kw = QHBoxLayout()
+        r_kw.addWidget(QLabel("关键词："))
+        self.ed_keys = QLineEdit()
+        self.ed_keys.setPlaceholderText("触发词，逗号分隔（如：欧泊,理想乡）")
+        r_kw.addWidget(self.ed_keys)
+        right.addLayout(r_kw)
+        self.chk_const = QCheckBox("常驻注入（每次对话都带上）")
+        right.addWidget(self.chk_const)
+        right.addWidget(QLabel("内容："))
+        self.ed_content = QPlainTextEdit()
+        self.ed_content.setPlaceholderText("注入给 AI 的剧情/世界观描述…")
+        right.addWidget(self.ed_content, 1)
+        btns = QHBoxLayout()
+        b_new = QPushButton("➕ 新增")
+        b_new.clicked.connect(self._new)
+        b_del = QPushButton("🗑 删除")
+        b_del.clicked.connect(self._delete)
+        b_save = QPushButton("💾 保存")
+        b_save.clicked.connect(self._save)
+        b_close = QPushButton("关闭")
+        b_close.clicked.connect(self.accept)
+        for b in (b_new, b_del, b_save, b_close):
+            btns.addWidget(b)
+        right.addLayout(btns)
+        body.addLayout(right, 2)
+        root.addLayout(body, 1)
+        self._load()
+        self._refresh()
+
+    # ---------- 数据加载/保存 ----------
+    def _load(self):
+        self.paths = _world_book_paths()
+        self.data = {'entries': {}}
+        for p in self.paths:
+            try:
+                if os.path.exists(p):
+                    with open(p, encoding='utf-8') as f:
+                        self.data = json.load(f) or {'entries': {}}
+                    break
+            except Exception:
+                continue
+        if not isinstance(self.data, dict):
+            self.data = {'entries': {}}
+        self.data.setdefault('entries', {})
+
+    def _write(self):
+        ok = False
+        last = None
+        for p in self.paths:
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, 'w', encoding='utf-8') as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+                ok = True
+                last = p
+            except Exception as e:
+                print('worldbook write fail', p, e)
+        return ok, last
+
+    def _refresh(self, select_key=None):
+        self.lst.blockSignals(True)
+        self.lst.clear()
+        entries = self.data.get('entries') or {}
+        for k in sorted(entries):
+            it = QListWidgetItem('%s%s' % ('★ ' if entries[k].get('constant') else '', k))
+            it.setData(Qt.ItemDataRole.UserRole, k)
+            self.lst.addItem(it)
+        self.lst.blockSignals(False)
+        if select_key:
+            for i in range(self.lst.count()):
+                if self.lst.item(i).data(Qt.ItemDataRole.UserRole) == select_key:
+                    self.lst.setCurrentRow(i)
+                    break
+        elif self.lst.count():
+            self.lst.setCurrentRow(0)
+
+    def _on_select(self, cur, _prev):
+        if cur is None:
+            return
+        k = cur.data(Qt.ItemDataRole.UserRole)
+        e = (self.data.get('entries') or {}).get(k)
+        if not e:
+            self.ed_key.setText(k)
+            self.ed_keys.setText('')
+            self.chk_const.setChecked(False)
+            self.ed_content.setPlainText('')
+            return
+        self.ed_key.setText(k)
+        self.ed_keys.setText(','.join(e.get('keys') or []))
+        self.chk_const.setChecked(bool(e.get('constant')))
+        self.ed_content.setPlainText(e.get('content') or '')
+
+    def _cur_key(self):
+        it = self.lst.currentItem()
+        return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+    def _new(self):
+        k = self.ed_key.text().strip() or ('新条目%d' % (len(self.data.get('entries') or {}) + 1))
+        if k in (self.data.get('entries') or {}):
+            QMessageBox.information(self, "提示", "键名已存在，请换一个。")
+            return
+        kws = [x.strip() for x in self.ed_keys.text().replace('，', ',').split(',') if x.strip()]
+        self.data.setdefault('entries', {})[k] = {
+            'keys': kws,
+            'content': self.ed_content.toPlainText().strip(),
+            'constant': self.chk_const.isChecked(),
+        }
+        self._refresh(select_key=k)
+
+    def _delete(self):
+        k = self._cur_key()
+        if not k:
+            return
+        if QMessageBox.question(self, "确认", "删除条目「%s」？" % k) == QMessageBox.StandardButton.Yes:
+            self.data.get('entries', {}).pop(k, None)
+            self._refresh()
+
+    def _save(self):
+        # 把当前编辑内容回写（若无选中项不写）
+        k = self._cur_key()
+        if k:
+            kws = [x.strip() for x in self.ed_keys.text().replace('，', ',').split(',') if x.strip()]
+            self.data.setdefault('entries', {})[k] = {
+                'keys': kws,
+                'content': self.ed_content.toPlainText().strip(),
+                'constant': self.chk_const.isChecked(),
+            }
+        ok, path = self._write()
+        if ok:
+            QMessageBox.information(self, "已保存", "世界书已保存（条目 %d 条）\n%s" % (
+                len(self.data.get('entries') or {}), path or ''))
+        else:
+            QMessageBox.critical(self, "错误", "保存失败（无可用写入位置）")
+        # 清掉 manager 的加载缓存，下次对话用最新世界书
+        try:
+            from ai_chat import AiChatManager as _ACM
+            _ACM._world_loaded = False
+            _ACM._world_book = None
+        except Exception:
+            pass
 
 
 class CloseButton(QPushButton):
@@ -307,6 +511,16 @@ class SettingsPanel(QWidget):
         self.chk_ai_enabled = QCheckBox("启用 AI 对话（右键桌宠打开聊天窗）")
         self.chk_ai_enabled.toggled.connect(self._ai_apply_enabled)
         ail.addWidget(self.chk_ai_enabled)
+        # 世界书开关 + 管理按钮（角色剧情/世界观关键词注入；可自编辑条目）
+        r_wb = QHBoxLayout()
+        self.chk_ai_worldbook = QCheckBox("📖 启用世界书（角色剧情/世界观自动注入）")
+        self.chk_ai_worldbook.toggled.connect(self._ai_apply_worldbook)
+        r_wb.addWidget(self.chk_ai_worldbook, 1)
+        self.btn_worldbook_edit = QPushButton("管理条目…")
+        self.btn_worldbook_edit.setFixedHeight(22)
+        self.btn_worldbook_edit.clicked.connect(self._open_worldbook_editor)
+        r_wb.addWidget(self.btn_worldbook_edit)
+        ail.addLayout(r_wb)
         # AI 服务：OpenAI 兼容接口
         r_base = QHBoxLayout()
         r_base.addWidget(QLabel("服务器地址："))
@@ -451,6 +665,16 @@ class SettingsPanel(QWidget):
         self.ed_tts_api_model.editingFinished.connect(self._ai_apply_tts_api)
         r_api_model.addWidget(self.ed_tts_api_model, 1)
         atl.addLayout(r_api_model)
+        r_api_kind = QHBoxLayout()
+        r_api_kind.addWidget(QLabel("模型版本："))
+        self.cmb_tts_model_kind = QComboBox()
+        self.cmb_tts_model_kind.addItem("自动（有bf16用bf16）", 'auto')
+        self.cmb_tts_model_kind.addItem("高音质 bf16", 'bf16')
+        self.cmb_tts_model_kind.addItem("量化 q8（省显存）", 'q8')
+        self.cmb_tts_model_kind.setFixedWidth(190)
+        self.cmb_tts_model_kind.currentIndexChanged.connect(self._ai_apply_tts_kind)
+        r_api_kind.addWidget(self.cmb_tts_model_kind, 1)
+        atl.addLayout(r_api_kind)
         r_api_voice = QHBoxLayout()
         r_api_voice.addWidget(QLabel("音色："))
         self.ed_tts_api_voice = QLineEdit()
@@ -553,7 +777,7 @@ class SettingsPanel(QWidget):
         rl.addLayout(size_row)
         # 角色列表 + 侧按钮
         row = QHBoxLayout()
-        self.role_list = QListWidget()
+        self.role_list = NoWheelList()
         self.role_list.setMinimumHeight(90)
         self.role_list.itemClicked.connect(self._on_role_clicked)
         row.addWidget(self.role_list, 1)
@@ -585,7 +809,7 @@ class SettingsPanel(QWidget):
         self.cmb_voice_src.currentIndexChanged.connect(self._on_voice_src_changed)
         src_row.addWidget(self.cmb_voice_src, 1)
         al.addLayout(src_row)
-        self.audio_list = QListWidget()
+        self.audio_list = NoWheelList()
         self.audio_list.setMinimumHeight(110)
         self.audio_list.itemClicked.connect(self._on_audio_clicked)
         self.audio_list.itemDoubleClicked.connect(self._preview_selected_audio)
@@ -987,6 +1211,10 @@ class SettingsPanel(QWidget):
         self.chk_ai_tts.setChecked(ai_on and bool(ai.get('tts_enabled', True)))
         self.chk_ai_tts.setEnabled(ai_on)   # AI 关 → TTS 置灰不可开
         self.chk_ai_tts.blockSignals(False)
+        # 世界书开关回填（默认 True）
+        self.chk_ai_worldbook.blockSignals(True)
+        self.chk_ai_worldbook.setChecked(bool(ai.get('world_book_enabled', True)))
+        self.chk_ai_worldbook.blockSignals(False)
         self.ed_ai_base.setText(ai.get('base_url', ''))
         self.ed_ai_key.setText(ai.get('api_key', ''))
         # 模型下拉：优先存值、否则保留当前
@@ -1010,6 +1238,14 @@ class SettingsPanel(QWidget):
         self.ed_tts_api_model.blockSignals(True)
         self.ed_tts_api_model.setText(ai.get('tts_api_model', ''))
         self.ed_tts_api_model.blockSignals(False)
+        # 模型版本回填（auto/bf16/q8）
+        kind = (ai.get('tts_model_kind') or 'auto').strip().lower()
+        if kind not in ('bf16', 'q8'):
+            kind = 'auto'
+        self.cmb_tts_model_kind.blockSignals(True)
+        idx = self.cmb_tts_model_kind.findData(kind)
+        self.cmb_tts_model_kind.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_tts_model_kind.blockSignals(False)
         self.ed_tts_api_voice.blockSignals(True)
         self.ed_tts_api_voice.setText(ai.get('tts_api_voice', ''))
         self.ed_tts_api_voice.blockSignals(False)
@@ -1613,6 +1849,21 @@ class SettingsPanel(QWidget):
             return False
         return bool(pet.ai.cfg().get('enabled', False))
 
+    def _open_worldbook_editor(self):
+        """打开世界书编辑器（增删改条目）"""
+        try:
+            dlg = WorldBookEditor(self)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", "世界书编辑器打开失败：%s" % e)
+
+    def _ai_apply_worldbook(self, on):
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai') and hasattr(pet.ai, 'set_worldbook_enabled'):
+            pet.ai.set_worldbook_enabled(bool(on))
+        self._ai_status("世界书已" + ("开启（关键词触发注入角色剧情/世界观）" if on else "关闭"),
+                        "#7ae0a3" if on else "#7a8099")
+
     def _ai_apply_enabled(self, on):
         pet = self._current_pet()
         if pet is not None and hasattr(pet, 'ai'):
@@ -1654,6 +1905,18 @@ class SettingsPanel(QWidget):
             self.ed_tts_api_ref.text().strip(),
             self.ed_tts_api_ref_text.text().strip(),
             self.ed_tts_api_instr.text().strip())
+
+    def _ai_apply_tts_kind(self, _idx=0):
+        """保存 TTS 模型版本选择（auto/bf16/q8）——本地 breeze 克隆用"""
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        try:
+            from ai_chat import _save_ai_cfg
+            _save_ai_cfg(tts_model_kind=self.cmb_tts_model_kind.currentData() or 'auto')
+            self._ai_status("模型版本已保存（启动服务时按此加载）", "#8fa3c8")
+        except Exception as e:
+            print('apply tts kind fail:', e)
 
     def _ai_pick_tts_ref(self):
         """浏览选择克隆参考音频，并把同目录同名 .txt 自动填进参考转录"""

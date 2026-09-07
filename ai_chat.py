@@ -237,8 +237,9 @@ def tts_service_health(timeout=2.0):
         return False, '已停止（%s）' % str(e)[:40]
 
 
-def _models_paths():
-    """查找 breeze 家族 GGUF 模型文件（可加载列表，bf16 优先）。
+def _models_paths(kind='auto'):
+    """查找 breeze 家族 GGUF 模型文件（可加载列表）。
+    kind: 'bf16' 只留 bf16；'q8' 只留 q8；'auto' 优先 bf16 再 q8。
     候选根目录：
       1) svc_dir/models            （bin-cuda/models，旧约定）
       2) svc_dir 上级/models       （audio-cpp/models，bin-cuda 与 models 平级部署）
@@ -263,6 +264,11 @@ def _models_paths():
                     if p not in seen:
                         seen.add(p)
                         hits.append(p)
+    # 按 kind 过滤
+    if kind == 'bf16':
+        hits = [p for p in hits if 'bf16' in p.lower()]
+    elif kind == 'q8':
+        hits = [p for p in hits if 'bf16' not in p.lower()]
     # 优先 bf16，再 q8；排序稳定
     hits.sort(key=lambda p: (0 if 'bf16' in p.lower() else 1, p))
     return hits
@@ -335,8 +341,17 @@ def tts_service_start():
             return False, '服务进程退出（code=%s）' % _SERVICE_PROC.returncode
         return False, '服务启动超时'
     # 加载 Breeze 模型（models 列表默认空，须显式 load）
+    # 按用户选择的量化版本加载：bf16 高音质 / q8 省显存（读 ai.tts_model_kind）
+    try:
+        ai_cfg = _ai_cfg()
+        kind = (ai_cfg.get('tts_model_kind') or 'auto').strip().lower()
+    except Exception:
+        kind = 'auto'
+    if kind not in ('bf16', 'q8'):
+        kind = 'auto'
     loaded_ok = False
-    for model_path in _models_paths():
+    loaded_path = ''
+    for model_path in _models_paths(kind):
         try:
             payload = {
                 'id': 'breeze-tts-clone',
@@ -349,11 +364,12 @@ def tts_service_start():
             res = _api_json('POST', base + '/v1/models/load', payload, timeout=60)
             if isinstance(res, dict) and res.get('loaded'):
                 loaded_ok = True
+                loaded_path = model_path
                 break
         except Exception:
             continue
     if loaded_ok:
-        return True, '服务已启动并加载模型（%s）' % os.path.basename(_models_paths()[0] if _models_paths() else '')
+        return True, '服务已启动并加载模型（%s）' % os.path.basename(loaded_path or '')
     return False, '服务已启动但模型加载失败，请检查模型文件'
 
 
@@ -1619,6 +1635,16 @@ class AiChatManager(QObject):
     _world_book = None      # {entries:{key:{keys,content,constant}}}
     _world_loaded = False
 
+    def worldbook_enabled(self):
+        """世界书开关（ai.world_book_enabled，默认 True）"""
+        try:
+            return bool((self.cfg() or {}).get('world_book_enabled', True))
+        except Exception:
+            return True
+
+    def set_worldbook_enabled(self, on):
+        _save_ai_cfg(world_book_enabled=bool(on))
+
     def _load_world_book(self):
         """加载世界书 assets/world_book.json（懒加载，失败静默）。"""
         if AiChatManager._world_loaded:
@@ -1663,8 +1689,10 @@ class AiChatManager(QObject):
 
     def _inject_world_entries(self, msgs, user_text):
         """把命中的世界书条目注入 system 消息末尾（作为世界知识段）。
-        msgs[0] 为 system（若不存在则补）。"""
+        msgs[0] 为 system（若不存在则补）。开关关闭则不注入。"""
         try:
+            if not self.worldbook_enabled():
+                return msgs
             hits = self._world_entries_for(user_text)
             if hits:
                 world_block = ('【世界知识】\n' + '\n\n'.join(hits))

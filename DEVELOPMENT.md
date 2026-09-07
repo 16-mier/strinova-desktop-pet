@@ -78,6 +78,18 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（世界书开关+自编辑管理器 + 角色列表滚轮穿透修复 + 克隆音频量化版本选项）
+- **需求（用户）**：①世界书功能要可开关、可自行补充/修改条目；②选角色页面滚轮到头会滑动整个面板（不好选）；③克隆音频新增可选量化版本（q8 省显存 / bf16 高音质）
+- **实现**：
+  1. **世界书开关**：设置 AI 区新增「📖 启用世界书」开关（chat 逻辑 `worldbook_enabled/set_worldbook_enabled`，配置 `ai.world_book_enabled` 默认 True；`_inject_world_entries` 尊重开关）
+  2. **世界书管理器**：新增 `WorldBookEditor(QDialog)`（按键名列表 + 编辑区：键名/关键词(逗号分隔)/常驻勾选/内容 + 新增/删除/保存）；保存写回 world_book.json（数据目录+源码双写）并清 manager 加载缓存（下次对话生效）；入口「管理条目…」按钮
+  3. **滚轮穿透修复**：新增 `NoWheelList(QListWidget)`（wheelEvent 先 super 滚动再 accept 吞掉事件，防传播外层 QScrollArea）；`role_list`/`audio_list` 改用
+  4. **量化版本**：设置朗读区新增「模型版本」下拉（自动/高音质 bf16/量化 q8）；`_models_paths(kind)` 按 kind 过滤；`tts_service_start` 读 `ai.tts_model_kind` 按选择加载
+- **修复**：settings_panel 缺 `import json`（世界书编辑器 json.load 全部静默失败）
+- **验证**：模型版本筛选 auto5/bf16/q8 ✅；世界书开关三态+关闭不注入 ✅；编辑器加载 21 条+选中编辑 ✅；NoWheelList ✅；回归待跑
+- 涉及：`settings_panel.py`、`ai_chat.py`
+- git：（待提交）
+
 ### 2026-09-07（AI 对话大改：会话防串台重构 + 24角色丰富人格 + 酒馆式世界书 + 延迟显示完善）
 - **需求（用户）**：①会话管理太麻烦，切角色会冒出上个角色配置（需大改）；②看 token 金额 + LLM 延迟 + TTS 延迟；③全部角色人格提示词要丰富（上网收集）；④做类似酒馆 World Info 的世界书（角色剧情关键词触发注入）
 - **人格资料**（subagent 采集）：wiki.biligame.com 24 角色页 raw + 语音台词页抓取 → `_pet_data/char_info.json`（role_desc/personality/voice_style/values/traits/quotes 全真实，24/24）；生成器产出 `assets/persona/<角色名>.txt`（丰富人格提示词，24 个；米雪儿/奥黛丽/玛德蕾娜/加拉蒂亚用短名文件）
