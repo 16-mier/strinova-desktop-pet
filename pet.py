@@ -1673,6 +1673,9 @@ class PetWindow(QWidget):
         self._toast_until = 0.0
         # 窗口显示后自动注册（show 的时机由 main() 控制，这里延后到事件循环就绪）
         QTimer.singleShot(300, self._register_hotkeys_now)
+        # 启动时同步当前角色的 AI 配置（TTS 克隆音色 + 系统提示词 + 会话）：
+        # 防止上次关闭时残留其它角色（如白墨）的克隆参考导致「图标星绘、声音白墨」
+        QTimer.singleShot(450, self._apply_role_ai_profile_on_start)
         # 若配置开启小键盘智能播放 → 启动钩子
         if self._numpad_enabled:
             QTimer.singleShot(350, self._numpad_hook_start)
@@ -1714,6 +1717,20 @@ class PetWindow(QWidget):
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _apply_role_ai_profile_on_start(self):
+        """启动时把当前角色（默认星绘/最后角色）的 AI 配置与会话应用一遍：
+        - TTS 克隆参考/系统提示词按当前角色写入配置（清掉上次残留的其它角色音色）
+        - AI 会话切到当前角色的独立上下文"""
+        try:
+            role = getattr(self, 'role', '') or ''
+            if not role:
+                return
+            self._apply_role_ai_profile(role)
+            if self.ai is not None and hasattr(self.ai, 'switch_to_role'):
+                self.ai.switch_to_role(role)
+        except Exception as e:
+            print('apply role profile on start fail:', e)
 
     def _register_hotkeys_now(self):
         """窗口已显示后调用：注册所有热键（小键盘1-9默认 + 自定义键）；可重试直到成功。

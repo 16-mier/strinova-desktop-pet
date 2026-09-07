@@ -78,6 +78,15 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（启动角色与 AI 配置不同步修复 + 输入条旁加清理上下文按钮）
+- **问题（用户）**：①刚启动桌宠图标是星绘但声音是白墨（上次残留配置），重新切换才正常；②清理上下文按钮需在输入框旁也有一个
+- **修复**（`pet.py` + `ai_chat.py`）：
+  1. **启动同步**：`PetWindow.__init__` 加 `QTimer.singleShot(450, _apply_role_ai_profile_on_start)`——启动后按当前角色应用 AI 配置（TTS 克隆 ref/系统提示词写星绘等）+ `ai.switch_to_role(角色)` 切会话；清掉上次关闭残留的其它角色克隆参考
+  2. **输入条清理按钮**：ChatWindow 布局「📖查看上下文」后加「🧹」按钮（30px，红调，tooltip 清理当前角色上下文）→ 复用 `_clear()`→clearRequested→clear_context
+- **验证**：离屏模拟残留白墨配置 → 启动应用后 ref 变 Celestia.wav（星绘）+会话切角色:星绘 ✅；真实 GUI 清理按钮存在/点击消息归零/气泡反馈可见/exit 0 ✅；回归 session16/usage16/history23/gui 全绿 ✅
+- 涉及：`pet.py`、`ai_chat.py`
+- git：（待提交）
+
 ### 2026-09-07（紧急修复：对话完成崩溃 0xC0000409（DelayWidget 自绘）；输入条改为「查看上下文」按钮；历史窗加「清理上下文」）
 - **崩溃报告（用户）**：给角色发话完直接崩溃；Windows 事件日志：BEX64 / 异常 0xc0000409 / Qt6Core.dll 偏移 0x1c8d8（多次复现，exe 与 python 源码模式都崩）
 - **定位**：分阶段复现（真实 GUI，非 offscreen）→ 锁定 **DelayWidget 连续两次 show_delay 即崩**（0xC0000409）；屏蔽 paintEvent / 换 QLabel 内嵌文本方案 → 不再崩。根因：DelayWidget 自绘 paintEvent（QPainter 画圆角底+drawText）在**透明无边框 Tool 窗连续 show/resize/update** 时触发 Qt6Core 崩溃（与 BubbleWidget 的差异待考，但 QLabel 方案稳定）

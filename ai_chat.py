@@ -1446,6 +1446,17 @@ class ChatWindow(QWidget):
             "QPushButton:hover{background:#3d4d75;}")
         self.btn_view_ctx.clicked.connect(self._open_history)
         row.addWidget(self.btn_view_ctx)
+        # 🧹 清理上下文（输入框旁快捷入口）：清空当前角色上下文
+        self.btn_clear_input = QPushButton("🧹", self)
+        self.btn_clear_input.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_input.setFixedWidth(30)
+        self.btn_clear_input.setToolTip("清理当前角色的上下文（重新开始）")
+        self.btn_clear_input.setStyleSheet(
+            "QPushButton{background:#4a3238; border:1px solid #8a4a55; border-radius:8px;"
+            " color:#ffd9d9; font-size:13px; padding:2px 0;}"
+            "QPushButton:hover{background:#6a4248;}")
+        self.btn_clear_input.clicked.connect(self._clear)
+        row.addWidget(self.btn_clear_input)
         # 兼容保留：会话下拉/新建/删除不再显示（角色自动定，查看/清理在历史窗）
         self.combo_session = QComboBox(self)
         self.combo_session.setVisible(False)
