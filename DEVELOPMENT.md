@@ -98,7 +98,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - UI 冒烟回归：session 28 / usage_layout 14 / history 22 / bubble / gui 全绿 ✅
 - 涉及：`ai_chat.py`（show_near/_msg_html style/ChatWindow 删除按钮+set_content）、新增 `tts_launcher.py`、`BreezeTTS2-CUDA/` 分发目录、新增 `stage_run.py`/`dist_verify.py`/`subst_verify.py`/`depscan.py` 验证脚本、更新 `session_smoke.py`
 - **部署**：分发文件夹已移至桌面 `C:\Users\mier\Desktop\BreezeTTS2-CUDA`（14.1GB，含 q8+bf16 双模型+全套 CUDA 运行库+星绘克隆+3 个 bat+launcher+使用说明），由用户自行压缩成 zip；7z 验证 zip 可完整解压 128 文件 14.4GB（C:\Temp 全量解出）✅；桌宠 exe 已重新打包部署（12:18 版，UI 改动生效）✅
-- git：`（待提交本轮）`
+- git：`f798fc7`（UI+zip 分发包）；`9c0b79f`（冒烟测试费用断言改时段无关：显式关峰谷固定满价 + 新增高峰周一10点/空闲周一13点判断用例，修复非高峰时段跑测试误报）
 
 ### 2026-09-07（AI 对话四合一：语音等待三点拉长 / 对话可视化消息流 / 多会话上下文 / 口语化提示词）
 - **需求**：
