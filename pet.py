@@ -2121,6 +2121,13 @@ class PetWindow(QWidget):
             QTimer.singleShot(0, fallback)
 
     def play_click_voice(self):
+        # 朗读中（AI/TTS 正在播放）点按：不打断语音回复、也不播点按播报，
+        # 等 TTS 播完（StoppedState）后点按才恢复正常播报。
+        try:
+            if self.ai is not None and hasattr(self.ai, 'is_speaking') and self.ai.is_speaking():
+                return
+        except Exception:
+            pass
         d = role_root(self.role)
         if not os.path.isdir(d):
             d = role_dir(self.role)

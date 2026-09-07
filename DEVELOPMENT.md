@@ -78,6 +78,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（根治崩溃：QMediaPlayer 播放状态槽触发 Qt6Core 0xc0000409 + 点按不打断朗读）
+- **崩溃调查（用户多次反馈：发话完崩/切角色崩）**：Windows 事件日志 BEX64 0xc0000409 Qt6Core.dll。逐点复现（真实 GUI）最终锁定：
+  - **根因**：QMediaPlayer（AI TTS 播放器）**只要连接了 playbackStateChanged 的 Python 槽**（无论 Auto/Queued 连接、无论槽内是否 disconnect），播放 mp3/wav 数秒即触发 Qt6Core 0xc0000409 崩溃（无槽裸播稳定 exit 0；300ms 短播不崩、播数秒崩）——PyQt6 6.11.2 + Qt 6.11.2 + Python 3.14 播放器状态信号派发 bug
+  - 此前代码 `_on_tts_done` 连接 `_on_state`（Playing 蹦字）+ `_cleanup_on_state`（停播清理）→ 每个 TTS 语音播放都埋雷；上一轮把 30s 强杀改自然结束后更频繁触发
+  - **修复**：`_on_tts_done` 播放路径**完全移除 playbackStateChanged 槽**，改纯 QTimer 时序：`QTimer(180ms)` 延时蹦字（不依赖 Playing 信号）→ `QTimer(dur-120ms)` 到时主动 `_stop_player_safe()`（避开自然结束崩溃路径）→ 250ms 后清理临时文件；5 分钟极长兜底
+- **新增行为（用户）**：TTS 朗读中点按桌宠 → `is_speaking()` 检测播放器 Playing → `play_click_voice` 直接 return（不打断朗读、不播点按触发音）；TTS 播完（主动 stop 后状态回 Stopped）才恢复点按播报
+- **验证**：无槽完整播 8.3s wav exit 0 ✅；6 轮综合压力（切角色+播 wav+延迟小字）exit 0 ✅；裸播 300ms 带槽不崩/数秒崩对照确认根因 ✅；回归 session16/usage16/history23/gui/panel2 全绿 ✅
+- 涉及：`ai_chat.py`（_on_tts_done 纯 QTimer 化/is_speaking）、`pet.py`（play_click_voice 朗读中抑制）
+- git：（待提交）
+
 ### 2026-09-07（启动角色与 AI 配置不同步修复 + 输入条旁加清理上下文按钮）
 - **问题（用户）**：①刚启动桌宠图标是星绘但声音是白墨（上次残留配置），重新切换才正常；②清理上下文按钮需在输入框旁也有一个
 - **修复**（`pet.py` + `ai_chat.py`）：

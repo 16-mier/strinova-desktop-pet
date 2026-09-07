@@ -1924,6 +1924,32 @@ class AiChatManager(QObject):
         return True
 
     # ------------- 按角色自动分会话 -------------
+    def _stop_player_safe(self):
+        """安全停止/中断播放器：延后到事件循环执行（脱离当前调用栈），
+        避免在信号回调/状态机中途直接 stop 导致 Qt6Core 栈/堆安全失败
+        （0xc0000409 / 0xc0000374，播放中切角色/新请求时崩溃）。"""
+        try:
+            QTimer.singleShot(0, self._do_stop_player)
+        except Exception:
+            pass
+
+    def _do_stop_player(self):
+        try:
+            if self._player is not None:
+                self._player.stop()
+        except Exception:
+            pass
+
+    def is_speaking(self):
+        """AI/TTS 是否正在朗读（播放器处于 Playing 状态）。
+        供桌宠点按逻辑判断：朗读中点按不播触发音、不打断。"""
+        try:
+            if self._player is not None:
+                return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        except Exception:
+            pass
+        return False
+
     def _invalidate_pending(self):
         """软失效在途 AI/TTS 请求（切会话/角色时调用）：
         - _pending_tts_seq 递增 → 旧 TTS 回调（_on_tts_done）被 seq 校验丢弃
@@ -1936,7 +1962,7 @@ class AiChatManager(QObject):
             self._synced_text = ''
             self._send_session = None
             try:
-                self._player.stop()
+                self._stop_player_safe()
             except Exception:
                 pass
             if self._bubble is not None:
@@ -2492,7 +2518,7 @@ class AiChatManager(QObject):
         if self._player is None or not path or not os.path.exists(path):
             return
         try:
-            self._player.stop()
+            self._stop_player_safe()
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
         except Exception:
@@ -2633,7 +2659,7 @@ class AiChatManager(QObject):
             self._history.hide()
         if self._player is not None:
             try:
-                self._player.stop()
+                self._stop_player_safe()
             except Exception:
                 pass
 
@@ -2872,7 +2898,7 @@ class AiChatManager(QObject):
             self._seq += 1
             self._pending_tts_seq = self._seq
             try:
-                self._player.stop()
+                self._stop_player_safe()
             except Exception:
                 pass
             # 三点【保持连续】：AI 请求→朗读改写→音频合成整条等待期不中断，
@@ -3003,68 +3029,33 @@ class AiChatManager(QObject):
         pending_text = (getattr(self, '_synced_text', '') or '').strip()
         self._synced_text = ''
         # 先把音频接上、启动播放（音频真正出声的起点）
-        self._player.stop()
+        self._stop_player_safe()
         self._player.setSource(QUrl.fromLocalFile(gain_path))
-        # 三点保持到【音频真正开始播放】那一刻，而不是音频刚就绪——
-        # 否则会出现"三点消失→文字先蹦→声音迟个几百ms才来"的错位感。
-        # 监听一次播放状态：进入 PlayingState 才蹦字。
-        revealed = {'done': False}
-        def _on_state(state):
-            if revealed['done']:
-                return
-            if state == QMediaPlayer.PlaybackState.PlayingState:
-                revealed['done'] = True
+        # ⚠ 不能连接 playbackStateChanged 的 Python 槽：PyQt6.11/Qt6.11.2 在
+        # 有 Python 槽连接时、播放进行中/结束会触发 Qt6Core 0xc0000409 崩溃
+        # （实测：无槽裸播稳定；一连接槽（哪怕 QueuedConnection）播放数秒即崩）。
+        # 因此全部改用 QTimer 时序：启动后延时蹦字、到时主动 stop，
+        # 完全不依赖播放器状态信号。
+        if pending_text:
+            def _reveal():
+                if seq != getattr(self, '_pending_tts_seq', 0):
+                    return
+                if self._bubble is not None:
+                    self._bubble._stop_thinking()
                 try:
-                    # 主动断开监听（避免后续状态再触发）
-                    self._player.playbackStateChanged.disconnect(_on_state)
+                    self._get_bubble().show_text_synced(pending_text, dur_ms)
                 except Exception:
-                    pass
-                # 音频开始出声 → 结束三点，文字随音频逐字蹦
-                if pending_text:
-                    if self._bubble is not None:
-                        self._bubble._stop_thinking()
-                    try:
-                        self._get_bubble().show_text_synced(pending_text, dur_ms)
-                    except Exception:
-                        self._hide_thinking()
-                else:
                     self._hide_thinking()
-        try:
-            self._player.playbackStateChanged.connect(_on_state)
-        except Exception:
-            pass
-        # 兜底：若播放状态信号迟迟不来（极慢/异常），等待一小段后仍蹦字
-        def _fallback():
-            if not revealed['done']:
-                revealed['done'] = True
-                try:
-                    self._player.playbackStateChanged.disconnect(_on_state)
-                except Exception:
-                    pass
-                if pending_text:
-                    if self._bubble is not None:
-                        self._bubble._stop_thinking()
-                    try:
-                        self._get_bubble().show_text_synced(pending_text, dur_ms)
-                    except Exception:
-                        pass
-                else:
-                    self._hide_thinking()
-        QTimer.singleShot(1200, _fallback)
+            QTimer.singleShot(180, _reveal)   # 音频真正开始出声左右再蹦字
+        else:
+            QTimer.singleShot(150, self._hide_thinking)
         self._player.play()
-        # 播完（播放器回到 StoppedState）后清理临时文件；不设 30s 强杀 ——
-        # Breeze 合成音频可能有较长静音尾部/大文件异步初始化慢，硬性 30 秒
-        # 上限会把还没播完的语音强行掐断（表现为"只合成半句/半路没声"）。
         cleaned = {'done': False}
 
         def _cleanup_now():
             if cleaned['done']:
                 return
             cleaned['done'] = True
-            try:
-                self._player.playbackStateChanged.disconnect(_cleanup_on_state)
-            except Exception:
-                pass
             try:
                 if os.path.exists(path):
                     os.remove(path)
@@ -3073,15 +3064,17 @@ class AiChatManager(QObject):
             except Exception:
                 pass
 
-        def _cleanup_on_state(state):
-            if state == QMediaPlayer.PlaybackState.StoppedState:
-                _cleanup_now()
-
-        try:
-            self._player.playbackStateChanged.connect(_cleanup_on_state)
-        except Exception:
-            pass
-        # 兜底：极长超时（5 分钟）才清理，避免正常播放被掐断
+        def _stop_and_cleanup():
+            # 播放到接近末尾或超时：主动 stop（避开自然结束的崩溃路径）并清理
+            try:
+                self._stop_player_safe()
+            except Exception:
+                pass
+            QTimer.singleShot(250, _cleanup_now)
+        # 音频时长前 120ms 主动 stop；时长未知时按 15s 兜底
+        limit_ms = (dur_ms - 120) if (dur_ms and dur_ms > 300) else 15000
+        QTimer.singleShot(max(120, limit_ms), _stop_and_cleanup)
+        # 极长兜底：5 分钟强制清理
         QTimer.singleShot(300000, _cleanup_now)
 
     def _wav_duration_ms(self, path):
