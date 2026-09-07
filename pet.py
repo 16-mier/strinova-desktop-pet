@@ -2799,14 +2799,25 @@ class PetWindow(QWidget):
                 ai['tts_api_ref'] = ref_wav
                 ai['tts_api_ref_text'] = text
                 changed = True
-            # 2) 系统提示词
-            sp = os.path.join(ref_dir, 'system_prompt.txt')
-            if os.path.exists(sp):
-                with open(sp, encoding='utf-8') as f:
-                    prompt = f.read().strip()
+            # 2) 系统提示词：丰富人格提示词（assets/persona/<角色名>.txt）优先，
+            #    无则用模板（assets/tts_refs/<角色名>/system_prompt.txt）
+            sp_candidates = []
+            persona_f = os.path.join(assets_dir(), 'persona', cname + '.txt')
+            if os.path.exists(persona_f):
+                sp_candidates.append(persona_f)
+            sp_tpl = os.path.join(ref_dir, 'system_prompt.txt')
+            if os.path.exists(sp_tpl):
+                sp_candidates.append(sp_tpl)
+            for sp in sp_candidates:
+                try:
+                    with open(sp, encoding='utf-8') as f:
+                        prompt = f.read().strip()
+                except Exception:
+                    continue
                 if prompt:
                     ai['system_prompt'] = prompt
                     changed = True
+                    break
             if changed:
                 cfg['ai'] = ai
                 save_config(cfg)

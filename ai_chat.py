@@ -1615,6 +1615,67 @@ class AiChatManager(QObject):
             self._session_order.append(name)
         return self._sessions[name]
 
+    # ------------- 世界书（World Info / 酒馆式） -------------
+    _world_book = None      # {entries:{key:{keys,content,constant}}}
+    _world_loaded = False
+
+    def _load_world_book(self):
+        """加载世界书 assets/world_book.json（懒加载，失败静默）。"""
+        if AiChatManager._world_loaded:
+            return
+        AiChatManager._world_loaded = True
+        try:
+            if pet_mod is not None:
+                # pet_mod.assets_dir() 已指向 assets 目录，直接拼文件名
+                assets = (pet_mod.assets_dir() if hasattr(pet_mod, 'assets_dir')
+                          else os.path.join(pet_mod.base_dir(), 'assets'))
+                p = os.path.join(assets, 'world_book.json')
+                if os.path.exists(p):
+                    with open(p, encoding='utf-8') as f:
+                        data = json.load(f)
+                    AiChatManager._world_book = data or {}
+        except Exception:
+            AiChatManager._world_book = None
+
+    def _world_entries_for(self, text):
+        """扫描文本命中世界书关键词 → 返回注入内容列表（[content,...]）"""
+        self._load_world_book()
+        wb = AiChatManager._world_book or {}
+        entries = wb.get('entries') if isinstance(wb, dict) else None
+        if not entries:
+            return []
+        text = text or ''
+        hits = []
+        for key, e in entries.items():
+            if not isinstance(e, dict):
+                continue
+            const = bool(e.get('constant'))
+            content = (e.get('content') or '').strip()
+            if not content:
+                continue
+            if const:
+                hits.append(content)
+                continue
+            keys = e.get('keys') or []
+            if any(k and k in text for k in keys):
+                hits.append(content)
+        return hits
+
+    def _inject_world_entries(self, msgs, user_text):
+        """把命中的世界书条目注入 system 消息末尾（作为世界知识段）。
+        msgs[0] 为 system（若不存在则补）。"""
+        try:
+            hits = self._world_entries_for(user_text)
+            if hits:
+                world_block = ('【世界知识】\n' + '\n\n'.join(hits))
+                if msgs and msgs[0].get('role') == 'system':
+                    msgs[0]['content'] = msgs[0]['content'] + '\n\n' + world_block
+                else:
+                    msgs.insert(0, {'role': 'system', 'content': world_block})
+        except Exception:
+            pass
+        return msgs
+
     def session_names(self):
         return list(self._session_order)
 
@@ -1636,10 +1697,12 @@ class AiChatManager(QObject):
         while name in self._sessions:
             name = '%s(%d)' % (base, k)
             k += 1
+        self._invalidate_pending()
         self._push_session(name)
         self._session_cur = name
         self._messages = self._sessions[name]
         self._last_usage = {}
+        self._last_delay = {}
         self._sync_ui_to_current()
         return name
 
@@ -1647,13 +1710,38 @@ class AiChatManager(QObject):
         """切换到已有会话（保留各自上下文）"""
         if name not in self._sessions:
             return False
+        self._invalidate_pending()
         self._session_cur = name
         self._messages = self._sessions[name]
         self._last_usage = {}
+        self._last_delay = {}
         self._sync_ui_to_current()
         return True
 
     # ------------- 按角色自动分会话 -------------
+    def _invalidate_pending(self):
+        """软失效在途 AI/TTS 请求（切会话/角色时调用）：
+        - _pending_tts_seq 递增 → 旧 TTS 回调（_on_tts_done）被 seq 校验丢弃
+        - _synced_text 清空、停播放器 → 旧语音不再继续/蹦字
+        - _send_session 置 None → 旧 AI 回复经 _on_ai_done 校验丢弃
+        - 结束思考三点
+        """
+        try:
+            self._pending_tts_seq = getattr(self, '_pending_tts_seq', 0) + 1
+            self._synced_text = ''
+            self._send_session = None
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+            if self._bubble is not None:
+                try:
+                    self._bubble._stop_thinking()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def role_session_name(self, role):
         """角色专属会话名：「角色:<角色名>」；role 为空返回默认。
         角色名 = 路径末段（去掉阵营/形象，如 乌尔比诺/米雪儿 → 米雪儿）。"""
@@ -1666,9 +1754,16 @@ class AiChatManager(QObject):
 
     def switch_to_role(self, role):
         """切角色时自动切到该角色的独立会话（不存在则建）。
-        保证每个角色自己的上下文互不干扰。"""
+        保证每个角色自己的上下文互不干扰。同时：
+        - 清空用量/延迟显示（不残留上个角色）
+        - 软失效在途 TTS/AI 请求（_pending_tts_seq 递增 + 停播放器），
+          防止上个角色的语音/蹦字/回复继续冒出来。"""
         name = self.role_session_name(role)
         try:
+            # 软失效在途请求：递增 seq 让旧 TTS 回调失效；停播放器断旧语音；
+            # 旧 AI 回复由 _on_ai_done 的 _send_session 校验丢弃
+            self._invalidate_pending()
+            self._last_delay = {}
             if name not in self._sessions:
                 self._push_session(name)
             self._session_cur = name
@@ -1716,9 +1811,15 @@ class AiChatManager(QObject):
             pass
 
     def clear_context(self):
-        """清理当前会话上下文（开始全新对话；其它会话不受影响）"""
-        self._messages = []
+        """清理当前会话上下文（开始全新对话；其它会话不受影响）。
+        ⚠ 必须就地清空（clear()）当前会话列表、保持 _messages 引用不变——
+        用 `= []` 会让 _messages 脱离 _sessions[当前会话]（切走再切回旧消息复活）。"""
+        try:
+            self._messages.clear()
+        except Exception:
+            self._messages = []
         self._last_usage = {}
+        self._last_delay = {}
         if self._chat is not None:
             try:
                 self._chat.set_usage('')
@@ -1954,11 +2055,11 @@ class AiChatManager(QObject):
                 pass
 
     def _delay_suffix(self):
-        """延迟后缀文案：'· API 1234ms · TTS 567ms'；无数据返回 ''"""
+        """延迟后缀文案：'· LLM 1234ms · TTS 567ms'；无数据返回 ''"""
         d = getattr(self, '_last_delay', {}) or {}
         parts = []
         if 'api' in d:
-            parts.append('API %.0fms' % d['api'])
+            parts.append('LLM %.0fms' % d['api'])
         if 'tts' in d:
             parts.append('TTS %.0fms' % d['tts'])
         return ' · ' + ' · '.join(parts) if parts else ''
@@ -2405,6 +2506,8 @@ class AiChatManager(QObject):
         # 记录本次 API 请求起点（用于结束时的延迟显示）
         self._api_t0 = time.monotonic()
         self._last_delay = {}
+        # 绑定发送时的会话：回复回来若会话已被切走则丢弃（防串台）
+        self._send_session = self._session_cur
         # 思考指示：AI 思考中在桌宠旁显示三点跳动
         self._show_thinking()
         # 多轮上下文：system（可自定义）+ 最近 20 条
@@ -2413,6 +2516,11 @@ class AiChatManager(QObject):
         for m in self._messages[-20:]:
             msgs.append({'role': m.get('role'), 'content': m.get('content')})
         msgs.append({'role': 'user', 'content': text})
+        # 世界书注入：命中关键词的角色剧情/world 知识段补进 system（酒馆 World Info 式）
+        try:
+            self._inject_world_entries(msgs, text)
+        except Exception:
+            pass
         # 本地完整上下文：带时间戳（供「完整对话」窗口展示）
         self._messages.append({'role': 'user', 'content': text,
                                'ts': time.strftime('%H:%M:%S')})
@@ -2466,6 +2574,13 @@ class AiChatManager(QObject):
         if self._chat is not None:
             self._chat.set_busy(False)
         self._ai_worker = None
+        # 防止串台：发送后若会话被切走（切角色/切会话），本次回复丢弃
+        # （回到原会话时自然看不到这条回复，符合"每条回复属于它发出时的会话"）
+        if getattr(self, '_send_session', None) is not None \
+                and self._send_session != self._session_cur:
+            self._send_session = None
+            self._hide_thinking()
+            return
         if err:
             # 出错：结束等待，改为显示错误提示
             self._hide_thinking()

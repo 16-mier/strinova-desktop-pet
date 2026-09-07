@@ -78,6 +78,20 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 对话大改：会话防串台重构 + 24角色丰富人格 + 酒馆式世界书 + 延迟显示完善）
+- **需求（用户）**：①会话管理太麻烦，切角色会冒出上个角色配置（需大改）；②看 token 金额 + LLM 延迟 + TTS 延迟；③全部角色人格提示词要丰富（上网收集）；④做类似酒馆 World Info 的世界书（角色剧情关键词触发注入）
+- **人格资料**（subagent 采集）：wiki.biligame.com 24 角色页 raw + 语音台词页抓取 → `_pet_data/char_info.json`（role_desc/personality/voice_style/values/traits/quotes 全真实，24/24）；生成器产出 `assets/persona/<角色名>.txt`（丰富人格提示词，24 个；米雪儿/奥黛丽/玛德蕾娜/加拉蒂亚用短名文件）
+- **世界书**（subagent 采集）：wiki/萌娘/官网 → `_pet_data/world_lore.json` → 生成 `assets/world_book.json`（21 条：阵营3常驻 + 概念7 + 事件5 + 关系6，真实来源标注）
+- **实现**（`ai_chat.py` + `pet.py`）：
+  1. **会话防串台（根因修复）**：`_on_send` 记录 `_send_session`，`_on_ai_done` 校验不一致则丢弃回复（不写新会话/不 TTS）；`_invalidate_pending()`（seq 递增+停播放器+清 _synced_text+清 _send_session+停三点）统一在 `switch_to_role/switch_session/new_session` 调用 → 切角色/切会话瞬间在途旧请求全部软失效，不再污染新会话
+  2. **Bug3 修复**：`clear_context` 用 `self._messages.clear()` 就地清空（原来 `=[]` 脱离 _sessions 导致切走切回旧消息复活）
+  3. **配置不残留**：`switch_to_role` 清 `_last_usage/_last_delay`；`_apply_role_ai_profile` 优先 persona 文件（assets/persona/<角色名>.txt），无则模板；无素材角色回退用户默认（不沿用上一角色）
+  4. **世界书注入**：`_load_world_book/_world_entries_for/_inject_world_entries`——`_on_send` 构造 msgs 后按用户文本关键词命中条目 + 常驻阵营条目 → 注入 system 末尾【世界知识】段（修复 assets 路径重复拼接 bug）
+  5. **延迟文案**：`_delay_suffix` API→**LLM** 明确命名；显示 `本次 … tok ≈ $x · LLM 1234ms · TTS 567ms`
+- **验证**：世界书 21 条加载/关键词[星庇所]命中4条/常驻3条/注入998字含【世界知识】✅；persona 24 存在 ✅；会话防串台（切走后 _send_session=None）✅；回归 session 25 / usage 16 / history 23 / gui / panel2 全绿 ✅
+- 涉及：`ai_chat.py`、`pet.py`、`assets/persona/`（24新）、`assets/world_book.json`（新）、`_pet_data/`（资料源）
+- git：（待提交）
+
 ### 2026-09-07（每角色独立上下文 + 对话结束显示 API/TTS 延迟）
 - **需求（用户）**：①每个角色独立上下文（各自的对话历史互不干扰）；②每次对话结束，在下方显示语言模型 API 延迟 和 TTS 合成延迟
 - **实现**（`ai_chat.py` + `pet.py`）：
