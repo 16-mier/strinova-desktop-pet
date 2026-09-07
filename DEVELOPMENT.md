@@ -90,7 +90,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 源码真实验证（pet.MeowHook）：用户进游戏聊天打字回车自动加喵、发送正常、输入框正常关闭 ✅
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
 - 涉及：`pet.py`（MeowHook 重写为 v6 + 新增 CURSORINFO 结构、WM_CHAR/WM_KEYUP/WM_SYSKEYUP/VK_RETURN 常量定义）
-- git：待提交（v6 最终版）
+- git：`3fb0c6a`（v6 最终版）
 
 ### 2026-09-07（新增「卡丘游戏设置」栏：卡拉彼丘回车自动补词联动，可开关/自定义词）
 - **需求**：在游戏（卡拉彼丘，官方启动器 + WeGame）聊天输入框打字按回车发送时，自动在句尾补一个词（默认"喵"，可自定义）
