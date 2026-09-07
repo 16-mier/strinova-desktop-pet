@@ -926,6 +926,100 @@ class BubbleWidget(QWidget):
         self.move(x, y)
 
 
+class DelayWidget(QWidget):
+    """每轮对话结束后显示在【桌宠正下方】的两行小字：
+    第一行：本次费用 $金额；第二行：LLM x.xx s · TTS x.xx s。
+    显示数秒自动消失；跟随桌宠移动；点击可立即关闭。"""
+
+    def __init__(self, pet):
+        super().__init__(None,
+                         Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        self._pet = pet
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._font = QFont('Microsoft YaHei', 10)
+        self._life = QTimer(self)
+        self._life.setSingleShot(True)
+        self._life.setInterval(5000)   # 5 秒自动消失
+        self._life.timeout.connect(self.hide)
+        self._follow = QTimer(self)
+        self._follow.setInterval(16)
+        self._follow.timeout.connect(self._reposition)
+
+    def show_delay(self, price_text, llm_s=None, tts_s=None):
+        """显示延迟/价格两行小字。llm_s/tts_s 单位秒（None 则不显示该行）。"""
+        line2 = []
+        if llm_s is not None:
+            line2.append('LLM %.2fs' % llm_s)
+        if tts_s is not None:
+            line2.append('TTS %.2fs' % tts_s)
+        text = (price_text or '') + ('\n' + ' · '.join(line2) if line2 else '')
+        if not text.strip():
+            return
+        self._font.setPointSize(10)
+        fm = QFontMetrics(self._font)
+        lines = text.split('\n')
+        w = max(fm.horizontalAdvance(l) for l in lines) + 24
+        h = sum(fm.height() + 2 for _ in lines) + 16
+        self.resize(w, h)
+        self._render(text)
+        self.adjustSize()
+        self._reposition()
+        self.show()
+        self.raise_()
+        self._follow.start()
+        self._life.start()
+
+    def _render(self, text):
+        """两行小字：第一行价格(米白)，第二行延迟(浅蓝)；半透明圆角深底"""
+        from PyQt6.QtGui import QPainterPath
+        self._text = text
+        self.update()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        # 半透明圆角底
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.width(), self.height(), 8, 8)
+        p.fillPath(path, QColor(20, 23, 32, 200))
+        p.setFont(self._font)
+        lines = self._text.split('\n') if getattr(self, '_text', '') else []
+        if not lines:
+            return
+        fm = QFontMetrics(self._font)
+        y = 8
+        for i, l in enumerate(lines):
+            p.setPen(QColor('#f0f2f8') if i == 0 else QColor('#8fc7ff'))
+            p.drawText(12, y + fm.ascent(), l)
+            y += fm.height() + 2
+
+    def _reposition(self):
+        if self._pet is None:
+            return
+        try:
+            anchor = self._pet.frameGeometry()
+            scr = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
+            geo = scr.availableGeometry() if scr else None
+            x = anchor.center().x() - self.width() // 2
+            y = anchor.bottom() + 6
+            if geo is not None:
+                x = max(geo.left(), min(x, geo.right() - self.width()))
+                if y + self.height() > geo.bottom():
+                    y = anchor.top() - self.height() - 6   # 下方放不下→桌宠上方
+            self.move(int(x), int(y))
+        except Exception:
+            pass
+
+    def mousePressEvent(self, e):
+        self.hide()   # 点击立即关闭
+        e.accept()
+
+
+
 # ============================================================================
 # 迷你输入条（右键桌宠弹出的一小段打字横条）
 # ============================================================================
@@ -1360,16 +1454,11 @@ class ChatWindow(QWidget):
             " border:none; font-size:12px;}")
         self.combo_session.activated.connect(self._on_session_changed)
         row.addWidget(self.combo_session)
+        # ⚠ 会话只删不建（用户要求）：新建按钮隐藏（保留代码兼容，不外露）
         self.btn_new_sess = QPushButton("＋", self)
-        self.btn_new_sess.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_new_sess.setToolTip("新建会话（各自独立上下文）")
-        self.btn_new_sess.setFixedWidth(30)
-        self.btn_new_sess.setStyleSheet(
-            "QPushButton{background:#3a6b52; border:none; border-radius:8px;"
-            " color:#d8ffe8; font-size:14px; font-weight:bold; padding:3px 0;}"
-            "QPushButton:hover{background:#4a8b66;}")
+        self.btn_new_sess.setVisible(False)
+        self.btn_new_sess.setToolTip("新建会话已禁用：每个角色有自己独立的上下文")
         self.btn_new_sess.clicked.connect(self._new_session)
-        row.addWidget(self.btn_new_sess)
         self.btn_del_sess = QPushButton("🗑", self)
         self.btn_del_sess.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_del_sess.setToolTip("删除当前会话及其对话记录")
@@ -1560,14 +1649,17 @@ class AiChatManager(QObject):
         self._chat = None
         self._history = None
         self._bubble = None
+        self._delay_widget = None    # 桌宠正下方：价格/LLM/TTS 延迟两行小字
         self._hover_hide_timer = None   # 鼠标悬停展开输入条后，离开 1s 再隐藏
-        # ---------- 多会话上下文 ----------
-        # 每个会话独立保留自己的消息历史；_messages 指向当前会话（兼容既有调用）
+        # ---------- 多会话上下文（每角色独立文件持久化） ----------
+        # 每个角色一个上下文文件：contexts/role_<角色名>.json
+        # 会话只可删除不可新建（角色会话随角色自动存在）；不存在「默认会话」
         self._sessions = {}            # 会话名 -> 消息列表
         self._session_order = []       # 会话名列表（保序）
-        self._session_cur = '默认会话'  # 当前会话名
-        self._default_session_name()
-        self._messages = self._sessions[self._session_cur]
+        self._session_cur = ''         # 当前会话名（角色会话，由 switch_to_role 设置）
+        self._load_role_sessions_from_disk()
+        self._messages = self._sessions.get(self._session_cur) or []
+        self._pending_no_persist = False  # 删除会话时临时禁止写盘
         self._ai_worker = None
         self._tts_worker = None
         self._rewrite_worker = None
@@ -1616,23 +1708,78 @@ class AiChatManager(QObject):
         return ('你是桌宠「卡丘」里的 AI 小伙伴，活泼友善，'
                 '回答简洁亲切，用中文。')
 
-    # ------------- 多会话上下文 -------------
-    def _default_session_name(self):
-        """默认会话名：若还没有则初始化为「默认会话」"""
-        if not self._sessions:
-            self._sessions['默认会话'] = []
-            self._session_order = ['默认会话']
-            self._session_cur = '默认会话'
+    # ------------- 多会话上下文（每角色独立文件持久化，只删不建） -------------
+    def _ctx_dir(self):
+        """上下文数据目录：<data>/contexts（可写持久）"""
+        try:
+            if pet_mod is not None:
+                d = os.path.join(pet_mod.base_dir(), 'contexts')
+                os.makedirs(d, exist_ok=True)
+                return d
+        except Exception:
+            pass
+        return None
+
+    def _ctx_file(self, session_name):
+        """会话名 → 磁盘文件名（角色会话 role_<角色名>.json）"""
+        d = self._ctx_dir()
+        if not d:
+            return None
+        # 「角色:米雪儿」→ role_米雪儿；其它含非法字符的替换
+        safe = session_name.replace('角色:', 'role_').replace('\\', '_').replace('/', '_')
+        return os.path.join(d, safe + '.json')
+
+    def _save_session_disk(self, session_name):
+        """把指定会话写入磁盘（无上下文目录则忽略）"""
+        f = self._ctx_file(session_name)
+        if not f or not session_name:
+            return
+        try:
+            msgs = self._sessions.get(session_name) or []
+            with open(f, 'w', encoding='utf-8') as fh:
+                json.dump(msgs, fh, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    def _load_role_sessions_from_disk(self):
+        """启动/刷新：读 contexts 下全部 role_*.json → _sessions/_session_order"""
+        self._sessions = {}
+        self._session_order = []
+        d = self._ctx_dir()
+        if not d:
+            return
+        try:
+            for fn in sorted(os.listdir(d)):
+                if not fn.endswith('.json') or not fn.startswith('role_'):
+                    continue
+                name = '角色:' + fn[len('role_'):-5]
+                try:
+                    with open(os.path.join(d, fn), encoding='utf-8') as fh:
+                        msgs = json.load(fh)
+                    if isinstance(msgs, list):
+                        self._sessions[name] = msgs
+                        self._session_order.append(name)
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     def _push_session(self, name):
-        """确保存在名为 name 的会话；不存在则创建并追加到顺序"""
+        """确保存在会话（角色会话自动有）；不存在则建空并写盘"""
         if name not in self._sessions:
             self._sessions[name] = []
             self._session_order.append(name)
+            self._save_session_disk(name)
         return self._sessions[name]
 
+    def _current_role_ctx_file(self):
+        """当前角色会话名对应的磁盘文件路径"""
+        return self._ctx_file(self._session_cur) if self._session_cur else None
+
     # ------------- 世界书（World Info / 酒馆式） -------------
-    _world_book = None      # {entries:{key:{keys,content,constant}}}
+    _world_book = None        # 全局世界书 {entries:{key:{keys,content,constant}}}
+    _role_worldbook = None    # 当前角色世界书（缓存）
+    _role_wb_role = None      # 已加载的角色名
     _world_loaded = False
 
     def worldbook_enabled(self):
@@ -1645,46 +1792,97 @@ class AiChatManager(QObject):
     def set_worldbook_enabled(self, on):
         _save_ai_cfg(world_book_enabled=bool(on))
 
+    def _current_role_name(self):
+        """当前角色名：优先从当前会话名（角色:XXX）反推，回退 pet.role。"""
+        try:
+            cur = getattr(self, '_session_cur', '') or ''
+            if cur.startswith('角色:'):
+                return cur[len('角色:'):]
+        except Exception:
+            pass
+        try:
+            role = getattr(self._pet, 'role', '') or ''
+            parts = [p for p in str(role).replace('\\', '/').split('/') if p]
+            return parts[-2] if len(parts) >= 3 else (parts[-1] if parts else '')
+        except Exception:
+            return ''
+
+    def _world_assets_root(self):
+        if pet_mod is not None:
+            try:
+                return (pet_mod.assets_dir() if hasattr(pet_mod, 'assets_dir')
+                        else os.path.join(pet_mod.base_dir(), 'assets'))
+            except Exception:
+                pass
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+
     def _load_world_book(self):
-        """加载世界书 assets/world_book.json（懒加载，失败静默）。"""
+        """加载全局世界书 assets/world_book.json（懒加载，失败静默）。"""
         if AiChatManager._world_loaded:
             return
         AiChatManager._world_loaded = True
         try:
-            if pet_mod is not None:
-                # pet_mod.assets_dir() 已指向 assets 目录，直接拼文件名
-                assets = (pet_mod.assets_dir() if hasattr(pet_mod, 'assets_dir')
-                          else os.path.join(pet_mod.base_dir(), 'assets'))
-                p = os.path.join(assets, 'world_book.json')
-                if os.path.exists(p):
-                    with open(p, encoding='utf-8') as f:
-                        data = json.load(f)
-                    AiChatManager._world_book = data or {}
+            p = os.path.join(self._world_assets_root(), 'world_book.json')
+            if os.path.exists(p):
+                with open(p, encoding='utf-8') as f:
+                    data = json.load(f)
+                AiChatManager._world_book = data or {}
         except Exception:
             AiChatManager._world_book = None
 
+    def _load_role_worldbook(self, role_name=None):
+        """加载角色世界书 assets/role_worldbooks/<角色名>.json（缓存按角色）。"""
+        role_name = role_name or self._current_role_name()
+        if not role_name:
+            return None
+        if AiChatManager._role_wb_role == role_name and AiChatManager._role_worldbook is not None:
+            return AiChatManager._role_worldbook
+        try:
+            p = os.path.join(self._world_assets_root(), 'role_worldbooks', role_name + '.json')
+            if os.path.exists(p):
+                with open(p, encoding='utf-8') as f:
+                    data = json.load(f) or {}
+                AiChatManager._role_worldbook = data
+                AiChatManager._role_wb_role = role_name
+                return data
+        except Exception:
+            pass
+        return None
+
     def _world_entries_for(self, text):
-        """扫描文本命中世界书关键词 → 返回注入内容列表（[content,...]）"""
+        """扫描文本命中世界书关键词 → 返回注入内容列表（[content,...]）。
+        注入优先级：当前角色的世界书【全部常驻】+ 全局世界书（常驻+关键词命中）。"""
         self._load_world_book()
-        wb = AiChatManager._world_book or {}
-        entries = wb.get('entries') if isinstance(wb, dict) else None
-        if not entries:
-            return []
         text = text or ''
         hits = []
-        for key, e in entries.items():
-            if not isinstance(e, dict):
-                continue
-            const = bool(e.get('constant'))
-            content = (e.get('content') or '').strip()
-            if not content:
-                continue
-            if const:
-                hits.append(content)
-                continue
-            keys = e.get('keys') or []
-            if any(k and k in text for k in keys):
-                hits.append(content)
+        # 1) 当前角色世界书：所有条目全部注入（角色专属背景/关系/台词）
+        try:
+            rwb = self._load_role_worldbook()
+            if isinstance(rwb, dict):
+                for key, e in (rwb.get('entries') or {}).items():
+                    if isinstance(e, dict):
+                        content = (e.get('content') or '').strip()
+                        if content:
+                            hits.append(content)
+        except Exception:
+            pass
+        # 2) 全局世界书：常驻 + 关键词命中
+        wb = AiChatManager._world_book or {}
+        entries = wb.get('entries') if isinstance(wb, dict) else None
+        if entries:
+            for key, e in entries.items():
+                if not isinstance(e, dict):
+                    continue
+                const = bool(e.get('constant'))
+                content = (e.get('content') or '').strip()
+                if not content:
+                    continue
+                if const:
+                    hits.append(content)
+                    continue
+                keys = e.get('keys') or []
+                if any(k and k in text for k in keys):
+                    hits.append(content)
         return hits
 
     def _inject_world_entries(self, msgs, user_text):
@@ -1711,28 +1909,9 @@ class AiChatManager(QObject):
         return self._session_cur
 
     def new_session(self, name=None):
-        """新建一个会话并切换过去；name 缺省生成带时间的名称。
-        返回会话名。"""
-        if not name:
-            n = len(self._session_order) + 1
-            while ('会话%d' % n) in self._sessions:
-                n += 1
-            name = '会话%d' % n
-        name = (name or '').strip() or '会话'
-        # 重名则加序号
-        base = name
-        k = 2
-        while name in self._sessions:
-            name = '%s(%d)' % (base, k)
-            k += 1
-        self._invalidate_pending()
-        self._push_session(name)
-        self._session_cur = name
-        self._messages = self._sessions[name]
-        self._last_usage = {}
-        self._last_delay = {}
-        self._sync_ui_to_current()
-        return name
+        """⚠ 会话只删不建（用户指定）：角色会话随角色自动存在，不提供手动新建。
+        保留兼容：调用返回 (False, 提示)。"""
+        return False, '会话不可新建（每个角色有自己独立的上下文）'
 
     def switch_session(self, name):
         """切换到已有会话（保留各自上下文）"""
@@ -1792,6 +1971,9 @@ class AiChatManager(QObject):
             # 旧 AI 回复由 _on_ai_done 的 _send_session 校验丢弃
             self._invalidate_pending()
             self._last_delay = {}
+            # 角色世界书缓存失效（切到新角色）
+            AiChatManager._role_wb_role = None
+            AiChatManager._role_worldbook = None
             if name not in self._sessions:
                 self._push_session(name)
             self._session_cur = name
@@ -1803,26 +1985,30 @@ class AiChatManager(QObject):
         return name
 
     def delete_session(self, name):
-        """删除指定会话（连同其消息）。被删的是当前会话时自动切到相邻会话；
-        删除最后一个会话则重建「默认会话」。返回 (ok, 消息)。"""
+        """清空某角色的上下文（消息清空 + 磁盘写空数组）。
+        每个角色独立存在——清空后角色会话仍在列表、切回自动从空开始，
+        无需也不允许删除该角色自己的会话。返回 (ok, 消息)。"""
         if name not in self._sessions:
             return False, '会话不存在'
-        # 防止删除失败后无会话：先保证至少能建回默认
-        del self._sessions[name]
-        if name in self._session_order:
-            self._session_order.remove(name)
+        self._invalidate_pending()
+        # 内存清空 + 磁盘写空（保留角色会话）
+        try:
+            self._sessions[name].clear()
+        except Exception:
+            self._sessions[name] = []
+        f = self._ctx_file(name)
+        if f:
+            try:
+                with open(f, 'w', encoding='utf-8') as fh:
+                    json.dump([], fh, ensure_ascii=False)
+            except Exception:
+                pass
         if self._session_cur == name:
-            # 切到最近一个会话；没有则建新默认
-            if self._session_order:
-                self._session_cur = self._session_order[-1]
-            else:
-                self._session_cur = '默认会话'
-                self._sessions[self._session_cur] = []
-                self._session_order.append(self._session_cur)
-            self._messages = self._sessions[self._session_cur]
             self._last_usage = {}
+            self._last_delay = {}
+            self._messages = self._sessions[name]
         self._sync_ui_to_current()
-        return True, '已删除会话：%s' % name
+        return True, '已清空角色会话：%s' % name
 
     def _sync_ui_to_current(self):
         """把当前会话刷到聊天窗与历史窗（若开着）"""
@@ -2092,6 +2278,26 @@ class AiChatManager(QObject):
             parts.append('TTS %.0fms' % d['tts'])
         return ' · ' + ' · '.join(parts) if parts else ''
 
+    def _show_delay_widget(self):
+        """桌宠正下方显示：本次费用(第一行) + LLM/TTS 延迟(秒,第二行)"""
+        try:
+            d = getattr(self, '_last_delay', {}) or {}
+            if not d and not self._last_usage:
+                return
+            # 本次费用（有 usage 才算；微美元级用 6 位小数才不显示成 0.0000）
+            price = ''
+            if self._last_usage:
+                cost, _dd = self.calc_cost(self._last_usage)
+                price = '$%.6f' % cost
+            llm_s = (d.get('api') or 0) / 1000.0 if 'api' in d else None
+            tts_s = (d.get('tts') or 0) / 1000.0 if 'tts' in d else None
+            if price or llm_s is not None or tts_s is not None:
+                if self._delay_widget is None:
+                    self._delay_widget = DelayWidget(self._pet)
+                self._delay_widget.show_delay(price, llm_s, tts_s)
+        except Exception:
+            pass
+
     def _refresh_delay_line(self):
         """TTS 延迟就绪后：刷新聊天条用量行（在用量文案末尾追加延迟）"""
         if self._chat is None or not hasattr(self._chat, 'set_usage'):
@@ -2115,6 +2321,11 @@ class AiChatManager(QObject):
         # 累计到会话统计（积分）
         try:
             self._accumulate_usage(usage)
+        except Exception:
+            pass
+        # 桌宠正下方显示本次费用 + LLM 延迟（TTS 就绪后再补 TTS 行）
+        try:
+            self._show_delay_widget()
         except Exception:
             pass
 
@@ -2552,6 +2763,11 @@ class AiChatManager(QObject):
         # 本地完整上下文：带时间戳（供「完整对话」窗口展示）
         self._messages.append({'role': 'user', 'content': text,
                                'ts': time.strftime('%H:%M:%S')})
+        # 持久化到该角色上下文文件
+        try:
+            self._save_session_disk(self._session_cur)
+        except Exception:
+            pass
         # 实时刷新历史窗与可视化聊天窗（若开着：立刻能看到自己刚发的消息）
         try:
             self._refresh_history_if_open()
@@ -2628,6 +2844,11 @@ class AiChatManager(QObject):
             pass
         self._messages.append({'role': 'assistant', 'content': reply,
                                'ts': time.strftime('%H:%M:%S')})
+        # 持久化到该角色上下文文件
+        try:
+            self._save_session_disk(self._session_cur)
+        except Exception:
+            pass
         # 实时刷新历史窗与可视化聊天窗（若开着：自动补上 AI 新回复，无需重开）
         try:
             self._refresh_history_if_open()
@@ -2760,6 +2981,7 @@ class AiChatManager(QObject):
             tts_ms = (time.monotonic() - self._tts_t0) * 1000.0
             self._last_delay['tts'] = tts_ms
             self._refresh_delay_line()
+            self._show_delay_widget()   # 补 TTS 行刷新桌宠正下方小字
         except Exception:
             pass
         vol = self.tts_volume()

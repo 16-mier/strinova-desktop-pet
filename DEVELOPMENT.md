@@ -78,6 +78,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（会话重构 v2：每角色独立上下文文件/只删不建 + 每角色专属世界书 + 桌宠正下方延迟价格小字）
+- **需求（用户）**：①每个角色独立上下文文件（磁盘持久化）；②会话不可以创建只能删；③选角色看上下文文件不出现默认会话；④每角色单独世界书（去 wiki 搜，可花更多时间）；⑤删掉某角色上下文后切回该角色自动恢复；⑥每次对话在桌宠正下方显示 LLM/TTS 延迟与 API 价格（两行，延迟用秒）
+- **会话重构**（`ai_chat.py`）：
+  1. **磁盘持久化**：`contexts/role_<角色名>.json` 每角色一个文件；启动 `_load_role_sessions_from_disk()` 加载（**无「默认会话」**）；`_on_send/_on_ai_done` 追加消息后 `_save_session_disk` 写盘
+  2. **只删不建**：`new_session` 返回 `(False,'会话不可新建…')`；输入条「＋新建」按钮隐藏；`delete_session` = 清空该角色上下文（内存 clear + 磁盘写空数组），**角色会话保留**（删后切回自动空会话）
+  3. `switch_to_role` 切角色自动建/选该角色会话；清角色世界书缓存
+- **每角色专属世界书**（subagent 深挖 wiki 誓约页/语音台词/角色页）：`_pet_data/role_worldbook_info.json`（24/24，每角色 identity/relationships/story_events/signature_quotes(5条)/mystery）→ 生成 `assets/role_worldbooks/<角色名>.json`（每角色 5-12 条全常驻）；`_world_entries_for` 注入顺序 = **当前角色世界书全部常驻** + 全局（常驻+关键词）；`_current_role_name` 优先从会话名反推（不依赖 pet.role），切角色清缓存
+- **桌宠正下方小字**：新增 `DelayWidget`（两行半透明小字：第一行 $费用(6位小数)、第二行 LLM x.xxs · TTS x.xxs）；`_show_delay_widget()` 在 `_show_usage`（AI 回复完成显价格+LLM）与 `_on_tts_done`（补 TTS）调用；5 秒自动消失/点击关闭/跟随桌宠（正下方，放不下转上方）
+- **测试更新**：`session_smoke.py` 重写为新语义（无默认会话/角色会话隔离/禁新建/清空保留角色/世界书注入/延迟后缀）16 项全过；usage16/history23/gui/panel2 全绿
+- **验证**：磁盘持久化(切走切回恢复)✅ 清空角色保留+切回自动空✅ 禁新建✅ 角色世界书随角色切换注入不同(米雪儿↔星绘)✅ DelayWidget 两行($0.000056→6位小数/LLM 1.23s·TTS 0.57s)✅
+- 涉及：`ai_chat.py`、`session_smoke.py`、`assets/role_worldbooks/`（24新）、`session_smoke` 更新
+- git：（待提交）
+
 ### 2026-09-07（世界书开关+自编辑管理器 + 角色列表滚轮穿透修复 + 克隆音频量化版本选项）
 - **需求（用户）**：①世界书功能要可开关、可自行补充/修改条目；②选角色页面滚轮到头会滑动整个面板（不好选）；③克隆音频新增可选量化版本（q8 省显存 / bf16 高音质）
 - **实现**：
