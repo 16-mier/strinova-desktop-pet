@@ -78,6 +78,11 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（部署：含 AI 菜单+累计积分的新版 exe 10:52，55.2MB）
+- **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:52，55,217,208B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
+- **部署**：覆盖桌面 `卡丘简易桌宠_最新.exe`（先提权停同名进程）；启动验证 OK（主进程+提权副本）→ 测试后停
+- 涉及：`dsh-desktop-pet\dist\卡丘简易桌宠.exe`、桌面 `卡丘简易桌宠_最新.exe`
+
 ### 2026-09-07（AI 对话支持上下文选项菜单 + 每次对话 token 分类统计累计积分）
 - **需求（用户）**：①每次对话要知道输入/输出/缓存读取各用了多少 token 并**单独累计成积分**；②把上下文操作做成**可选的菜单**入口
 - **确认（用户选 A/B）**：A=分类显示+累计积分；B=加到右键菜单，且三处（右键/三横/托盘）都加 AI 子菜单
