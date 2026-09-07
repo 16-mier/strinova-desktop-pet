@@ -74,14 +74,13 @@ p = Pet()
 mgr = p.ai
 ok = []
 
-# 1. 打开迷你条
+# 1. 打开横线输入条
 mgr.open_chat()
 app.processEvents()
-ok.append(('聊天窗创建且可见', mgr._chat is not None and mgr._chat.isVisible()))
-ok.append(('聊天窗为可视化消息窗(宽470高340)', mgr._chat.width() == 470 and mgr._chat.height() == 340))
-ok.append(('有关闭按钮(自绘)', hasattr(mgr._chat, 'btn_x')))
-ok.append(('无大历史框', not hasattr(mgr._chat, 'history')))
-ok.append(('有消息流 browser', hasattr(mgr._chat, 'browser')))
+ok.append(('输入条创建且可见', mgr._chat is not None and mgr._chat.isVisible()))
+ok.append(('输入条为单行横条(宽640 高48)', mgr._chat.width() == 640 and mgr._chat.height() == 48))
+ok.append(('有输入框/发送按钮', hasattr(mgr._chat, 'input') and hasattr(mgr._chat, 'btn_send')))
+ok.append(('无消息流 browser(历史另开)', mgr._chat.browser is None))
 
 # 2. 思考动画
 mgr._show_thinking()

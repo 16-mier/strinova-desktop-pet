@@ -643,8 +643,8 @@ class TTSWorker(QThread):
 #  - show_thinking(): 三点跳动思考动画
 #  - show_text(text): 逐字蹦字输出（快速），字体显眼
 # ============================================================================
-_BUBBLE_MAX_W = 520
-_BUBBLE_MIN_W = 200
+_BUBBLE_MAX_W = 620
+_BUBBLE_MIN_W = 240
 _BUBBLE_LIFE_MS = 5000   # 文字完全显示后停留 5 秒自动消失；点击可立即消失
 _FOLLOW_MS = 300
 _TYPE_MS = 18          # 每字显示间隔（ms）——约 55 字/秒，快速蹦出
@@ -662,7 +662,7 @@ class BubbleWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(False)
-        self._font = QFont('Microsoft YaHei', 18)
+        self._font = QFont('Microsoft YaHei', 24)
         self._font.setBold(True)
         # 自动消失
         self._life = QTimer(self)
@@ -822,11 +822,11 @@ class BubbleWidget(QWidget):
             return
         scr = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
         geo = scr.availableGeometry() if scr is not None else None
-        # 默认放桌宠右边；放不下则放左边
-        x = anchor.right() + 12
+        # 默认放桌宠【正右方】（垂直方向与桌宠中心对齐）；放不下则放左边
+        x = anchor.right() + 14
         if geo is not None and x + self.width() > geo.right():
-            x = anchor.left() - 12 - self.width()
-        y = anchor.top()
+            x = anchor.left() - 14 - self.width()
+        y = anchor.center().y() - self.height() // 2
         if geo is not None:
             if y + self.height() > geo.bottom():
                 y = geo.bottom() - self.height()
@@ -908,13 +908,9 @@ def _msg_html(messages, system_prompt='', pet=None, style='bubble'):
     AI_BG = "#2a2e3d"
     AI_BORDER = "#46506b"
 
+    # 不显示系统提示词：任何界面都不再把 system_prompt 渲染出来（用户要求简洁）
     if system_prompt:
-        parts.append(
-            '<div style="color:%s; font-style:italic; font-size:11px;'
-            ' padding:4px 10px; margin:2px 6px 8px 6px;'
-            ' background:%s; border-radius:8px;">'
-            '▍系统提示词：%s</div>'
-            % (SYS_COLOR, PANEL, esc(system_prompt)))
+        pass
 
     if not messages:
         parts.append(
@@ -1221,9 +1217,10 @@ class ChatHistoryWindow(QWidget):
 
 
 class ChatWindow(QWidget):
-    """可视化聊天窗：顶部工具栏（会话下拉/新建/清理/记录/关闭），
-    中部消息流（用户消息右-右上、AI 消息左-左下），底部输入行+用量。
-    多会话：可在下拉切换保留的上下文继续聊。"""
+    """轻量输入条窗口：只含一行「会话切换 + 新建/删除 + 输入 + 发送」的横线输入条。
+    紧贴在桌宠正下方、随桌宠移动。回车发送后输入条自动消失——AI 回复以
+    无背景大字气泡显示在桌宠正右方，显示完整后 5 秒自动消失。
+    完整对话通过右键菜单「📜 完整对话记录」回看（会话仍各自保留历史）。"""
     sendRequested = pyqtSignal(str)
     clearRequested = pyqtSignal()
     historyRequested = pyqtSignal()
@@ -1231,11 +1228,11 @@ class ChatWindow(QWidget):
     sessionNewRequested = pyqtSignal()          # 新建会话
     sessionDeleteRequested = pyqtSignal(str)    # 删除会话（传会话名）
 
-    # 窗口尺寸常量
-    W_USAGE = 470
-    H_USAGE = 340        # 带消息流的主高度
-    H_NO_USAGE = 340     # 消息流始终存在，用量行仅影响底部小条
-    _H_BASE = 46         # 底部（输入+用量）行高基准
+    # 窗口尺寸常量：单行横条
+    W_USAGE = 640          # 输入条宽度
+    H_USAGE = 48           # 条高
+    H_NO_USAGE = 48
+    _H_BASE = 48
 
     def __init__(self, pet):
         super().__init__(None, Qt.WindowType.FramelessWindowHint
@@ -1251,110 +1248,72 @@ class ChatWindow(QWidget):
         self._follow.setInterval(16)
         self._follow.timeout.connect(self._follow_pet)
         self.setStyleSheet(
-            "ChatWindow{background:rgba(24,26,34,235); border-radius:14px;"
-            " border:1px solid rgba(255,255,255,60);}")
+            "ChatWindow{background:rgba(24,26,34,235); border-radius:12px;"
+            " border:1px solid rgba(255,255,255,70);}")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 8, 8, 6)
-        root.setSpacing(3)
+        root.setContentsMargins(10, 6, 8, 6)
+        root.setSpacing(0)
 
-        # ---- 顶部工具行 ----
-        top = QHBoxLayout()
-        top.setSpacing(6)
-        # 会话下拉：可切换保留的上下文
+        # 单行：会话下拉 + 新建 + 删除 | 输入框 + 发送
+        row = QHBoxLayout()
+        row.setSpacing(6)
         self.combo_session = QComboBox(self)
         self.combo_session.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.combo_session.setMinimumWidth(120)
+        self.combo_session.setMinimumWidth(96)
         self.combo_session.setStyleSheet(
-            "QComboBox{background:#3a4458; border:none; border-radius:9px;"
-            " color:#e8ecf8; font-size:12px; padding:4px 8px;}"
-            "QComboBox::drop-down{border:none; width:18px;}"
+            "QComboBox{background:#3a4458; border:none; border-radius:8px;"
+            " color:#e8ecf8; font-size:12px; padding:3px 6px;}"
+            "QComboBox::drop-down{border:none; width:16px;}"
             "QComboBox QAbstractItemView{background:#22262f; color:#e8ecf8;"
             " border:none; font-size:12px;}")
         self.combo_session.activated.connect(self._on_session_changed)
-        top.addWidget(self.combo_session)
-        self.btn_new_sess = QPushButton("＋ 新建", self)
+        row.addWidget(self.combo_session)
+        self.btn_new_sess = QPushButton("＋", self)
         self.btn_new_sess.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_new_sess.setToolTip("新建一个会话（各自保留独立上下文）")
+        self.btn_new_sess.setToolTip("新建会话（各自独立上下文）")
+        self.btn_new_sess.setFixedWidth(30)
         self.btn_new_sess.setStyleSheet(
-            "QPushButton{background:#3a6b52; border:none; border-radius:9px;"
-            " color:#d8ffe8; font-size:12px; padding:5px 9px;}"
+            "QPushButton{background:#3a6b52; border:none; border-radius:8px;"
+            " color:#d8ffe8; font-size:14px; font-weight:bold; padding:3px 0;}"
             "QPushButton:hover{background:#4a8b66;}")
         self.btn_new_sess.clicked.connect(self._new_session)
-        top.addWidget(self.btn_new_sess)
-        # 删除会话（仅本地记录，不影响其它会话）
-        self.btn_del_sess = QPushButton("🗑 删除", self)
+        row.addWidget(self.btn_new_sess)
+        self.btn_del_sess = QPushButton("🗑", self)
         self.btn_del_sess.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_del_sess.setToolTip("删除当前会话及其对话记录")
+        self.btn_del_sess.setFixedWidth(30)
         self.btn_del_sess.setStyleSheet(
-            "QPushButton{background:#5a3d3d; border:none; border-radius:9px;"
-            " color:#ffd9d9; font-size:12px; padding:5px 9px;}"
+            "QPushButton{background:#5a3d3d; border:none; border-radius:8px;"
+            " color:#ffd9d9; font-size:13px; padding:3px 0;}"
             "QPushButton:hover{background:#7a4d4d;}")
         self.btn_del_sess.clicked.connect(self._delete_session)
-        top.addWidget(self.btn_del_sess)
-        # 清理上下文按钮（在输入框左边，保留原接口名）
-        self.btn_clear = QPushButton("清理上下文", self)
-        self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear.setToolTip("清理当前会话上下文（开始全新对话，其它会话不受影响）")
-        self.btn_clear.setStyleSheet(
-            "QPushButton{background:#5a3d3d; border:none; border-radius:9px;"
-            " color:#ffd9d9; font-size:12px; padding:5px 9px;}"
-            "QPushButton:hover{background:#7a4d4d;}")
-        self.btn_clear.clicked.connect(self._clear)
-        top.addWidget(self.btn_clear)
-        top.addStretch(1)
-        # 记录 / 关闭
-        self.btn_history = QPushButton("📜 记录", self)
-        self.btn_history.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_history.setToolTip("查看完整对话上下文（当前会话全部消息）")
-        self.btn_history.setStyleSheet(
-            "QPushButton{background:#3a4458; border:none; border-radius:9px;"
-            " color:#cfd8ee; font-size:12px; padding:5px 9px;}"
-            "QPushButton:hover{background:#4a5670;}")
-        self.btn_history.clicked.connect(self._open_history)
-        top.addWidget(self.btn_history)
-        self.btn_x = CloseXButton(self)
-        self.btn_x.clicked.connect(self.hide)
-        top.addWidget(self.btn_x)
-        root.addLayout(top)
-
-        # ---- 中部：消息流（用户右侧、AI 左侧） ----
-        self.browser = QTextBrowser(self)
-        self.browser.setStyleSheet(
-            "QTextBrowser{background:rgba(255,255,255,4); border:none;"
-            " color:#e6e8f0; font-size:13px;}")
-        self.browser.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        root.addWidget(self.browser, 1)
-
-        # ---- 底部：输入行 ----
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
+        row.addWidget(self.btn_del_sess)
+        # 输入框（占满中间）
         self.input = QLineEdit(self)
-        self.input.setPlaceholderText("问桌宠…（回车发送，Esc 关闭）")
+        self.input.setPlaceholderText("问桌宠…（回车发送，输入条将自动收起）")
         self.input.setStyleSheet(
-            "QLineEdit{background:rgba(255,255,255,20); border:none; border-radius:9px;"
-            " color:#ffffff; font-size:14px; padding:5px 10px;}"
-            "QLineEdit:focus{background:rgba(255,255,255,30);}")
+            "QLineEdit{background:rgba(255,255,255,18); border:none; border-radius:8px;"
+            " color:#ffffff; font-size:15px; padding:4px 10px;}"
+            "QLineEdit:focus{background:rgba(255,255,255,28);}")
         self.input.returnPressed.connect(self._send)
-        row1.addWidget(self.input, 1)
+        row.addWidget(self.input, 1)
         self.btn_send = QPushButton("发送", self)
         self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_send.setStyleSheet(
-            "QPushButton{background:#3d6ef7; border:none; border-radius:9px;"
-            " color:white; font-size:13px; font-weight:bold; padding:5px 12px;}"
+            "QPushButton{background:#3d6ef7; border:none; border-radius:8px;"
+            " color:white; font-size:13px; font-weight:bold; padding:4px 12px;}"
             "QPushButton:hover{background:#5480ff;}"
             "QPushButton:disabled{background:#4a4f63;}")
         self.btn_send.clicked.connect(self._send)
-        row1.addWidget(self.btn_send)
-        root.addLayout(row1)
+        row.addWidget(self.btn_send)
+        root.addLayout(row)
 
-        # 用量行（单次 token 消耗 + 金额）
-        self.lbl_usage = QLabel(self)
-        self.lbl_usage.setText("")
-        self.lbl_usage.setStyleSheet(
-            "color:#8fa3c8; font-size:11px; background:rgba(255,255,255,6);"
-            " border-radius:6px; padding:1px 8px;")
-        root.addWidget(self.lbl_usage)
+        # 兼容保留（无消息流）：单行条不展示历史
+        self.browser = None
+        self.btn_clear = None
+        self.btn_history = None
+        self.lbl_usage = None
 
         self.setFixedWidth(self.W_USAGE)
         self.setFixedHeight(self.H_USAGE)
@@ -1388,42 +1347,32 @@ class ChatWindow(QWidget):
 
     # ---- 消息流展示 ----
     def set_content(self, messages, system_prompt='', ai_name='AI'):
-        """渲染当前会话消息流到中部浏览器；消息多时滚动到底部。
-        聊天窗用 'plain-right' 样式：无背景块、文字靠右、字号清晰。"""
-        try:
-            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet,
-                                           style='plain-right'))
-        except Exception:
-            self.browser.setHtml('')
-        sb = self.browser.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        """输入条无历史流：历史一律通过「📜 完整对话记录」回看，这里留空。
+        保留方法供外部调用（_sync_ui_to_current 等），仅更新会话语义。"""
+        return
 
     # 窗口拖动（按住空白/输入框外区域）——拖动后取消自动跟随
     def mousePressEvent(self, e):
+        # 输入条始终跟随桌宠，点击空白只把焦点还给输入框，不取消跟随
         if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            self._user_dragged = True
             try:
-                self._follow.stop()
+                self.input.setFocus()
             except Exception:
                 pass
+            e.accept()
+            return
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
-        if self._drag_offset is not None and e.buttons() & Qt.MouseButton.LeftButton:
-            self.move(e.globalPosition().toPoint() - self._drag_offset)
-            e.accept()
-            return
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
-        self._drag_offset = None
         super().mouseReleaseEvent(e)
 
     def _follow_pet(self):
-        """跟随桌宠移动（用户未手动拖动时）"""
-        if self._user_dragged or self._pet is None:
-            self._follow.stop()
+        """始终把输入条贴在桌宠【正下方】（用户拖动桌宠时输入条同步跟）。
+        每 tick 按最新桌宠矩形重新计算位置，不保留拖动偏移。"""
+        if self._pet is None:
             return
         try:
             pet_rect = self._pet.frameGeometry()
@@ -1431,20 +1380,15 @@ class ChatWindow(QWidget):
             return
         if pet_rect is None:
             return
-        # 保持与桌宠的相对偏移
-        off = getattr(self, '_follow_offset', None)
-        if off is None:
-            off = self.pos() - pet_rect.topLeft()
-            self._follow_offset = off
-        nx = pet_rect.left() + off.x()
-        ny = pet_rect.top() + off.y()
-        # 限制在屏幕内
         scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
-        if scr is not None:
-            geo = scr.availableGeometry()
-            nx = max(geo.left(), min(nx, geo.right() - self.width()))
-            ny = max(geo.top(), min(ny, geo.bottom() - self.height()))
-        self.move(nx, ny)
+        geo = scr.availableGeometry() if scr is not None else None
+        x = pet_rect.center().x() - self.width() // 2
+        if geo is not None:
+            x = max(geo.left(), min(x, geo.right() - self.width()))
+        y = pet_rect.bottom() + 6
+        if geo is not None and y + self.height() > geo.bottom():
+            y = max(geo.top(), pet_rect.top() - self.height() - 6)
+        self.move(x, y)
 
     # ---------- 交互 ----------
     def keyPressEvent(self, e):
@@ -1460,6 +1404,8 @@ class ChatWindow(QWidget):
             return
         self.input.clear()
         self.sendRequested.emit(text)
+        # 极简交互：发送后横线输入条自动收起，等右侧气泡回复即可
+        self.hide()
 
     def set_busy(self, busy):
         # 思考中时输入框与发送禁用、按钮变灰
@@ -1504,15 +1450,8 @@ class ChatWindow(QWidget):
         self.historyRequested.emit()
 
     def set_usage(self, text):
-        """在输入条下方显示单次 token 消耗与金额；空串则隐藏该行"""
-        if not hasattr(self, 'lbl_usage'):
-            return
-        if text:
-            self.lbl_usage.setText(text)
-            self.lbl_usage.show()
-        else:
-            self.lbl_usage.setText("")
-            self.lbl_usage.hide()
+        """输入条不内嵌用量行（用量/金额通过右键菜单统计查看）；空操作兼容。"""
+        return
 
 
 # ============================================================================

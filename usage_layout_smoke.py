@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # usage_layout_smoke.py —— 本轮改动冒烟：
-# ① 聊天窗「清理上下文」按钮在最左、文案正确；② 窗口尺寸加宽
-# ③ usage 文本含缓存命中标记；④ 设置面板单价三档输入框存在且回填
+# ① 聊天窗重构为「横线输入条」（宽度 640，单行，含会话下拉/新建/删除/输入/发送）
+# ② 体系提示词不再渲染；③ usage 文本含缓存命中标记；④ 峰谷计价公式；⑤ 面板单价回填
 import os
 import sys
 
@@ -54,25 +54,43 @@ app = QApplication(sys.argv)
 pet = FakePet()
 mgr = ai.AiChatManager(pet)
 
-# 打开聊天窗
+# 打开输入条
 mgr.open_chat()
 cw = mgr._chat
 
-ck("聊天窗已创建", cw is not None)
-ck("清理上下文按钮文案 = '清理上下文'", cw.btn_clear.text() == "清理上下文")
-ck("清理上下文提示含'全新对话'", "全新对话" in cw.btn_clear.toolTip())
-ck("聊天窗有清楚/记录/发送/关闭按钮", hasattr(cw, 'btn_clear') and hasattr(cw, 'btn_history')
-   and hasattr(cw, 'btn_send') and hasattr(cw, 'btn_x'))
-ck("聊天窗有会话下拉与新建", hasattr(cw, 'combo_session') and hasattr(cw, 'btn_new_sess'))
-ck("聊天窗有消息流 browser", hasattr(cw, 'browser'))
+ck("输入条已创建", cw is not None)
+ck("输入条为单行横条(宽640 高48)", cw.width() == 640 and cw.height() == 48)
+ck("输入条有会话下拉", hasattr(cw, 'combo_session'))
+ck("输入条有新建/删除/发送按钮", hasattr(cw, 'btn_new_sess') and hasattr(cw, 'btn_del_sess')
+   and hasattr(cw, 'btn_send'))
+ck("输入条保留输入框", hasattr(cw, 'input') and cw.input.isVisible())
+# 无大消息流（历史走右键「记录」回看）
+ck("输入条无消息流 browser", cw.browser is None)
 
-# 尺寸（可视化聊天窗固定宽 470，消息流为主区）
-ck("初始宽度=470", cw.width() == 470)
-ck("高度为可视化消息窗高度(340)", cw.height() == 340)
-cw.set_usage("本次 ↑100[缓存50] ↓20 共120 tok ≈ $0.000010")
-ck("有用量时用量行可见", cw.lbl_usage.isVisible() and cw.lbl_usage.text().startswith("本次"))
-cw.set_usage("")
-ck("隐藏用量时用量行隐藏", not cw.lbl_usage.isVisible())
+# 发送后输入条自动收起（极简交互）
+cw.input.setText("你好")
+cw._send()
+ck("发送后输入条自动收起", not cw.isVisible())
+ck("发送即清空输入框", cw.input.text() == "")
+
+# 桌面移动 → 输入条跟随桌宠正下方（重新打开）
+mgr.open_chat()
+cw.show_near(pet.frameGeometry())
+app.processEvents()
+_old = (cw.x(), cw.y())
+class _Mov:
+    def frameGeometry(self):
+        return QRect(700, 500, 200, 200)
+cw._pet = _Mov()
+cw._follow_pet()
+app.processEvents()
+ck("输入条跟随桌宠移动(位置变化)", cw.x() != _old[0] or cw.y() != _old[1])
+cw._pet = pet
+
+# 体系提示词不再渲染到任何界面
+html_out = ai._msg_html([{'role': 'user', 'content': 'x', 'ts': 't'}],
+                        '某个系统提示词', pet, style='bubble')
+ck("消息渲染不含体系提示词", '某个系统提示词' not in html_out and '体系提示词' not in html_out)
 
 # usage 文本含缓存 + 费用公式（时段无关：显式关闭峰谷计价，恒用面板满价）
 mgr.cfg = lambda: {'ai_price_in': 0.14, 'ai_price_out': 0.28, 'ai_price_cache': 0.0028,

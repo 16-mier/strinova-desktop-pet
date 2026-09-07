@@ -78,6 +78,27 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 交互改「极简模式」：横线输入条 + 右侧大字气泡 5 秒消失 + 去掉系统提示词）
+- **需求**：
+  1. 输入框要【随桌宠移动】（此前点输入条空白会永久取消跟随 → 拖动桌宠后输入条留在原地）
+  2. 改成轻量交互：在桌宠正下方的一条「横线输入条」打字，回车发送后输入条自动收起
+  3. AI 回复显示在桌宠【正右方】，无背景、大字体，显示完整后 **5 秒自动消失**
+  4. **不显示系统提示词**（此前消息渲染会把 system_prompt 灰条置顶）
+  5. 会话仍可新建/删除（入口并入输入条）；完整对话历史仍可回看（右键菜单「完整对话记录」）
+- **实现**（`ai_chat.py`）：
+  1. `ChatWindow` 由 470×340 大对话框（顶部工具行+中部消息流+底部输入行）**重构为 640×48 单行横条**：会话下拉＋新建＋删除＋输入框＋发送；`browser/btn_history/btn_clear/lbl_usage` 置 None（历史一律走独立 ChatHistoryWindow，set_content/set_usage 保留为空操作兼容）
+  2. `_follow_pet()` 改为每 tick 按桌宠最新矩形把输入条钉在【正下方居中】（不保留拖动偏移）；`mousePressEvent` 点击空白只把焦点还给输入框、不再取消跟随 → **跟随 bug 根因修复**
+  3. `_send()`：发送后 `self.hide()`（横条自动收起），AI 回复走右侧气泡
+  4. `BubbleWidget`：字号 18→**24**；`_reposition()` 把气泡放到桌宠【正右方、垂直居中对齐】（放不下才转左侧）；`_BUBBLE_MAX_W 520→620`；自动消失保持 `_BUBBLE_LIFE_MS=5000`（蹦字完整后 5 秒隐藏，事件循环实测通过）
+  5. `_msg_html()`：**删除 system_prompt 渲染块**（任何界面都不再显示「▍系统提示词」）
+  6. pet.py AI 菜单首项文案：「💬 打开 AI 对话」→「✏️ 快速提问」，提示改为“下方弹输入条、发送后收起、回复右侧气泡”
+- **验证**：
+  - session_smoke 25 / usage_layout_smoke 16 / history_smoke 23 / bubble_smoke 13 / gui_smoke 全 PASS ✅
+  - 独立事件循环验证：气泡蹦字完整 → 5 秒后自动隐藏 ✅；字号 24 ✅；输入条随桌宠从 (600,400) 移到 (700,500) 位置联动 ✅
+  - 输入条尺寸断言 640×48；发送后自动隐藏；`_msg_html` 渲染不含任何系统提示词文案 ✅
+- 涉及：`ai_chat.py`（ChatWindow 重构/_follow_pet/_send/BubbleWidget 字号与定位/_msg_html 去提示词）、`pet.py`（菜单文案）、更新 `session_smoke.py`/`usage_layout_smoke.py`/`bubble_smoke.py`/`history_smoke.py` 结构断言为新输入条
+- **部署**：待打包替换桌面 exe（下一步）
+
 ### 2026-09-07（AI 对话框布局微调 + BreezeTTS2 CUDA 桌面分发 zip 打包）
 - **需求**：
   1. AI 对话框布局：①聊天窗默认显示在桌宠【正下方】紧贴底部（水平居中对齐）；②对话内容消息文字【靠右、去掉气泡底色块】，只留清晰文字；③会话支持【删除】（不只新建）

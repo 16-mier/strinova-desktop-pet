@@ -2249,7 +2249,8 @@ class PetWindow(QWidget):
             menu.addAction(act_off)
             return menu
 
-        act_chat = QAction("💬 打开 AI 对话", menu)
+        act_chat = QAction("✏️ 快速提问", menu)
+        act_chat.setToolTip("在桌宠下方弹出输入条；发送后自动收起，AI 回复以大字气泡显示在右侧")
         act_chat.triggered.connect(lambda _c: ai.open_chat())
         menu.addAction(act_chat)
 

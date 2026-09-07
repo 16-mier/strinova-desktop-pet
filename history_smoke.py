@@ -52,12 +52,13 @@ app = QApplication(sys.argv)
 pet = FakePet()
 mgr = ai.AiChatManager(pet)
 
-# 1. open chat window -> has history button
+# 1. open chat (输入条) -> manager 存在
 mgr.open_chat()
 cw = mgr._chat
 ck("chat window created", cw is not None)
-ck("has btn_history", hasattr(cw, 'btn_history'))
-ck("btn_history text nonempty", len(cw.btn_history.text()) > 0)
+ck("input bar visible", cw.isVisible())
+ck("has input", hasattr(cw, 'input'))
+ck("无消息流 browser", cw.browser is None)
 
 # 2. seed history messages with ts
 mgr._messages = [
@@ -67,8 +68,8 @@ mgr._messages = [
     {'role': 'assistant', 'content': 'hao de, chun feng shi li bu ru ni', 'ts': '10:01:08'},
 ]
 
-# 3. click history button -> window pops
-cw.btn_history.click()
+# 3. 打开完整记录（右键菜单的 show_history，等价于旧记录按钮）
+mgr.show_history()
 ck("manager created history window", mgr._history is not None)
 hw = mgr._history
 ck("history window visible", hw.isVisible())

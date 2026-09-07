@@ -59,43 +59,27 @@ ck("清理后会话仍在", n1 in mgr.session_names())
 mgr.switch_session('默认会话')
 ck("默认会话仍存在", mgr.current_session() == '默认会话')
 
-# 4. 可视化聊天窗
+# 4. 横线输入条（轻量聊天输入条：无消息流；历史走右键「完整对话记录」）
 mgr.open_chat()
 cw = mgr._chat
-ck("聊天窗有会话下拉", hasattr(cw, 'combo_session'))
-ck("聊天窗有消息流 browser", hasattr(cw, 'browser'))
-ck("聊天窗保留输入框", hasattr(cw, 'input') and hasattr(cw, 'btn_send'))
-ck("聊天窗有清理/记录按钮", hasattr(cw, 'btn_clear') and hasattr(cw, 'btn_history'))
-ck("聊天窗有新建会话按钮", hasattr(cw, 'btn_new_sess'))
+ck("输入条有会话下拉", hasattr(cw, 'combo_session'))
+ck("输入条保留输入框", hasattr(cw, 'input') and hasattr(cw, 'btn_send'))
+ck("输入条有新建会话按钮", hasattr(cw, 'btn_new_sess'))
+ck("输入条无消息流 browser(历史另开)", cw.browser is None)
 cw.set_sessions(mgr.session_names(), mgr.current_session())
 ck("下拉含两个会话", cw.combo_session.count() == 2)
 
-# 5. 消息流渲染（用户右/AI 左已由 _msg_html 保证）
-cw.set_content([
+# 5. 消息渲染（右侧大字、无背景气泡）：plain 样式不再用于输入条；
+#    渲染函数本身保证：无气泡背景、文字靠右
+html_out = ai._msg_html([
     {'role': 'user', 'content': '用户消息XYZ', 'ts': '10:00:01'},
     {'role': 'assistant', 'content': 'AI 回复ABC', 'ts': '10:00:02'},
-], mgr.system_prompt())
-# 5b. 聊天窗用 plain-right 样式：无气泡背景、文字靠右
-plain = cw.browser.toPlainText()
-ck("消息流含用户消息", '用户消息XYZ' in plain)
-ck("消息流含AI回复", 'AI 回复ABC' in plain)
-# 用户与 AI 消息都靠右（新设计：对话内容在右边）
-from PyQt6.QtCore import Qt as _Qt
-doc = cw.browser.document()
-_ok_u = _ok_a = False
-for i in range(doc.blockCount()):
-    b = doc.findBlockByNumber(i)
-    txt = b.text()
-    al = b.blockFormat().alignment()
-    if '用户消息XYZ' in txt and al == _Qt.AlignmentFlag.AlignRight:
-        _ok_u = True
-    if 'AI 回复ABC' in txt and al == _Qt.AlignmentFlag.AlignRight:
-        _ok_a = True
-ck("消息流用户块右对齐", _ok_u)
-ck("消息流AI块也右对齐(对话内容在右边)", _ok_a)
-# 无气泡背景：检查渲染 HTML 无内联 background 色块样式（span 不带 background）
-html_out = cw.browser.toHtml().lower()
-ck("消息流无气泡背景块", 'background:#1e3a5f' not in html_out and 'background:#2a2e3d' not in html_out)
+], '', pet, style='plain-right')
+ck("消息渲染含用户消息", '用户消息XYZ' in html_out)
+ck("消息渲染含AI回复", 'AI 回复ABC' in html_out)
+# 无气泡背景：渲染 HTML 无内联 background 色块样式
+hl = html_out.lower()
+ck("消息渲染无气泡背景块", 'background:#1e3a5f' not in hl and 'background:#2a2e3d' not in hl)
 
 # 6. 口语化规则强制追加
 sp = mgr.system_prompt()
