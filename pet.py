@@ -654,10 +654,24 @@ def vk_to_key_name(vk):
 # ------- 按键捕获（WH_KEYBOARD_LL 一次性钩子，用于"录制"自定义键）-------
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_CHAR = 0x0102
 WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
 VK_ESCAPE = 0x1B
+VK_RETURN = 0x0D
 # 忽略的修饰键（单独按不应作为绑定键）
 _MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3}
+
+
+class CURSORINFO(ctypes.Structure):
+    """GetCursorInfo 输出结构（wintypes 无内置）"""
+    _fields_ = [
+        ('cbSize', wintypes.DWORD),
+        ('flags', wintypes.DWORD),
+        ('hCursor', wintypes.HANDLE),
+        ('ptScreenPos', wintypes.POINT),
+    ]
 
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
@@ -1182,16 +1196,7 @@ def ptt_key_up(vk=VK_V):
 
 # ---------- 游戏内"回车自动补词"联动 ----------
 # 目标：卡拉彼丘（官方启动器 / WeGame）对局聊天输入框，回车发送时自动在句尾
-# 补一个词（默认 喵，可自定义）。
-# 判定（启发式）：当前台为目标游戏且检测到"开聊天 → 打了字 → 再回车"序列时，
-# 拦截这次回车并先注入补词再放行，实现"回车时自动加喵"。纯菜单/切换窗口回车
-# （两次回车间没打字）不触发，避免误伤。
-# 注：游戏内输入判定无法从系统层面 100% 准确（UE4 游戏输入是引擎内处理），
-# 本钩子为最稳的启发式方案；是否开启由用户决定（默认关）。
-VK_RETURN = 0x0D
-KEYEVENTF_UNICODE = 0x0004
-
-# 目标游戏 exe 名（小写，不含 .exe）：官方启动器 + WeGame 都覆盖
+# 补一个词（默认 喵，可自定义）。实现详见 MeowHook 类（v6：鼠标可见性判定 + PostMessage）。
 _MEOW_TARGET_EXES = {"calabiyau-win64-shipping", "calabiyau"}
 
 # 可打印字符判定：字母/数字/空格/常见标点（用于判断"开聊天后打了字"）。
@@ -1209,12 +1214,16 @@ for _v in range(0x20, 0x100):
 
 
 class MeowHook:
-    """常驻低层键盘钩子：目标游戏前台 + 回车发送时自动补词。
-    线程结构仿 NumpadPlayHook：独立线程 GetMessage 循环驱动钩子回调。
-    回调内【不执行注入】——只做检测并吞掉"发送回车"置待处理标记；
-    待处理由钩子线程在【消息循环空闲时】完成注入（此刻不在钩子回调栈内，
-    可安全地为游戏补词并模拟回车发送，避免在回调里 SendInput+睡眠阻塞
-    全局键盘管线）。
+    """常驻低层键盘钩子：卡拉彼丘聊天"回车自动补词"（v6，实测可用）。
+    核心事实（经实测确认）：
+      - 卡拉彼丘(UE4)【不响应 SendInput】注入，但【响应 PostMessage】(WM_KEYDOWN/WM_CHAR)；
+      - 正常游戏操作时系统鼠标【隐藏】，按回车进入聊天栏后鼠标【可见】——
+        用鼠标可见性可可靠区分"进入聊天栏的回车"与"发送的回车"。
+    逻辑：
+      - 前台为目标游戏 + 回车按下 + 鼠标【可见】→ 聊天栏已开 = 发送回车：
+         钩子回调内（先于游戏收到回车）立即 PostMessage WM_CHAR 补词，
+         然后【放行】真实回车 → 游戏正常发送并关闭输入框（不吞键，体验正常）。
+      - 鼠标【隐藏】的回车（进入聊天栏）→ 完全放行不干预。
     开关由 PetWindow 控制（默认关）。"""
 
     def __init__(self, get_word):
@@ -1222,87 +1231,62 @@ class MeowHook:
         self._hook = None
         self._thread = None
         self._running = False
-        self._lock = threading.Lock()
-        self._typed = False            # 自最近回车间是否打过可打印字
-        self._pending_send = False     # 待处理：吞掉的回车需要补词
-        self._last_key = 0.0           # 上次非回车的可打印键时间（超时重置）
-        self._reset_timer = None       # 空闲重置定时器（跑到主线程）
-        self._scheduled = False
+
+    def _cursor_visible(self):
+        try:
+            ci = CURSORINFO()
+            ci.cbSize = ctypes.sizeof(CURSORINFO)
+            if _user32.GetCursorInfo(ctypes.byref(ci)):
+                return bool(ci.flags & 1)
+        except Exception:
+            pass
+        return False
 
     def _proc(self, nCode, wParam, lParam):
+        """低层键盘钩子回调。非目标/非回车/注入键一律 CallNextHookEx 放行；
+        目标游戏 + 回车 + 鼠标可见(聊天栏已开=发送) → 抢先 PostMessage 补词后放行真实回车。"""
         if nCode < 0:
             return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
                                           ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
-        kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-        vk = int(kbd.vkCode)
-        flags = int(kbd.flags)
-        # 程序注入的键一律放行（避免我们注入的字符/回车再被本钩子吞掉循环）
-        if flags & LLKHF_INJECTED:
-            return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
-                                          ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
         try:
-            is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-            if not is_down:
+            kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk = int(kbd.vkCode)
+            flags = int(kbd.flags)
+            if flags & LLKHF_INJECTED:
                 return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
                                               ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
-            target = self._is_target_foreground()
-            if not target:
-                with self._lock:
-                    self._typed = False
-                    self._pending_send = False
+            down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if not down or vk != VK_RETURN:
                 return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
                                               ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
-            if vk == VK_RETURN:
-                with self._lock:
-                    if self._typed:
-                        # 打了字再回车 → 判定为"发送"：吞掉本次回车，稍后补词+重发
-                        self._typed = False
-                        self._pending_send = True
+            exe = _foreground_exe()
+            if not (exe in _MEOW_TARGET_EXES or 'calabiyau' in exe):
+                return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                              ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+            # 鼠标可见 = 聊天栏已开 → 本次回车=发送 → 抢先补词
+            if self._cursor_visible():
+                word = (self._get_word() or '').strip()
+                if word:
+                    try:
+                        hwnd = _user32.GetForegroundWindow()
+                        for ch in word:
+                            _user32.PostMessageW(hwnd, WM_CHAR, ord(ch), 1)
                         try:
-                            _dbg('[meow] 检测到发送回车，准备补词')
+                            _dbg('[meow] 发送回车前已补词 %r' % word)
                         except Exception:
                             pass
-                        return 1  # 吞掉（交给消息循环注入）
-                    # 第一次回车：当作"开聊天"放行；若一直没打字需及时重置typed
-                    self._pending_send = False
-                return _userCallNext(self._hook, nCode, wParam, lParam)
-            # 其它可打印键 → 标"打了字" + 记时间
-            if vk in _PRINTABLE_VK:
-                with self._lock:
-                    self._typed = True
-                    self._last_key = time.monotonic()
-            self._schedule_reset()
-            return _userCallNext(self._hook, nCode, wParam, lParam)
-        except Exception:
-            return _userCallNext(self._hook, nCode, wParam, lParam)
-
-    def _schedule_reset(self):
-        """安排一个延时任务：若一段时间内没有再打字，重置 typed 以免误判。"""
-        try:
-            if self._reset_timer is None:
-                from PyQt6.QtCore import QTimer as _QT
-                self._reset_timer = _QT()
-                self._reset_timer.setSingleShot(True)
-                self._reset_timer.setInterval(3000)  # 3 秒无打字则重置
-                self._reset_timer.timeout.connect(self._reset_stale)
-            self._reset_timer.start()
+                    except Exception as e:
+                        print('meow prepend err:', e)
+            # 放行真实回车（游戏正常发送+关闭输入框）
         except Exception:
             pass
-
-    def _reset_stale(self):
-        """3 秒没打字 → 可能已退出聊天/输入完成，重置 typed"""
-        try:
-            with self._lock:
-                if time.monotonic() - self._last_key >= 3.0:
-                    self._typed = False
-        except Exception:
-            pass
+        return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                      ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
 
     def _is_target_foreground(self):
         exe = _foreground_exe()
         if not exe:
             return False
-        # 官方版/wegame 版进程名都含 calabiyau；覆盖全部
         return exe in _MEOW_TARGET_EXES or 'calabiyau' in exe
 
     def _message_loop(self):
@@ -1317,47 +1301,15 @@ class MeowHook:
             print('meow hook install failed (hook=0)')
             return
         msg = wintypes.MSG()
-        _cont = True
-        while self._running and _cont:
-            r = _user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1)  # PM_REMOVE
+        while self._running:
+            r = _user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1)
             if r:
                 _user32.TranslateMessage(ctypes.byref(msg))
                 _user32.DispatchMessageW(ctypes.byref(msg))
-                _cont = msg.message != 0x0012  # WM_QUIT 结束
-            self._process_pending()   # 空闲处理注入
-            time.sleep(0.008)         # 保持低 CPU 的轮询节奏（8ms）
+            time.sleep(0.008)
         if self._hook:
             _user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
-
-    def _process_pending(self):
-        """消息循环空闲时：若有待发送补词，注入词并模拟回车发送。
-        此时不在钩子回调栈内，SendInput 安全。"""
-        do_send = False
-        with self._lock:
-            if self._pending_send:
-                self._pending_send = False
-                do_send = True
-        if not do_send:
-            return
-        word = self._get_word() or ''
-        try:
-            if word:
-                _send_unicode_text(word)   # 先把"喵"补进输入框
-            time.sleep(0.05)               # 给游戏一点处理时间
-            _send_key(VK_RETURN)           # 再模拟回车发送
-            time.sleep(0.03)
-            _send_key(VK_RETURN, keyup=True)
-            try:
-                _dbg('[meow] 注入完成 word=%r' % word)
-            except Exception:
-                pass
-        except Exception as e:
-            print('meow process_pending err:', e)
-            try:
-                _dbg('[meow] 注入异常 %s' % e)
-            except Exception:
-                pass
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
@@ -1368,12 +1320,6 @@ class MeowHook:
 
     def stop(self):
         self._running = False
-        if self._reset_timer is not None:
-            try:
-                self._reset_timer.stop()
-            except Exception:
-                pass
-            self._reset_timer = None
         if self._hook:
             try:
                 _user32.UnhookWindowsHookEx(self._hook)
