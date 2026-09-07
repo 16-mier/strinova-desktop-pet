@@ -78,6 +78,21 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 朗读迁移 QSoundEffect：无声+崩溃双修；退出桌宠自动停 TTS；Q8 开箱即用 zip 交付）
+- **问题（用户）**：①语音播报不发声；②（继续）播放/切角色崩溃；③新增：退出桌宠顺手关 TTS 服务；④Q8 模型开箱即用版（新 Win11 无 CUDA/Python）打包
+- **无声根因**：崩溃修复时引入 `_stop_player_safe`（singleShot(0) 延后 stop）→ 排在 `setSource/play` 之后执行 → **刚启播的音频立刻被停 → 无声**；且启动 450ms `_apply_role_ai_profile_on_start` 的 `_invalidate_pending` 同样延后 stop 会杀新播放
+- **崩溃深层根因（升级认知）**：QMediaPlayer 在本环境（PyQt6 6.11.2/Qt6.11.2/Py3.14）不仅连槽崩，**播放中读 playbackState() 也崩**（0xc0000409）——任何 Python 侧交互都触发
+- **修复：AI 朗读整体迁移 QSoundEffect**（`ai_chat.py`）：
+  - `__init__` 新增 `self._sfx = QSoundEffect()`（音量按 tts_volume 限 0~1）
+  - `_on_tts_done` 播放改 `_sfx`（同步 stop→setSource→play，无延后竞态；蹦字 100ms 延后；dur+400ms 后清理临时文件；QSoundEffect 自然播完不崩）；QMediaPlayer 仅作 _sfx 初始化失败的兜底
+  - `play_audio_file`（试听）同步改 _sfx；`is_speaking`/`_do_stop_player` 操作 _sfx
+  - **实测**：启动完成后播放 0.8s/2.4s isPlaying=True（有声）→9.4s 自然播完→全程 exit 0 不崩 ✅
+- **退出停 TTS**（`pet.py` closeEvent）：退出前调 `ai_chat.tts_service_stop()`（停桌宠启动的 audiocpp_server 进程）
+- **Q8 开箱即用 zip**（subagent 完成）：`<桌面>\BreezeTTS2-Q8.zip`（5.94GB，顶层英文目录，UTF-8 防乱码，7z 校验 OK）；内容 bin(CUDA 全套)/models/Q8 gguf 4.73G/model_specs/refs_en 24角色/start·test·stop bat/使用说明（目标机免装 CUDA+Python，须解压纯英文路径，桌宠填 127.0.0.1:8080/v1 + breeze-tts-clone + 模型版本选量化 q8）
+- **验证**：QSoundEffect 全链（有声/不崩/is_speaking/自然播完）✅；回归 session16/usage16/history23/gui/panel2 全绿 ✅
+- 涉及：`ai_chat.py`（QSoundEffect 迁移）、`pet.py`（closeEvent 停 TTS）
+- git：（待提交）
+
 ### 2026-09-07（根治崩溃：QMediaPlayer 播放状态槽触发 Qt6Core 0xc0000409 + 点按不打断朗读）
 - **崩溃调查（用户多次反馈：发话完崩/切角色崩）**：Windows 事件日志 BEX64 0xc0000409 Qt6Core.dll。逐点复现（真实 GUI）最终锁定：
   - **根因**：QMediaPlayer（AI TTS 播放器）**只要连接了 playbackStateChanged 的 Python 槽**（无论 Auto/Queued 连接、无论槽内是否 disconnect），播放 mp3/wav 数秒即触发 Qt6Core 0xc0000409 崩溃（无槽裸播稳定 exit 0；300ms 短播不崩、播数秒崩）——PyQt6 6.11.2 + Qt 6.11.2 + Python 3.14 播放器状态信号派发 bug

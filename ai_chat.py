@@ -1670,6 +1670,9 @@ class AiChatManager(QObject):
         self._last_delay = {}         # {'api': ms, 'tts': ms} 最近一次延迟
         self._player = None
         self._audio_out = None
+        self._sfx = None          # ⭐ TTS 播报改用 QSoundEffect（QMediaPlayer 在
+                                  #    PyQt6.11/Qt6.11.2 有状态交互即崩的 bug：连槽、
+                                  #    播放中读 playbackState 均触发 0xc0000409）
         try:
             self._player = QMediaPlayer()
             self._audio_out = QAudioOutput()
@@ -1678,6 +1681,12 @@ class AiChatManager(QObject):
         except Exception:
             self._player = None
             self._audio_out = None
+        try:
+            from PyQt6.QtMultimedia import QSoundEffect
+            self._sfx = QSoundEffect()
+            self._sfx.setVolume(min(1.0, max(0.0, self.tts_volume() / 100.0)))
+        except Exception:
+            self._sfx = None
 
         # 跨时段自动刷新：高峰↔空闲翻转时，若用量行可见则用新单价重算显示
         self._last_peak = self.is_peak_time()
@@ -1935,17 +1944,20 @@ class AiChatManager(QObject):
 
     def _do_stop_player(self):
         try:
+            # 优先停 QSoundEffect（现用播放器）；旧的 QMediaPlayer 一并停
+            if self._sfx is not None:
+                self._sfx.stop()
             if self._player is not None:
                 self._player.stop()
         except Exception:
             pass
 
     def is_speaking(self):
-        """AI/TTS 是否正在朗读（播放器处于 Playing 状态）。
+        """AI/TTS 是否正在朗读（QSoundEffect 播放中）。
         供桌宠点按逻辑判断：朗读中点按不播触发音、不打断。"""
         try:
-            if self._player is not None:
-                return self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            if self._sfx is not None and self._sfx.isPlaying():
+                return True
         except Exception:
             pass
         return False
@@ -2514,8 +2526,21 @@ class AiChatManager(QObject):
         threading.Thread(target=_run, daemon=True).start()
 
     def play_audio_file(self, path):
-        """播放指定音频文件（用于测试语音试听）。"""
-        if self._player is None or not path or not os.path.exists(path):
+        """播放指定音频文件（用于测试语音试听）——用 QSoundEffect（稳定不崩）"""
+        if not path or not os.path.exists(path):
+            return
+        try:
+            if self._sfx is not None:
+                vol = self.tts_volume()
+                self._sfx.stop()
+                self._sfx.setSource(QUrl.fromLocalFile(path))
+                self._sfx.setVolume(min(1.0, max(0.0, vol / 100.0)))
+                self._sfx.play()
+            return
+        except Exception:
+            pass
+        # 回退：旧 QMediaPlayer
+        if self._player is None:
             return
         try:
             self._stop_player_safe()
@@ -3029,13 +3054,28 @@ class AiChatManager(QObject):
         pending_text = (getattr(self, '_synced_text', '') or '').strip()
         self._synced_text = ''
         # 先把音频接上、启动播放（音频真正出声的起点）
-        self._stop_player_safe()
-        self._player.setSource(QUrl.fromLocalFile(gain_path))
-        # ⚠ 不能连接 playbackStateChanged 的 Python 槽：PyQt6.11/Qt6.11.2 在
-        # 有 Python 槽连接时、播放进行中/结束会触发 Qt6Core 0xc0000409 崩溃
-        # （实测：无槽裸播稳定；一连接槽（哪怕 QueuedConnection）播放数秒即崩）。
-        # 因此全部改用 QTimer 时序：启动后延时蹦字、到时主动 stop，
-        # 完全不依赖播放器状态信号。
+        # ⭐ 用 QSoundEffect 播放（PyQt6.11/Qt6.11.2 的 QMediaPlayer 有
+        # 「状态交互即崩」bug：连槽/播放中读状态都触发 0xc0000409；QSoundEffect
+        # 实测稳定、可安全读 isPlaying、自然播完不崩，且无延后 stop 竞态 → 有声音）。
+        sfx = self._sfx
+        if sfx is None:
+            # 无 QSoundEffect（初始化失败）→ 回退旧 QMediaPlayer 直播（同步 stop）
+            try:
+                if self._player is not None:
+                    self._player.stop()
+                self._player.setSource(QUrl.fromLocalFile(gain_path))
+                self._player.play()
+            except Exception:
+                pass
+        else:
+            try:
+                sfx.stop()                    # 同步停旧（无延后竞态）
+                sfx.setSource(QUrl.fromLocalFile(gain_path))
+                sfx.setVolume(min(1.0, max(0.0, vol / 100.0)))
+                sfx.play()
+            except Exception:
+                pass
+        # 蹦字：播放启动后稍延（QSoundEffect 起播快，100ms 足够）再蹦
         if pending_text:
             def _reveal():
                 if seq != getattr(self, '_pending_tts_seq', 0):
@@ -3046,10 +3086,9 @@ class AiChatManager(QObject):
                     self._get_bubble().show_text_synced(pending_text, dur_ms)
                 except Exception:
                     self._hide_thinking()
-            QTimer.singleShot(180, _reveal)   # 音频真正开始出声左右再蹦字
+            QTimer.singleShot(100, _reveal)
         else:
-            QTimer.singleShot(150, self._hide_thinking)
-        self._player.play()
+            QTimer.singleShot(80, self._hide_thinking)
         cleaned = {'done': False}
 
         def _cleanup_now():
@@ -3064,16 +3103,9 @@ class AiChatManager(QObject):
             except Exception:
                 pass
 
-        def _stop_and_cleanup():
-            # 播放到接近末尾或超时：主动 stop（避开自然结束的崩溃路径）并清理
-            try:
-                self._stop_player_safe()
-            except Exception:
-                pass
-            QTimer.singleShot(250, _cleanup_now)
-        # 音频时长前 120ms 主动 stop；时长未知时按 15s 兜底
-        limit_ms = (dur_ms - 120) if (dur_ms and dur_ms > 300) else 15000
-        QTimer.singleShot(max(120, limit_ms), _stop_and_cleanup)
+        # 音频播完（时长 + 余量）后清理临时文件；QSoundEffect 自然结束安全，无需提前 stop
+        clean_delay = (dur_ms + 400) if (dur_ms and dur_ms > 0) else 15000
+        QTimer.singleShot(max(800, clean_delay), _cleanup_now)
         # 极长兜底：5 分钟强制清理
         QTimer.singleShot(300000, _cleanup_now)
 

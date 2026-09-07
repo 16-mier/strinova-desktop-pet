@@ -1902,6 +1902,12 @@ class PetWindow(QWidget):
                 ai.close_all()
         except Exception:
             pass
+        # 退出桌宠时顺手关掉本地 TTS 服务（audiocpp_server）
+        try:
+            if _ai_mod is not None and hasattr(_ai_mod, 'tts_service_stop'):
+                _ai_mod.tts_service_stop()
+        except Exception:
+            pass
         try:
             hwnd = int(self.winId())
             for hid in list(getattr(self, '_custom_hk_map', {}).keys()):
