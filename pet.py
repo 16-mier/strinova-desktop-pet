@@ -435,12 +435,40 @@ def friendly_audio_name(name):
     return AUDIO_LABEL.get(name, name)
 
 
-def pick_click_voice(d):
+def trigger_voice_dir(role):
+    """集中触发音目录：assets/trigger_voice/<角色名>/（角色名=去阵营/形象的末段）"""
+    return os.path.join(assets_dir(), 'trigger_voice', role_character_name(role))
+
+
+def trigger_voice_for(role):
+    """按角色找集中触发音文件（trigger_voice/<角色名>/ 下）：
+    优先「卡拉彼丘」名，否则取目录第一个音频；无 → None"""
+    try:
+        tv = trigger_voice_dir(role)
+        if os.path.isdir(tv):
+            cands = [f for f in sorted(os.listdir(tv))
+                     if os.path.isfile(os.path.join(tv, f)) and f.lower().endswith(AUDIO_EXTS)]
+            if cands:
+                for f in cands:
+                    if os.path.splitext(f)[0].strip() == '卡拉彼丘':
+                        return os.path.join(tv, f)
+                return os.path.join(tv, cands[0])
+    except Exception:
+        pass
+    return None
+
+
+def pick_click_voice(d, role=None):
     """挑角色点按触发音（模块级）：
-    1) 目录里「非内置名」的音频（如完整台词命名的自我介绍）→ 取文件名最长者
+    1) 有 role → 优先集中触发音目录 trigger_voice/<角色名>/（如「卡拉彼丘.mp3」）
+    2) 其次 d（角色目录）里「非内置名」音频（如完整台词自我介绍）→ 取文件名最长者
        （内置名：morning/noon/evening/sprint/click/hello）
-    2) 否则返回 None（由调用方按角色旧规则决定：星绘时段/白墨 sprint/其它 morning）
+    3) 否则返回 None（由调用方按角色旧规则决定：星绘时段/白墨 sprint/其它 morning）
     """
+    if role:
+        tv = trigger_voice_for(role)
+        if tv:
+            return tv
     builtin = {'morning', 'noon', 'evening', 'sprint', 'click', 'hello'}
     best = None
     if os.path.isdir(d):
@@ -1652,8 +1680,8 @@ class PetWindow(QWidget):
                     d = role_dir(self.role)
                 if not os.path.isdir(d):
                     return
-                # 台词型自我介绍优先（与 play_click_voice 同规则）
-                voice = pick_click_voice(d)
+                # 台词型自我介绍/集中触发音优先（与 play_click_voice 同规则）
+                voice = pick_click_voice(d, role=self.role)
                 if voice is None:
                     cname = role_character_name(self.role)
                     if cname == "白墨":
@@ -2068,9 +2096,9 @@ class PetWindow(QWidget):
         d = role_root(self.role)
         if not os.path.isdir(d):
             d = role_dir(self.role)
-        # 1) 优先播「台词型自我介绍」（完整台词命名的 mp3，非内置名）
-        voice = pick_click_voice(d)
-        # 2) 无台词语音 → 按角色旧规则（星绘时段问候/白墨冲刺/其它 morning）
+        # 1) 优先播集中触发音（trigger_voice/<角色名>/卡拉彼丘.mp3）或台词型自我介绍
+        voice = pick_click_voice(d, role=self.role)
+        # 2) 无触发音 → 按角色旧规则（星绘时段问候/白墨冲刺/其它 morning）
         if voice is None:
             cname = role_character_name(self.role)
             if cname == "白墨":
@@ -2700,6 +2728,8 @@ class PetWindow(QWidget):
         self.load_role(role)
         self.refresh_tray_menu()
         self._schedule_menu_refresh()
+        # 同步角色的 AI 专属配置：TTS 克隆参考 + 系统提示词（切角色自动换人设/音色）
+        self._apply_role_ai_profile(role)
         # 同步打开的面板：刷新列表 + 重新监视新角色的目录
         if getattr(self, '_settings_panel', None) is not None:
             try:
@@ -2707,6 +2737,54 @@ class PetWindow(QWidget):
                 self._settings_panel._watch_current_dir()
             except Exception:
                 pass
+
+    def _apply_role_ai_profile(self, role):
+        """切换角色时自动更新 AI 配置（TTS 克隆音色 + 系统提示词）：
+        - TTS 克隆参考：assets/tts_refs/<角色名>/ref.wav + ref.txt
+          → 写 ai.tts_api_ref / ai.tts_api_ref_text（若目录有该角色素材）
+        - 系统提示词：assets/tts_refs/<角色名>/system_prompt.txt
+          → 写 ai.system_prompt（若存在）
+        仅当角色名素材存在时才覆盖（避免误清空用户手动配置）；星绘等无素材角色不覆盖。
+        """
+        cname = role_character_name(role)
+        if not cname or self.ai is None:
+            return
+        ref_dir = os.path.join(assets_dir(), 'tts_refs', cname)
+        if not os.path.isdir(ref_dir):
+            return
+        try:
+            cfg = load_config()
+            ai = cfg.get('ai') or {}
+            changed = False
+            # 1) 克隆参考音频 + 转录
+            ref_wav = os.path.join(ref_dir, 'ref.wav')
+            ref_txt = os.path.join(ref_dir, 'ref.txt')
+            if os.path.exists(ref_wav) and os.path.exists(ref_txt):
+                with open(ref_txt, encoding='utf-8') as f:
+                    text = f.read().strip()
+                ai['tts_api_ref'] = ref_wav
+                ai['tts_api_ref_text'] = text
+                changed = True
+            # 2) 系统提示词
+            sp = os.path.join(ref_dir, 'system_prompt.txt')
+            if os.path.exists(sp):
+                with open(sp, encoding='utf-8') as f:
+                    prompt = f.read().strip()
+                if prompt:
+                    ai['system_prompt'] = prompt
+                    changed = True
+            if changed:
+                cfg['ai'] = ai
+                save_config(cfg)
+                # 同步内存里的 manager（若有热缓存）
+                try:
+                    if hasattr(self.ai, '_system_prompt_cache'):
+                        self.ai._system_prompt_cache = None
+                except Exception:
+                    pass
+                print('role ai profile ->', cname)
+        except Exception as e:
+            print('apply role ai profile fail:', e)
 
     # ------------- 设置面板 -------------
     def open_settings_panel(self):

@@ -78,6 +78,18 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（语音功能最终形态：点按触发音=每角色"卡拉彼丘"台词；TTS克隆参考+系统提示词随角色自动切换）
+- **需求澄清（用户纠正）**：之前下载的自我介绍台词**不是**点按触发音，而是**TTS 克隆语句**；点按触发音应该是每角色说"卡拉彼丘"那句；切换角色要自动切换 TTS 克隆配置与系统提示词
+- **每角色"卡拉彼丘"触发音**：wiki 语音页每角色都有台词纯为「卡拉彼丘」的独立 mp3 → 全部下载成功 24/24，集中存 `assets/trigger_voice/<角色名>/卡拉彼丘.mp3`（角色目录保持干净只留形象图）
+- **TTS 克隆参考**：自我介绍 mp3 → ffmpeg 转 24k 单声道 wav 集中存 `assets/tts_refs/<角色名>/ref.wav` + `ref.txt`（转录文本，23 个角色；星绘跳过保留原有 star_ref）
+- **系统提示词**：每角色模板占位（性别区分，令/信/白墨=男其它=女）`assets/tts_refs/<角色名>/system_prompt.txt`
+- **代码**（`pet.py`）：
+  1. 模块级 `trigger_voice_dir(role)`/`trigger_voice_for(role)`/`pick_click_voice(d, role)`——触发音优先级：集中 trigger_voice → 角色目录非内置长名音频 → None（旧规则回退）
+  2. `_apply_role_ai_profile(role)`：切角色时若 `tts_refs/<角色名>/` 存在 → 写 ai 配置 `tts_api_ref/tts_api_ref_text/system_prompt`（switch_role 内调用）；无素材角色（星绘）不覆盖用户配置
+- **旧角色清理**：星绘 morning/noon/evening.mp3、白墨 sprint.mp3 已删（点按统一卡拉彼丘触发音）；配置 audio_hotkeys 中对应 4 条 Num 绑定已清空（保留 common 一条）
+- **验证**：24 角色触发音齐全；pick_click_voice 离屏抽样（星绘/白墨/米雪儿→卡拉彼丘.mp3）✅；_apply_role_ai_profile 切米雪儿写 ref/ref_text/system_prompt、切星绘不覆盖 ✅
+- 涉及：`pet.py`、`assets/trigger_voice/`（新增24）、`assets/tts_refs/`（新增23角色×3文件）、`assets/characters/`（清理旧语音）
+- git：`5fdfdb3`（角色 AI 档案切换 + 触发音）+ 语音资源提交
 ### 2026-09-07（角色点按触发音 = 各角色自我介绍台词语音（wiki 下载）+ 修复菜单重复角色 Bug）
 - **需求（用户）**：每个角色点按触发音用各自那句自我介绍（用户提供 23 句台词清单，星绘跳过保留时段问候）；旧角色（白墨/艾卡等）也要新触发音
 - **语音来源调研**：biligame 卡拉彼丘 WIKI 每角色有「语音台词」子页（如 `米雪儿·李/语音台词`），页内 mp3 托管在 `patchwiki.biligame.com/images/klbq/`；**防爬**：直连 api.php/子页返回 567，需 Session 先 GET 主页拿 cookie 再访问（实测 UA/Referer 头为主因）；HTML 结构 = 每条语音一个 `<tr>`，td[0] 含 `.media-audio[data-file]` mp3、td[1] 台词文本（须剔除 smw 悬浮注释）
