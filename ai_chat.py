@@ -139,11 +139,13 @@ def _tts_dir():
 
 # ============================================================================
 # 本地 TTS 服务管理（audio.cpp / audiocpp_server 的启动/停止/状态探测）
-# 服务路径写死为本机已部署的 audio.cpp 位置；地址从 tts_api_base 解析端口。
+# 服务路径可通过环境变量 AUDIOCPP_SERVER 指定；未设置时按本文件同级的
+# audio-cpp/bin-cuda/audiocpp_server.exe 查找（便于在本地部署 audio.cpp 后使用）。
+# 找不到服务程序时相关启动/停止接口返回明确错误，不影响其它功能。
 # ============================================================================
-_AUDIO_CPP_SERVER = (
-    r'C:\Users\mier\Desktop\deepseek work\breeze-tts-local\audio-cpp\bin-cuda\audiocpp_server.exe'
-)
+_AUDIO_CPP_SERVER = os.environ.get('AUDIOCPP_SERVER', '') or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'audio-cpp', 'bin-cuda', 'audiocpp_server.exe')
 _SERVICE_PROC = None   # 由本模块启动的进程引用
 _SERVICE_LOCK = threading.Lock()
 

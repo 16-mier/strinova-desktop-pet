@@ -1,7 +1,7 @@
 # dsh-desktop-pet 开发日志（DESKTOP PET DEVELOPMENT LOG）
 
 > 桌宠：**独立 Win11 桌面桌宠**（透明置顶浮窗，点按播音，角色可扩展）
-> 工程：`C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet`
+> 工程：`<repo-root>`
 > 技术栈：**Python 3.14 + PyQt6**（per-pixel alpha 完美透明，打包成单文件 exe）
 > 创建：2026-09-04
 
@@ -108,7 +108,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 悬停分支受控验证：在桌宠上/输入条上不隐藏、离开才隐藏 ✅；0.5s 定时生效
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
 - 涉及：`pet.py`（_build_ai_menu/AI 用量入口）、`ai_chat.py`（500ms）、`settings_panel.py`（_refresh_tts_svc_state 异步化 + _probe_result）
-- **部署**：桌面 exe 已打包替换 `C:\Users\mier\Desktop\卡丘简易桌宠_最新.exe`（13:24，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
+- **部署**：桌面 exe 已打包替换 `<user-desktop>\卡丘简易桌宠_最新.exe`（13:24，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
 - git：`646094a`（交互收敛 + 面板提速）
 
 ### 2026-09-07（AI 对话条悬停交互：鼠标移到桌宠上自动展开、离开 1 秒后收起）
@@ -122,7 +122,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 事件循环实测：`chat_bar_on_leave()` 启动后 1.6s 内输入条已隐藏（1s 延迟生效）✓
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
 - 涉及：`ai_chat.py`（open_chat focus 参数 + 悬停显隐 4 方法）、`pet.py`（enterEvent/leaveEvent 挂接）
-- **部署**：桌面 exe 已打包替换 `C:\Users\mier\Desktop\卡丘简易桌宠_最新.exe`（13:15，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
+- **部署**：桌面 exe 已打包替换 `<user-desktop>\卡丘简易桌宠_最新.exe`（13:15，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
 - git：`43be28b`（悬停交互改版）
 
 ### 2026-09-07（AI 交互改「极简模式」：横线输入条 + 右侧大字气泡 5 秒消失 + 去掉系统提示词）
@@ -144,7 +144,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 独立事件循环验证：气泡蹦字完整 → 5 秒后自动隐藏 ✅；字号 24 ✅；输入条随桌宠从 (600,400) 移到 (700,500) 位置联动 ✅
   - 输入条尺寸断言 640×48；发送后自动隐藏；`_msg_html` 渲染不含任何系统提示词文案 ✅
 - 涉及：`ai_chat.py`（ChatWindow 重构/_follow_pet/_send/BubbleWidget 字号与定位/_msg_html 去提示词）、`pet.py`（菜单文案）、更新 `session_smoke.py`/`usage_layout_smoke.py`/`bubble_smoke.py`/`history_smoke.py` 结构断言为新输入条
-- **部署**：桌面 exe 已打包替换 `C:\Users\mier\Desktop\卡丘简易桌宠_最新.exe`（13:03，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
+- **部署**：桌面 exe 已打包替换 `<user-desktop>\卡丘简易桌宠_最新.exe`（13:03，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
 - git：`5d2b7f3`（AI 极简交互改版）
 
 ### 2026-09-07（AI 对话框布局微调 + BreezeTTS2 CUDA 桌面分发 zip 打包）
@@ -166,7 +166,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 中文路径测试（`...\中文测试目录\`）确认 audiocpp_server **不支持含中文路径**（`model path does not exist`）→ 已在 launcher 加 ASCII 路径检测与提示，README 注明解压到纯英文路径
   - UI 冒烟回归：session 28 / usage_layout 14 / history 22 / bubble / gui 全绿 ✅
 - 涉及：`ai_chat.py`（show_near/_msg_html style/ChatWindow 删除按钮+set_content）、新增 `tts_launcher.py`、`BreezeTTS2-CUDA/` 分发目录、新增 `stage_run.py`/`dist_verify.py`/`subst_verify.py`/`depscan.py` 验证脚本、更新 `session_smoke.py`
-- **部署**：分发文件夹已移至桌面 `C:\Users\mier\Desktop\BreezeTTS2-CUDA`（14.1GB，含 q8+bf16 双模型+全套 CUDA 运行库+星绘克隆+3 个 bat+launcher+使用说明），由用户自行压缩成 zip；7z 验证 zip 可完整解压 128 文件 14.4GB（C:\Temp 全量解出）✅；桌宠 exe 已重新打包部署（12:18 版，UI 改动生效）✅
+- **部署**：分发文件夹已移至桌面 `<user-desktop>\BreezeTTS2-CUDA`（14.1GB，含 q8+bf16 双模型+全套 CUDA 运行库+星绘克隆+3 个 bat+launcher+使用说明），由用户自行压缩成 zip；7z 验证 zip 可完整解压 128 文件 14.4GB（C:\Temp 全量解出）✅；桌宠 exe 已重新打包部署（12:18 版，UI 改动生效）✅
 - git：`f798fc7`（UI+zip 分发包）；`9c0b79f`（冒烟测试费用断言改时段无关：显式关峰谷固定满价 + 新增高峰周一10点/空闲周一13点判断用例，修复非高峰时段跑测试误报）
 
 ### 2026-09-07（AI 对话四合一：语音等待三点拉长 / 对话可视化消息流 / 多会话上下文 / 口语化提示词）
@@ -228,7 +228,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 用量文本带「· 空闲半价」标注 ✅；面板开关默认开/关闭写入 peak_pricing=False/状态字三态切换 ✅
   - history_smoke 22 项 + usage_layout 11 项 + gui_smoke + py_compile 全过 ✅
 - 涉及：`ai_chat.py`（is_peak_time/peak_pricing_enabled/_peak_factor/_peak_tag/raw_prices/input·output·cache·price×因子/_peak_timer/_on_peak_tick/_usage_text 标注）、`settings_panel.py`（chk_ai_peak/lbl_peak_state/_ai_apply_peak/_refresh_peak_state/refresh_all 回填）
-- 备注：面板填的单价视为**高峰价**，空闲自动 ×0.5；关闭开关即回到"恒按所填价"。用户 commandcode 中转若已按其自身峰谷计价，可关掉本开关避免双重折扣
+- 备注：面板填的单价视为**高峰价**，空闲自动 ×0.5；关闭开关即回到"恒按所填价"。用户 <provider> 中转若已按其自身峰谷计价，可关掉本开关避免双重折扣
 
 ### 2026-09-07（部署：含「跟随桌宠+实时刷新」历史窗的新版 exe 10:18，55.2MB）
 - **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:18，55,210,955B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
@@ -286,10 +286,10 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 - **部署**：备份旧版为桌面 `卡丘简易桌宠_上一版.exe`（64MB）→ 新版覆盖桌面 `卡丘简易桌宠_最新.exe`（55.2MB）
 - **验证**：桌面新版启动 OK（主进程 + 提权副本 2 进程运行，10s 存活）✅ → 测试后已停止
 - 涉及：`卡丘简易桌宠.spec`（未改）、`dsh-desktop-pet\dist\卡丘简易桌宠.exe`、桌面 `卡丘简易桌宠_最新.exe` / `卡丘简易桌宠_上一版.exe`
-- 备注：**用户需完全退出旧桌宠再双击桌面 `卡丘简易桌宠_最新.exe`**；数据目录仍是桌面 `卡丘简易桌宠数据\`（含 commandcode key/flash 模型/自定义单价，不被覆盖）
+- 备注：**用户需完全退出旧桌宠再双击桌面 `卡丘简易桌宠_最新.exe`**；数据目录仍是桌面 `卡丘简易桌宠数据\`（含 <provider> key/flash 模型/自定义单价，不被覆盖）
 
 ### 2026-09-07（清理上下文按钮左移+改名 / token统计记全输入·缓存命中·输出 / 单价补缓存命中档）
-- **需求（用户）**：①聊天窗「清空」改名「清理上下文」并移到**输入框左边**；②token 消耗不能只记输入/输出，要记全**缓存**（DeepSeek 前缀缓存命中）；③用户实际用模型 = commandcode 的 `deepseek/deepseek-v4-flash-fast`，单价要按 flash 缓存命中档补
+- **需求（用户）**：①聊天窗「清空」改名「清理上下文」并移到**输入框左边**；②token 消耗不能只记输入/输出，要记全**缓存**（DeepSeek 前缀缓存命中）；③用户实际用模型 = <provider> 的 `deepseek/deepseek-v4-flash-fast`，单价要按 flash 缓存命中档补
 - **实现**（`ai_chat.py`）：
   1. **按钮左移+改名**：ChatWindow 第一行布局由「输入框→清空→发送→✕」改为「**清理上下文**→输入框→发送→✕」；文案 `清空`→`清理上下文`，tooltip 同步；窗口 340px → **380px** 加宽（容纳 5 字按钮），`set_usage` 的 380×70 / 380×46 同步；气泡提示「已清空上下文」→「已清理上下文」，相关 docstring 统一
   2. **usage 记全缓存**：`_chat_request` 解析 usage 时除 prompt/completion/total 外，新增 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（兼容旧名 `prompt_cache_hit` / `prompt_cache_miss`）
@@ -301,7 +301,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 新 `usage_layout_smoke.py` 11 项全 PASS（按钮文案/最左位置/尺寸 380×70×46/usage 含[缓存400]/费用公式/面板缓存输入框存在且回填 0.0028）✅
   - gui_smoke 回归过 ✅；py_compile 三文件全过 ✅（ruff 仅 I001 import 排序历史遗留，与本次无关）
 - 涉及：`ai_chat.py`（ChatWindow 布局/按钮改名/usage 缓存解析/cache_price/calc_cost/_usage_text/set_prices/clear_context 文案）、`settings_panel.py`（单价三档输入框/_ai_apply_prices/refresh_all 回填）、新增 `usage_layout_smoke.py`
-- 备注：缓存命中单价默认 0.0028（deepseek-v4-flash 官方缓存命中价，约 98% 折扣）；用户 commandcode `deepseek/deepseek-v4-flash-fast` 中转若返回 `prompt_cache_hit_tokens` 则自动按优惠价算，不返回则退化为原全价计算（向下兼容）。面板已存旧配置无 ai_price_cache 时默认 0.0028 回填
+- 备注：缓存命中单价默认 0.0028（deepseek-v4-flash 官方缓存命中价，约 98% 折扣）；用户 <provider> `deepseek/deepseek-v4-flash-fast` 中转若返回 `prompt_cache_hit_tokens` 则自动按优惠价算，不返回则退化为原全价计算（向下兼容）。面板已存旧配置无 ai_price_cache 时默认 0.0028 回填
 
 ### 2026-09-07（Kimi-K3 审阅重构：去重复/删死代码/抽常量 + 按模型自动带单价 + 发送清旧用量 + 精度与框宽微调）
 - **背景（用户）**：要求由 Kimi-K3 对上一轮「清理上下文按钮+缓存计价」改动做 UI/架构审阅并落实改进点（用户选 1/2/4/5/6/7 全做，含按模型自动带价）
@@ -391,7 +391,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   4. `set_tts_api/test_tts_api` 扩展支持 ref/ref_text/instruction
 - **实现**（`settings_panel.py`）：朗读服务表单在「音色」下新增三字段——**参考音频**(带「浏览…」按钮，选完自动找同目录同名 `.txt` 填转录)、**参考转录**、**默认情绪**(留空=AI 自动判断)；`_ai_apply_tts_api/_ai_pick_tts_ref/_ai_test_tts_api/refresh_all` 同步
 - **配置**（桌面 `卡丘简易桌宠数据\pet_config.json` ai 段）：`tts_api_base=http://127.0.0.1:8080/v1`、`tts_api_model=breeze-tts-clone`、`tts_api_ref=<…>\audio-cpp\references\star_ref.wav`、`tts_api_ref_text=初次见面，我叫星绘。这个名字可不是代号哦。请多关照了。`、`tts_api_instruction=`(空=自动)
-- **验证**：`parse_tts_output` 单测 6 例全过 ✅；克隆三件套 GUI 冒烟 7 项全过（控件/保存/回填/浏览自动填转录）✅；**真实 LLM(commandcode)+audio.cpp 端到端**：回复「我又把钥匙弄丢了…」→ LLM 改写自动判「懊恼自责」→ 星绘克隆懊恼语气合成 510KB wav ✅；ai_selftest/gui_smoke 回归过 ✅；py_compile 全过 ✅
+- **验证**：`parse_tts_output` 单测 6 例全过 ✅；克隆三件套 GUI 冒烟 7 项全过（控件/保存/回填/浏览自动填转录）✅；**真实 LLM(<provider>)+audio.cpp 端到端**：回复「我又把钥匙弄丢了…」→ LLM 改写自动判「懊恼自责」→ 星绘克隆懊恼语气合成 510KB wav ✅；ai_selftest/gui_smoke 回归过 ✅；py_compile 全过 ✅
 - 涉及：`ai_chat.py`、`settings_panel.py`；冒烟脚本 `tts_parse_test.py`/`tts_clone_smoke.py`（验证后已删）
 - 备注：打包 exe 后需完全退出旧桌宠再运行新版；情绪强弱可后续在面板「默认情绪」微调（如填「温柔地轻声」），留空则走 AI 每句自动判断
 
@@ -412,7 +412,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ### 2026-09-06（转 ComfyUI 部署 Breeze TTS 2：节点 + cuda_graphs 加速 + 中文工作流）
 - **需求（用户）**：不要独立 Python 进程，改为**在已有的 ComfyUI 里部署** Breeze TTS 2，体验 WebUI/工作流
-- **关键背景**：本机 ComfyUI = **Comfy Desktop 桌面版**，真实运行目录 `C:\Users\mier\AppData\Local\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI\`（.venv = Python 3.13.12），模型目录映射到 `Comfy-Desktop\ComfyUI-Shared\models\`（inst-*.yaml）。**D:\ComfyUI 只是源码副本，不是运行目录**（custom_nodes/模型都要放运行目录 + 共享 models 才生效）
+- **关键背景**：本机 ComfyUI = **Comfy Desktop 桌面版**，真实运行目录 `<user-appdata>\Local\Comfy-Desktop\ComfyUI-Installs\ComfyUI\ComfyUI\`（.venv = Python 3.13.12），模型目录映射到 `Comfy-Desktop\ComfyUI-Shared\models\`（inst-*.yaml）。**D:\ComfyUI 只是源码副本，不是运行目录**（custom_nodes/模型都要放运行目录 + 共享 models 才生效）
 - **WSL 涂味（显存元凶）**：WSL 里多次启动 Breeze fast 后，残留 CUDA context 占 GPU ~14.5GB，导致 ComfyUI/本地一切卡顿 → **彻底关停 WSL 立即释放**（显存 15786→1254 MiB）。教训：WSL 内跑 GPU 模型要防僵尸进程吞显存
 - **部署**：装社区节点 **Saganaki22/ComfyUI-Breeze-TTS-2**（60⭐，node-del/grad）+ 下模型 **Breeze-TTS-2-int8-hybrid.safetensors**（4.5GB，INT8 ConvRot=bf16音质+省27%显存，适用16GB卡）到 `ComfyUI-Shared\models\breezetts2\drbaph_Breeze-TTS-2-comfyui\`（含 audio_tokenizer）
 - **节点亮点（免 Triton 加速）**：LoadModel 的 `decode_mode="cuda_graphs"` **手动捕获 eager 步骤**（绕过 torch.compile/triton 限制，Windows 原生可用）+ `attention` 可选 sdpa/flash_attention/sageattention → 这是本机 ComfyUI 里吃满 GPU 的加速正解
@@ -463,16 +463,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   1. `AiChatManager` 新增 3 个 Qt 信号：`models_fetched(bool,object)` / `tts_api_tested(bool,str)` / `conn_tested(bool,str)`；三个后台方法改为线程内 `self.xxx.emit(...)`（**信号跨线程 emit 自动排队回主线程**，Qt 标准做法）
   2. `SettingsPanel._connect_ai_signals()`：`__init__` 连接三个信号到固定槽 `_on_models_fetched` / `_on_tts_api_tested` / `_on_conn_tested`（主线程安全操作 UI）
   3. `_ai_auto_fetch`/`_ai_test`/`_ai_test_tts_api` 去掉局部 `_done` 直传，只发请求，结果走信号槽
-- **验证**：py_compile ✅；**端到端（真实面板+真实 commandcode key 点刷新）→ 下拉框 67 个模型 + 「✅ 检测到 67 个模型」PASS** ✅；新 key 实测对话也通（deepseek/deepseek-v4-pro 回「通了」）✅
+- **验证**：py_compile ✅；**端到端（真实面板+真实 <provider> key 点刷新）→ 下拉框 67 个模型 + 「✅ 检测到 67 个模型」PASS** ✅；新 key 实测对话也通（deepseek/deepseek-v4-pro 回「通了」）✅
 - 涉及：`ai_chat.py`（3 信号/fetch_models/test_tts_api/test_connection 改 emit）、`settings_panel.py`（_connect_ai_signals/3 个信号槽/_ai_auto_fetch 等去 _done）
 - 备注：桌面 exe 重新打包部署；**用户刷新模型前若面板一直开着，需重新点一次「↻ 刷新模型」**（面板打开时读的是旧输入框值的情况已无——现在直接读输入框实时值）
 
 
-### 2026-09-07（关键修复：commandcode Cloudflare 1010 拦截 → 加浏览器头；TTS 引擎精简为唯一「填地址」服务）
+### 2026-09-07（关键修复：<provider> Cloudflare 1010 拦截 → 加浏览器头；TTS 引擎精简为唯一「填地址」服务）
 - **用户反馈**：①换新 key 仍刷不出模型；②朗读引擎微软的不要；③本地引擎也不要（Windows 自带），所有朗读都要填 API 地址
-- **根因（重大）**：commandcode.ai 用 **Cloudflare 拦截缺浏览器指纹的脚本请求**（响应 body `error code: 1010`），与 key/套餐无关！models 与 chat/completions 都被拦 → 表现为「模型刷不出来」。
+- **根因（重大）**：<provider>.ai 用 **Cloudflare 拦截缺浏览器指纹的脚本请求**（响应 body `error code: 1010`），与 key/套餐无关！models 与 chat/completions 都被拦 → 表现为「模型刷不出来」。
   - 诊断过程：直连/代理都 403 → 读 403 body 发现 `error code: 1010`（Cloudflare 指纹拦截）→ 加完整浏览器头（Chrome UA + Accept + Accept-Language + Sec-Fetch-*）→ **HTTP 200，67 个模型秒出** ✅
-  - 对话接口仍 401：body `Invalid 'Authorization' header or token` → 用户填的 key 是 `user_` 开头（OAuth 登录 token），**非有效 API key**；且 `.commandcode` 目录只有 models-cache.json 无 auth.json（未 CLI 登录）→ 需在 commandcode Studio 生成真 key
+  - 对话接口仍 401：body `Invalid 'Authorization' header or token` → 用户填的 key 是 `user_` 开头（OAuth 登录 token），**非有效 API key**；且 `.<provider>` 目录只有 models-cache.json 无 auth.json（未 CLI 登录）→ 需在 <provider> Studio 生成真 key
 - **实现**（`ai_chat.py`）：
   1. `_browser_headers()`：统一给 `_chat_request`/`_list_models`/`_api_speech_synth` 加浏览器特征头（Chrome UA/Accept/Accept-Language/Sec-Fetch-*）→ 绕过 Cloudflare 1010
 - **TTS 引擎精简**（`ai_chat.py` + `settings_panel.py`，按用户「微软不要、本地也要填地址」）：
@@ -521,20 +521,20 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 - 备注：桌面 exe 已打包部署（63b3dd0）；用户需在面板填**服务器地址/API 密钥/模型**并保存后可用（key 明文存 pet_config.json 的 ai 段）
 
 
-### 2026-09-07（TTS 引擎扩充：自定义 API 语音服务 + 桌宠大小滑块禁滚轮 + 模型检测失败分类提示 + commandcode 403 排查）
+### 2026-09-07（TTS 引擎扩充：自定义 API 语音服务 + 桌宠大小滑块禁滚轮 + 模型检测失败分类提示 + <provider> 403 排查）
 - **需求（用户反馈）**：
   1. 桌宠大小滑块悬停滚动滚轮会误改大小 → 去掉滚轮调值
   2. TTS 也需要**自己填 API 服务地址**（不要只能浏览器那套 edge-tts）；支持自定义 OpenAI 兼容语音
-  3. 填了 commandcode.ai 的地址+key，模型没识别出来 → 排查
+  3. 填了 <provider>.ai 的地址+key，模型没识别出来 → 排查
 - **实现**（`ai_chat.py` + `settings_panel.py`）：
   1. **NoWheelSlider**：新增禁滚轮滑块类（wheelEvent 忽略），桌宠大小滑块 `sld_size` 改用它
   2. **TTS 自定义 API 引擎** `TTS_MODE_API='api'`：面板朗读引擎下拉加「自定义 API 语音服务」，选它显示 服务地址/API 密钥/语音模型/音色 表单 +「测试语音」按钮（OpenAI 兼容 POST `{base}/audio/speech`，body `{model,input,voice,response_format:mp3}`，Bearer key，响应 mp3 落盘走播放器）；配置存 `ai.tts_api_base/tts_api_key/tts_api_model/tts_api_voice`；`_norm_base_url` 规整地址（容忍末尾带 /chat/completions 或 /models 的填法）；api 模式失败自动回退本地 SAPI
   3. **云端音色行**包成 `cloud_voice_box`、API 表单 `api_tts_box`，按引擎显隐联动（`_sync_tts_mode_ui`）
   4. **模型检测失败分类提示**：403→服务商未开放模型列表可手动输入；401→密钥无效；404→地址不对；其余原样
-- **403 排查结论（用户 commandcode 服务）**：地址 `https://api.commandcode.ai/provider/v1/chat/completions` 是官方正确端点（文档确认）；直连/代理都 403 → 非网络问题，是该服务要求 **Studio 生成的专用 key + Provider 及以上套餐**（官网：除 Go 套餐外 GOAT/Pro/Max/Team/Provider 才有 API 权限，Provider 计划以上才有 API）；让用户在 commandcode.ai Studio → API Keys 里重新生成 key 并确认套餐
+- **403 排查结论（用户 <provider> 服务）**：地址 `https://api.<provider>.ai/provider/v1/chat/completions` 是官方正确端点（文档确认）；直连/代理都 403 → 非网络问题，是该服务要求 **Studio 生成的专用 key + Provider 及以上套餐**（官网：除 Go 套餐外 GOAT/Pro/Max/Team/Provider 才有 API 权限，Provider 计划以上才有 API）；让用户在 <provider>.ai Studio → API Keys 里重新生成 key 并确认套餐
 - **验证**：py_compile ✅；panel_smoke3（13 项：引擎含 API 项/表单显隐联动/配置保存/缺字段提示/滑块滚轮被忽略）✅；本地 HTTP 桩验证 `_api_speech_synth` 请求体（model/input/voice/response_format + Bearer）✅；panel_smoke2 + ai_selftest 回归全过 ✅
 - 涉及：`ai_chat.py`（TTS_MODE_API/_api_speech_synth/TTSWorker api 分支/set_tts_api/test_tts_api/_norm_base_url 应用到 models）、`settings_panel.py`（NoWheelSlider/api_tts_box 表单/cloud_voice_box/_sync_tts_mode_ui/_ai_apply_tts_api/_ai_test_tts_api/refresh_all/403 提示）
-- 备注：桌面 exe 已重新打包部署；**用户需在 commandcode Studio 生成专用 key 或改用支持 OpenAI 语音的服务**
+- 备注：桌面 exe 已重新打包部署；**用户需在 <provider> Studio 生成专用 key 或改用支持 OpenAI 语音的服务**
 
 ### 2026-09-06（设置面板：大小可填数字 + 面板不再一直置顶）
 - **需求**：①桌宠大小处要能直接填数字；②设置面板（选项框）不要一直置顶
@@ -796,7 +796,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   ```
   python -m PyInstaller --noconfirm --onefile --windowed --name "卡丘简易桌宠" --icon "assets/app.ico" --add-data "assets;assets" --collect-submodules sounddevice --collect-submodules soundfile --collect-submodules numpy --hidden-import sounddevice --hidden-import soundfile --hidden-import numpy --exclude-module PyQt6.QtQml ... pet.py
   ```
-- **产物**：`dist\卡丘简易桌宠.exe`（63MB，PyQt6 + sounddevice + soundfile + numpy 全打包）；已复制桌面 `C:\Users\mier\Desktop\卡丘简易桌宠.exe`
+- **产物**：`dist\卡丘简易桌宠.exe`（63MB，PyQt6 + sounddevice + soundfile + numpy 全打包）；已复制桌面 `<user-desktop>\卡丘简易桌宠.exe`
 - **验证**：exe 启动正常（普通版→UAC 提权→桌宠实例稳定运行）✅；进程 10s+ 存活无崩溃 ✅
 - **清理**：删除 build/ 与旧乱码 spec（首次 CLI 打包自动生成 spec 名为中文，控制台乱码无碍实际文件名）
 - 备注：exe 每次启动弹 UAC（自提权逻辑内置）；配置/角色资源在 exe 同目录 assets 与 pet_config.json（打包后 base_dir 逻辑已处理）
@@ -866,7 +866,7 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - PyQt6 QAudioDecoder 无 `errorOccurred`/`state`（Qt6 改名/移除），且解码 mp3 进程直接崩 → 弃用
   - 绑定验证需 Voicemeeter **正在运行**（Login=1 时路由无效），启动后条带须开 A1+B1
   - sounddevice 枚举含 MME/DirectSound/WDM 多后端重复 → 限定 WASAPI（hostapi='Windows WASAPI'）
-- **涉及**：`C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet\pet.py`（版本 1.2.0，+sounddevice/soundfile/numpy 导入、CONFIG 存取、list_output_devices、play_audio_direct、_build_role_menu ②绑定项、init_tray/refresh_tray_menu/_on_tray_activated、set_bind_device）；新增运行时依赖 `pet_config.json`
+- **涉及**：`<repo-root>\pet.py`（版本 1.2.0，+sounddevice/soundfile/numpy 导入、CONFIG 存取、list_output_devices、play_audio_direct、_build_role_menu ②绑定项、init_tray/refresh_tray_menu/_on_tray_activated、set_bind_device）；新增运行时依赖 `pet_config.json`
 - **验证**：py_compile ✅；WASAPI 直出 Voicemeeter Input → 录 Voicemeeter Out B1 peak 0.4~0.63 ✅（正弦波与真实 mp3 均通）；桌宠实例绑定链路（写配置→实例化→play_audio→B1 录音 peak 0.598）✅；重采样后无 Invalid sample rate ✅
 - **备注**：**未重新打包 exe**；打包需把 sounddevice/soundfile/numpy 打进（PyInstaller 会自动收依赖，但 numpy 较大）；真实使用需 Voicemeeter 运行中 + 条带开 A1/B1
 

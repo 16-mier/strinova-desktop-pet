@@ -6,7 +6,7 @@ import types
 import tempfile
 import json
 
-ROOT = r"C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet"
+ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 

@@ -4,7 +4,7 @@ import os
 import sys
 import py_compile
 
-ROOT = r"C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet"
+ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 
