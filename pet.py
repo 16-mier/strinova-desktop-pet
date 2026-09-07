@@ -435,6 +435,27 @@ def friendly_audio_name(name):
     return AUDIO_LABEL.get(name, name)
 
 
+def pick_click_voice(d):
+    """挑角色点按触发音（模块级）：
+    1) 目录里「非内置名」的音频（如完整台词命名的自我介绍）→ 取文件名最长者
+       （内置名：morning/noon/evening/sprint/click/hello）
+    2) 否则返回 None（由调用方按角色旧规则决定：星绘时段/白墨 sprint/其它 morning）
+    """
+    builtin = {'morning', 'noon', 'evening', 'sprint', 'click', 'hello'}
+    best = None
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            full = os.path.join(d, f)
+            if not os.path.isfile(full) or not f.lower().endswith(AUDIO_EXTS):
+                continue
+            stem = os.path.splitext(f)[0]
+            if stem.lower() in builtin:
+                continue
+            if best is None or len(stem) > len(os.path.splitext(best)[0]):
+                best = f
+    return os.path.join(d, best) if best else None
+
+
 def list_role_audio(role):
     """列出角色语音（角色根目录下所有音频）→ [(显示名, 绝对路径)]。
     多形象时语音共用角色根（形象目录只放图）。"""
@@ -1631,18 +1652,19 @@ class PetWindow(QWidget):
                     d = role_dir(self.role)
                 if not os.path.isdir(d):
                     return
-                cname = role_character_name(self.role)
-                if cname == "白墨":
-                    f = os.path.join(d, "sprint.mp3")
-                elif cname == "星绘":
-                    f = os.path.join(d, self.greeting_for_now() + ".mp3")
-                else:
-                    click = os.path.join(d, "click.mp3")
-                    f = click if os.path.exists(click) else os.path.join(d, "morning.mp3")
-                if os.path.exists(f):
-                    # 已有缓存则跳过
-                    if f not in _decode_cache:
-                        _decode_and_prepare(f)
+                # 台词型自我介绍优先（与 play_click_voice 同规则）
+                voice = pick_click_voice(d)
+                if voice is None:
+                    cname = role_character_name(self.role)
+                    if cname == "白墨":
+                        voice = os.path.join(d, "sprint.mp3")
+                    elif cname == "星绘":
+                        voice = os.path.join(d, self.greeting_for_now() + ".mp3")
+                    else:
+                        click = os.path.join(d, "click.mp3")
+                        voice = click if os.path.exists(click) else os.path.join(d, "morning.mp3")
+                if os.path.exists(voice) and voice not in _decode_cache:
+                    _decode_and_prepare(voice)
                 # 顺带预解码当前语音来源第 1 条（快捷键最常按）
                 try:
                     audios = self.current_audio_list()
@@ -2046,17 +2068,21 @@ class PetWindow(QWidget):
         d = role_root(self.role)
         if not os.path.isdir(d):
             d = role_dir(self.role)
-        cname = role_character_name(self.role)
-        if cname == "白墨":
-            f = os.path.join(d, "sprint.mp3")
-        elif cname == "星绘":
-            f = os.path.join(d, self.greeting_for_now() + ".mp3")
-        else:
-            click = os.path.join(d, "click.mp3")
-            f = click if os.path.exists(click) else os.path.join(d, "morning.mp3")
-        if os.path.exists(f):
+        # 1) 优先播「台词型自我介绍」（完整台词命名的 mp3，非内置名）
+        voice = pick_click_voice(d)
+        # 2) 无台词语音 → 按角色旧规则（星绘时段问候/白墨冲刺/其它 morning）
+        if voice is None:
+            cname = role_character_name(self.role)
+            if cname == "白墨":
+                voice = os.path.join(d, "sprint.mp3")
+            elif cname == "星绘":
+                voice = os.path.join(d, self.greeting_for_now() + ".mp3")
+            else:
+                click = os.path.join(d, "click.mp3")
+                voice = click if os.path.exists(click) else os.path.join(d, "morning.mp3")
+        if os.path.exists(voice):
             # 点击语音：强制不开 auto_ptt（避免打字时误注入开麦键）
-            self.play_audio(f, ptt_override=False)
+            self.play_audio(voice, ptt_override=False)
 
     @staticmethod
     def greeting_for_now():
