@@ -27,6 +27,7 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -699,7 +700,8 @@ class BubbleWidget(QWidget):
         self.show()
         self.raise_()
         self._follow.start()      # 跟随桌宠移动（拖动时贴住）
-        self._lift_life()
+        # 注意：思考/等待期间【不】启动自动消失计时——
+        # 语音合成可能很慢，三点要保持到真正开始说话/显示文字那一刻
         self._think_timer.start()
 
     def _think_step(self):
@@ -881,6 +883,98 @@ class CloseXButton(QPushButton):
 # ============================================================================
 # 完整对话上下文窗口（点「聊天记录」弹出：列出当前会话全部消息）
 # ============================================================================
+# ============================================================================
+# 消息 → 富文本气泡 HTML（完整记录窗与可视化聊天窗共用同一渲染）
+# 用户消息右对齐(右上角)、AI 消息左对齐(左下角)、系统消息置顶居中
+# ============================================================================
+def _msg_html(messages, system_prompt='', pet=None):
+    """把消息列表渲染成气泡 HTML 字符串。
+    messages: [{'role','content','ts'}, ...]（不含 system）；
+    system_prompt: 若有，以灰色斜体小块置顶；
+    pet: 用于取 AI 角色名（缺省 'AI'）。"""
+    esc = html.escape
+    parts = []
+    # 配色（与 ChatHistoryWindow 一致）
+    PANEL = "#1f2430"
+    SYS_COLOR = "#8a93b0"
+    SUB = "#7d87a6"
+    TIME = "#6f7898"
+    TITLE = "#e7eaf4"
+    USER_BG = "#1e3a5f"
+    USER_BORDER = "#3b6ea5"
+    AI_BG = "#2a2e3d"
+    AI_BORDER = "#46506b"
+
+    if system_prompt:
+        parts.append(
+            '<div style="color:%s; font-style:italic; font-size:11px;'
+            ' padding:4px 10px; margin:2px 6px 8px 6px;'
+            ' background:%s; border-radius:8px;">'
+            '▍系统提示词：%s</div>'
+            % (SYS_COLOR, PANEL, esc(system_prompt)))
+
+    if not messages:
+        parts.append(
+            '<div style="color:%s; text-align:center; padding:20px;">'
+            '暂无对话内容——去和桌宠聊几句吧 ✨</div>' % SUB)
+
+    ai_name = 'AI'
+    if pet is not None:
+        try:
+            n = getattr(pet, 'role', None) or 'AI'
+            if n:
+                ai_name = n
+        except Exception:
+            pass
+
+    for m in messages:
+        role = m.get('role')
+        content = (m.get('content') or '').rstrip()
+        ts = m.get('ts') or '—'
+        # 系统操作消息（清理上下文等回显）→ 居中灰字
+        if role == 'user' and _is_cmd_msg(content):
+            parts.append(
+                '<div style="text-align:center; color:%s; font-size:11px;'
+                ' margin:3px 0;">⚙ %s · %s</div>'
+                % (SYS_COLOR, esc(content), ts))
+            continue
+        if role == 'user':
+            # 用户消息：右对齐（右侧 = 右上角一侧）
+            parts.append(
+                '<div style="text-align:right; margin:3px 2px;">'
+                '<span style="background:%s; border:1px solid %s;'
+                ' border-radius:10px; padding:6px 10px; color:#dcecff;'
+                ' display:inline-block; max-width:72%%; text-align:left;">'
+                '<span style="color:%s; font-size:10px;">%s</span><br>%s'
+                '</span><br><span style="color:%s; font-size:9px;">%s · %s</span>'
+                '</div>'
+                % (USER_BG, USER_BORDER, SUB, esc('你'),
+                   content.replace('\n', '<br>'),
+                   TIME, esc('你'), ts))
+        else:
+            # AI / assistant 消息：左对齐（左侧 = 左下角一侧）
+            parts.append(
+                '<div style="text-align:left; margin:3px 2px;">'
+                '<span style="background:%s; border:1px solid %s;'
+                ' border-radius:10px; padding:6px 10px; color:%s;'
+                ' display:inline-block; max-width:72%%; text-align:left;">'
+                '<span style="color:%s; font-size:10px;">%s</span><br>%s'
+                '</span><br><span style="color:%s; font-size:9px;">%s · %s</span>'
+                '</div>'
+                % (AI_BG, AI_BORDER, TITLE, SUB, esc(ai_name),
+                   content.replace('\n', '<br>'),
+                   TIME, ai_name, ts))
+    return '<html><body style="font-family:Segoe UI,Microsoft YaHei;' \
+        ' padding:6px;">%s</body></html>' % ''.join(parts)
+
+
+def _is_cmd_msg(content):
+    """判断消息是否为「系统操作」回显（清理上下文等）"""
+    c = (content or '').strip()
+    return c in ('clear_context', '清理上下文', '清空上下文') or \
+        c.startswith('已清理上下文') or c.startswith('已清空上下文')
+
+
 class ChatHistoryWindow(QWidget):
     """精致深色窗口，用富文本气泡列出完整对话上下文。
     用户消息右对齐(青绿)、AI 消息左对齐(白)、系统提示灰色斜体置顶；
@@ -1037,64 +1131,8 @@ class ChatHistoryWindow(QWidget):
     def show_history(self, messages, system_prompt=''):
         """根据完整消息列表重建并显示窗口。
         messages: [{'role','content','ts'}, ...]（不含 system）"""
-        esc = html.escape
-        parts = []
-
-        # 系统提示词置顶（灰斜体小字）
-        if system_prompt:
-            parts.append(
-                '<div style="color:%s; font-style:italic; font-size:11px;'
-                ' padding:4px 10px; margin:2px 6px 8px 6px;'
-                ' background:%s; border-radius:8px;">'
-                '▍系统提示词：%s</div>'
-                % (self._SYS_COLOR, self._PANEL, esc(system_prompt)))
-
-        if not messages:
-            parts.append(
-                '<div style="color:%s; text-align:center; padding:20px;">'
-                '暂无对话内容——去和桌宠聊几句吧 ✨</div>' % self._SUB)
-
-        for m in messages:
-            role = m.get('role')
-            content = (m.get('content') or '').rstrip()
-            ts = m.get('ts') or '—'
-            if role == 'user':
-                # 用户消息：右对齐、青绿块；系统操作（清理等）则居中灰字
-                if self._is_cmd(content):
-                    parts.append(
-                        '<div style="text-align:center; color:%s; font-size:11px;'
-                        ' margin:3px 0;">⚙ %s · %s</div>'
-                        % (self._SYS_COLOR, esc(content), ts))
-                    continue
-                parts.append(
-                    '<div style="text-align:right; margin:3px 2px;">'
-                    '<span style="background:%s; border:1px solid %s;'
-                    ' border-radius:10px; padding:6px 10px; color:#dcecff;'
-                    ' display:inline-block; max-width:72%%; text-align:left;">'
-                    '<span style="color:%s; font-size:10px;">%s</span><br>%s'
-                    '</span><br><span style="color:%s; font-size:9px;">%s · %s</span>'
-                    '</div>'
-                    % (self._USER_BG, self._USER_BORDER, self._SUB, esc('你'),
-                       content.replace('\n', '<br>'),
-                       self._TIME, esc('你'), ts))
-            else:
-                # AI / assistant 消息：左对齐、白块
-                ai_name = getattr(self._pet, 'role', None) or 'AI'
-                parts.append(
-                    '<div style="text-align:left; margin:3px 2px;">'
-                    '<span style="background:%s; border:1px solid %s;'
-                    ' border-radius:10px; padding:6px 10px; color:%s;'
-                    ' display:inline-block; max-width:72%%; text-align:left;">'
-                    '<span style="color:%s; font-size:10px;">%s</span><br>%s'
-                    '</span><br><span style="color:%s; font-size:9px;">%s · %s</span>'
-                    '</div>'
-                    % (self._AI_BG, self._AI_BORDER, self._TITLE, self._SUB,
-                       esc(ai_name), content.replace('\n', '<br>'),
-                       self._TIME, ai_name, ts))
+        self.browser.setHtml(_msg_html(messages, system_prompt, getattr(self, '_pet', None)))
         total = sum(len(m.get('content') or '') for m in messages)
-        self.browser.setHtml(
-            '<html><body style="font-family:Segoe UI,Microsoft YaHei;'
-            ' padding:6px;">%s</body></html>' % ''.join(parts))
         self.lbl_count.setText("%d 条" % len(messages))
         self.lbl_meta.setText(
             "用户 %d 条 · AI %d 条 · 共 %d 字"
@@ -1106,9 +1144,7 @@ class ChatHistoryWindow(QWidget):
     @staticmethod
     def _is_cmd(content):
         """判断该条是否是「系统操作」消息（清理上下文等命令回显）"""
-        c = (content or '').strip()
-        return c in ('clear_context', '清理上下文', '清空上下文') or \
-            c.startswith('已清理上下文') or c.startswith('已清空上下文')
+        return _is_cmd_msg(content)
 
     def _copy_all(self):
         from PyQt6.QtWidgets import QApplication as _A
@@ -1168,15 +1204,20 @@ class ChatHistoryWindow(QWidget):
 
 
 class ChatWindow(QWidget):
-    """迷你打字条：一小段可输入的行（历史改为桌宠旁气泡展示，不再用大窗）"""
+    """可视化聊天窗：顶部工具栏（会话下拉/新建/清理/记录/关闭），
+    中部消息流（用户消息右-右上、AI 消息左-左下），底部输入行+用量。
+    多会话：可在下拉切换保留的上下文继续聊。"""
     sendRequested = pyqtSignal(str)
     clearRequested = pyqtSignal()
     historyRequested = pyqtSignal()
+    sessionSwitchRequested = pyqtSignal(str)   # 切换会话（传会话名）
+    sessionNewRequested = pyqtSignal()          # 新建会话
 
-    # 窗口尺寸常量：带用量行高 / 隐藏用量行高
+    # 窗口尺寸常量
     W_USAGE = 470
-    H_USAGE = 70
-    H_NO_USAGE = 46
+    H_USAGE = 340        # 带消息流的主高度
+    H_NO_USAGE = 340     # 消息流始终存在，用量行仅影响底部小条
+    _H_BASE = 46         # 底部（输入+用量）行高基准
 
     def __init__(self, pet):
         super().__init__(None, Qt.WindowType.FramelessWindowHint
@@ -1188,11 +1229,9 @@ class ChatWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._drag_offset = None
         self._user_dragged = False     # 用户手动拖过 → 取消自动跟随
-        # 跟随桌宠移动（桌宠拖动时输入条贴住；用户手动拖过则停）
         self._follow = QTimer(self)
-        self._follow.setInterval(16)   # ~60fps，减延迟感
+        self._follow.setInterval(16)
         self._follow.timeout.connect(self._follow_pet)
-        # 背景直接在 self 上画（圆角外区域因透明背景而透明）
         self.setStyleSheet(
             "ChatWindow{background:rgba(24,26,34,235); border-radius:14px;"
             " border:1px solid rgba(255,255,255,60);}")
@@ -1200,27 +1239,68 @@ class ChatWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 8, 8, 6)
         root.setSpacing(3)
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        # 清理上下文按钮放在最左侧（在输入框左边）
+
+        # ---- 顶部工具行 ----
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        # 会话下拉：可切换保留的上下文
+        self.combo_session = QComboBox(self)
+        self.combo_session.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_session.setMinimumWidth(120)
+        self.combo_session.setStyleSheet(
+            "QComboBox{background:#3a4458; border:none; border-radius:9px;"
+            " color:#e8ecf8; font-size:12px; padding:4px 8px;}"
+            "QComboBox::drop-down{border:none; width:18px;}"
+            "QComboBox QAbstractItemView{background:#22262f; color:#e8ecf8;"
+            " border:none; font-size:12px;}")
+        self.combo_session.activated.connect(self._on_session_changed)
+        top.addWidget(self.combo_session)
+        self.btn_new_sess = QPushButton("＋ 新建", self)
+        self.btn_new_sess.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_new_sess.setToolTip("新建一个会话（各自保留独立上下文）")
+        self.btn_new_sess.setStyleSheet(
+            "QPushButton{background:#3a6b52; border:none; border-radius:9px;"
+            " color:#d8ffe8; font-size:12px; padding:5px 9px;}"
+            "QPushButton:hover{background:#4a8b66;}")
+        self.btn_new_sess.clicked.connect(self._new_session)
+        top.addWidget(self.btn_new_sess)
+        # 清理上下文按钮（在输入框左边，保留原接口名）
         self.btn_clear = QPushButton("清理上下文", self)
         self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear.setToolTip("清理上下文（开始全新对话，AI 不再记得之前聊的）")
+        self.btn_clear.setToolTip("清理当前会话上下文（开始全新对话，其它会话不受影响）")
         self.btn_clear.setStyleSheet(
             "QPushButton{background:#5a3d3d; border:none; border-radius:9px;"
             " color:#ffd9d9; font-size:12px; padding:5px 9px;}"
             "QPushButton:hover{background:#7a4d4d;}")
         self.btn_clear.clicked.connect(self._clear)
-        row1.addWidget(self.btn_clear)
+        top.addWidget(self.btn_clear)
+        top.addStretch(1)
+        # 记录 / 关闭
         self.btn_history = QPushButton("📜 记录", self)
         self.btn_history.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_history.setToolTip("查看完整对话上下文（本会话全部消息）")
+        self.btn_history.setToolTip("查看完整对话上下文（当前会话全部消息）")
         self.btn_history.setStyleSheet(
             "QPushButton{background:#3a4458; border:none; border-radius:9px;"
             " color:#cfd8ee; font-size:12px; padding:5px 9px;}"
             "QPushButton:hover{background:#4a5670;}")
         self.btn_history.clicked.connect(self._open_history)
-        row1.addWidget(self.btn_history)
+        top.addWidget(self.btn_history)
+        self.btn_x = CloseXButton(self)
+        self.btn_x.clicked.connect(self.hide)
+        top.addWidget(self.btn_x)
+        root.addLayout(top)
+
+        # ---- 中部：消息流（用户右侧、AI 左侧） ----
+        self.browser = QTextBrowser(self)
+        self.browser.setStyleSheet(
+            "QTextBrowser{background:rgba(255,255,255,4); border:none;"
+            " color:#e6e8f0; font-size:13px;}")
+        self.browser.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        root.addWidget(self.browser, 1)
+
+        # ---- 底部：输入行 ----
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
         self.input = QLineEdit(self)
         self.input.setPlaceholderText("问桌宠…（回车发送，Esc 关闭）")
         self.input.setStyleSheet(
@@ -1238,18 +1318,49 @@ class ChatWindow(QWidget):
             "QPushButton:disabled{background:#4a4f63;}")
         self.btn_send.clicked.connect(self._send)
         row1.addWidget(self.btn_send)
-        self.btn_x = CloseXButton(self)
-        row1.addWidget(self.btn_x)
-        self.btn_x.clicked.connect(self.hide)
         root.addLayout(row1)
-        # 第二行：单次 token 消耗 + 金额（深色底小字）
+
+        # 用量行（单次 token 消耗 + 金额）
         self.lbl_usage = QLabel(self)
         self.lbl_usage.setText("")
         self.lbl_usage.setStyleSheet(
             "color:#8fa3c8; font-size:11px; background:rgba(255,255,255,6);"
             " border-radius:6px; padding:1px 8px;")
         root.addWidget(self.lbl_usage)
-        self.setFixedSize(self.W_USAGE, self.H_USAGE)
+
+        self.setFixedWidth(self.W_USAGE)
+        self.setFixedHeight(self.H_USAGE)
+
+    # ---- 会话下拉 ----
+    def set_sessions(self, names, current):
+        """填充会话下拉列表；names 为全部会话名，current 为当前选中。"""
+        try:
+            self.combo_session.blockSignals(True)
+            self.combo_session.clear()
+            self.combo_session.addItems(names)
+            if current in names:
+                self.combo_session.setCurrentText(current)
+            self.combo_session.blockSignals(False)
+        except Exception:
+            pass
+
+    def _on_session_changed(self, idx):
+        name = self.combo_session.currentText()
+        if name:
+            self.sessionSwitchRequested.emit(name)
+
+    def _new_session(self):
+        self.sessionNewRequested.emit()
+
+    # ---- 消息流展示 ----
+    def set_content(self, messages, system_prompt='', ai_name='AI'):
+        """渲染当前会话消息流到中部浏览器；消息多时滚动到底部。"""
+        try:
+            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet))
+        except Exception:
+            self.browser.setHtml('')
+        sb = self.browser.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # 窗口拖动（按住空白/输入框外区域）——拖动后取消自动跟随
     def mousePressEvent(self, e):
@@ -1301,7 +1412,6 @@ class ChatWindow(QWidget):
 
     # ---------- 交互 ----------
     def keyPressEvent(self, e):
-        # Esc 关闭迷你条
         if e.key() == Qt.Key.Key_Escape:
             self.hide()
             e.accept()
@@ -1316,7 +1426,7 @@ class ChatWindow(QWidget):
         self.sendRequested.emit(text)
 
     def set_busy(self, busy):
-        # 迷你条：思考中时输入框禁用、按钮变灰
+        # 思考中时输入框与发送禁用、按钮变灰
         self.input.setEnabled(not busy)
         self.btn_send.setEnabled(not busy)
         self.btn_send.setText("…" if busy else "发送")
@@ -1346,7 +1456,7 @@ class ChatWindow(QWidget):
         super().hideEvent(ev)
 
     def _clear(self):
-        """清理上下文按钮"""
+        """清理上下文按钮（清空当前会话）"""
         self.clearRequested.emit()
 
     def _open_history(self):
@@ -1360,11 +1470,9 @@ class ChatWindow(QWidget):
         if text:
             self.lbl_usage.setText(text)
             self.lbl_usage.show()
-            self.setFixedSize(self.W_USAGE, self.H_USAGE)
         else:
             self.lbl_usage.setText("")
             self.lbl_usage.hide()
-            self.setFixedSize(self.W_USAGE, self.H_NO_USAGE)
 
 
 # ============================================================================
@@ -1382,7 +1490,13 @@ class AiChatManager(QObject):
         self._chat = None
         self._history = None
         self._bubble = None
-        self._messages = []           # 多轮上下文（不含 system，由发送时补）
+        # ---------- 多会话上下文 ----------
+        # 每个会话独立保留自己的消息历史；_messages 指向当前会话（兼容既有调用）
+        self._sessions = {}            # 会话名 -> 消息列表
+        self._session_order = []       # 会话名列表（保序）
+        self._session_cur = '默认会话'  # 当前会话名
+        self._default_session_name()
+        self._messages = self._sessions[self._session_cur]
         self._ai_worker = None
         self._tts_worker = None
         self._rewrite_worker = None
@@ -1427,6 +1541,96 @@ class AiChatManager(QObject):
     def default_system_prompt():
         return ('你是桌宠「卡丘」里的 AI 小伙伴，活泼友善，'
                 '回答简洁亲切，用中文。')
+
+    # ------------- 多会话上下文 -------------
+    def _default_session_name(self):
+        """默认会话名：若还没有则初始化为「默认会话」"""
+        if not self._sessions:
+            self._sessions['默认会话'] = []
+            self._session_order = ['默认会话']
+            self._session_cur = '默认会话'
+
+    def _push_session(self, name):
+        """确保存在名为 name 的会话；不存在则创建并追加到顺序"""
+        if name not in self._sessions:
+            self._sessions[name] = []
+            self._session_order.append(name)
+        return self._sessions[name]
+
+    def session_names(self):
+        return list(self._session_order)
+
+    def current_session(self):
+        return self._session_cur
+
+    def new_session(self, name=None):
+        """新建一个会话并切换过去；name 缺省生成带时间的名称。
+        返回会话名。"""
+        if not name:
+            n = len(self._session_order) + 1
+            while ('会话%d' % n) in self._sessions:
+                n += 1
+            name = '会话%d' % n
+        name = (name or '').strip() or '会话'
+        # 重名则加序号
+        base = name
+        k = 2
+        while name in self._sessions:
+            name = '%s(%d)' % (base, k)
+            k += 1
+        self._push_session(name)
+        self._session_cur = name
+        self._messages = self._sessions[name]
+        self._last_usage = {}
+        self._sync_ui_to_current()
+        return name
+
+    def switch_session(self, name):
+        """切换到已有会话（保留各自上下文）"""
+        if name not in self._sessions:
+            return False
+        self._session_cur = name
+        self._messages = self._sessions[name]
+        self._last_usage = {}
+        self._sync_ui_to_current()
+        return True
+
+    def _sync_ui_to_current(self):
+        """把当前会话刷到聊天窗与历史窗（若开着）"""
+        try:
+            if self._chat is not None:
+                self._chat.set_sessions(self.session_names(), self._session_cur)
+                self._chat.set_content(self._messages, self.system_prompt())
+                self._chat.set_usage('')
+        except Exception:
+            pass
+        try:
+            self._refresh_history_if_open()
+        except Exception:
+            pass
+
+    def clear_context(self):
+        """清理当前会话上下文（开始全新对话；其它会话不受影响）"""
+        self._messages = []
+        self._last_usage = {}
+        if self._chat is not None:
+            try:
+                self._chat.set_usage('')
+            except Exception:
+                pass
+            try:
+                self._chat.set_content([], self.system_prompt())
+            except Exception:
+                pass
+        # 历史窗实时刷新（清空后同步为空）
+        try:
+            self._refresh_history_if_open()
+        except Exception:
+            pass
+        try:
+            self._show_bubble('已清理当前会话，开始全新对话 ✨')
+        except Exception:
+            pass
 
     # ------------- 配置 -------------
     def cfg(self):
@@ -1739,10 +1943,24 @@ class AiChatManager(QObject):
                      tts_api_ref=ref, tts_api_ref_text=ref_text,
                      tts_api_instruction=instruction)
 
+    # 口语化规则（无论用户自定义什么系统提示词都会强制追加，
+    # 目的是让模型输出适合直接语音朗读的口语，少书面拟声词）
+    SPOKEN_RULES = (
+        '说话务必口语自然，像朋友发语音那样：短句为主、语气亲和、'
+        '少书面语、别列编号清单；'
+        '避免“嘻嘻”“嘤嘤”“嘿嘿嘿”这类拗口或易被语音念怪的叠字拟声，'
+        '要笑就写顺口的“哈哈”“嘿嘿”；'
+        '数字与英文按口语读出（18→十八、GPT→G P T），方便语音朗读。'
+    )
+
     def system_prompt(self):
-        """当前系统提示词（用户可自定义，存配置 ai.system_prompt）"""
-        return (self.cfg().get('system_prompt') or '').strip() \
+        """当前系统提示词 = 用户人设 + 口语化规则（统一强制追加）"""
+        base = (self.cfg().get('system_prompt') or '').strip() \
             or self.default_system_prompt()
+        rules = self.SPOKEN_RULES
+        if base and rules in base:
+            return base
+        return base + ('\n' if base else '') + rules
 
     def set_system_prompt(self, text):
         _save_ai_cfg(system_prompt=text.strip())
@@ -1754,9 +1972,13 @@ class AiChatManager(QObject):
             情绪：<简短中文情绪/语气描述，10 字内>
             朗读：<改写后适合朗读的文本>
         情绪行会作为本地 TTS 引擎的 instruction（说话情绪），真正"模型自动补齐情绪"。"""
-        return ('你是一名语音播报助手。请把下面这段文字改写成适合语音朗读的版本：'
-                '口语自然、句子完整通顺，去掉 markdown 符号、列表序号、表情符号和链接，'
-                '数字与英文按口语习惯读出，保留原意和关键信息。'
+        return ('你是一名中文语音播报助手。请把下面这段文字改写成最适合语音朗读的版本：'
+                '必须口语自然、像真人说话，句子完整通顺；'
+                '去掉所有 markdown 符号、列表序号、表情符号、链接、括号注释；'
+                '把难念的书面词换成顺口说法，把“嘻嘻”“嘤嘤”“嘿嘿嘿”这类拟声'
+                '（尤其叠字怪音）改写成自然的笑法或直接删掉，宁可简短也别拗口；'
+                '数字与英文按口语习惯读出（18→十八、AI→A I、GPT→G P T）；'
+                '不要用语气词堆砌。保留原意和关键信息。'
                 '同时根据这段文字的语气，判断朗读时应该带有的情绪/语气'
                 '（如：开心雀跃、难过低落、生气抱怨、平静温柔、撒娇俏皮、焦急担心等）。'
                 '严格按以下两行格式输出，不要输出任何其它内容或解释：\n'
@@ -1817,16 +2039,28 @@ class AiChatManager(QObject):
             self._chat.sendRequested.connect(self._on_send)
             self._chat.clearRequested.connect(self.clear_context)
             self._chat.historyRequested.connect(self.show_history)
-            # 打开时把已保存的用量显示同步上去
-            try:
-                self._sync_chat_usage()
-            except Exception:
-                pass
+            self._chat.sessionSwitchRequested.connect(self.switch_session)
+            self._chat.sessionNewRequested.connect(self._new_session_from_ui)
+        # 每次打开都同步会话列表 + 当前消息流到聊天窗
+        try:
+            self._chat.set_sessions(self.session_names(), self._session_cur)
+            self._chat.set_content(self._messages, self.system_prompt())
+        except Exception:
+            pass
+        # 打开时把已保存的用量显示同步上去
+        try:
+            self._sync_chat_usage()
+        except Exception:
+            pass
         self._chat.show_near(self._pet.frameGeometry())
         self._chat.show()
         self._chat.raise_()
         self._chat.activateWindow()
         self._chat.input.setFocus()
+
+    def _new_session_from_ui(self):
+        """聊天窗「＋新建」按钮 → 新建会话并切换"""
+        self.new_session()
 
     def show_history(self):
         """点「📜 记录」：弹出完整对话上下文窗口并跟随桌宠"""
@@ -1876,22 +2110,12 @@ class AiChatManager(QObject):
         except Exception:
             pass
 
-    def clear_context(self):
-        """清理多轮上下文（开始全新对话）"""
-        self._messages = []
-        self._last_usage = {}
-        if self._chat is not None:
-            try:
-                self._chat.set_usage('')
-            except Exception:
-                pass
-        # 历史窗实时刷新（清空后同步为空）
+    def _refresh_chat_if_open(self):
+        """消息有变化时：若可视化聊天窗可见则实时刷新消息流（不用重开/切会话）"""
+        if self._chat is None or not self._chat.isVisible():
+            return
         try:
-            self._refresh_history_if_open()
-        except Exception:
-            pass
-        try:
-            self._show_bubble('已清理上下文，开始全新对话 ✨')
+            self._chat.set_content(self._messages, self.system_prompt())
         except Exception:
             pass
 
@@ -1954,9 +2178,13 @@ class AiChatManager(QObject):
         # 本地完整上下文：带时间戳（供「完整对话」窗口展示）
         self._messages.append({'role': 'user', 'content': text,
                                'ts': time.strftime('%H:%M:%S')})
-        # 实时刷新历史窗（若开着：立刻能看到自己刚发的消息）
+        # 实时刷新历史窗与可视化聊天窗（若开着：立刻能看到自己刚发的消息）
         try:
             self._refresh_history_if_open()
+        except Exception:
+            pass
+        try:
+            self._refresh_chat_if_open()
         except Exception:
             pass
         self._ai_worker = AIWorker(base_url, api_key, model, msgs, self)
@@ -2000,8 +2228,9 @@ class AiChatManager(QObject):
         if self._chat is not None:
             self._chat.set_busy(False)
         self._ai_worker = None
-        self._hide_thinking()
         if err:
+            # 出错：结束等待，改为显示错误提示
+            self._hide_thinking()
             self._bubble_msg('AI 请求失败：%s\n（检查 设置→AI 的服务器/密钥/模型）' % err)
             return
         usage = usage or {}
@@ -2012,9 +2241,13 @@ class AiChatManager(QObject):
             pass
         self._messages.append({'role': 'assistant', 'content': reply,
                                'ts': time.strftime('%H:%M:%S')})
-        # 实时刷新历史窗（若开着：自动补上 AI 新回复，无需重开）
+        # 实时刷新历史窗与可视化聊天窗（若开着：自动补上 AI 新回复，无需重开）
         try:
             self._refresh_history_if_open()
+        except Exception:
+            pass
+        try:
+            self._refresh_chat_if_open()
         except Exception:
             pass
         # TTS 依附 AI：若朗读开，则气泡文字等音频就绪后随音频同步蹦字（同始同终）
@@ -2025,11 +2258,14 @@ class AiChatManager(QObject):
                 self._player.stop()
             except Exception:
                 pass
-            # 朗读合成期间先显示"思考中…"，音频就绪播放时再随音频逐字蹦
-            self._show_thinking()
+            # 三点【保持连续】：AI 请求→朗读改写→音频合成整条等待期不中断，
+            # 直到音频真正开始播放才结束（见 _on_tts_done）
+            if self._bubble is not None and not self._bubble._think_timer.isActive():
+                self._show_thinking()
             self._rewrite_for_tts(reply, self._seq)
         else:
-            # 不朗读 → 立即逐字蹦字显示
+            # 不朗读 → 结束等待，立即逐字蹦字显示
+            self._hide_thinking()
             self._show_bubble(reply)
             if self.tts_enabled() and not self.enabled():
                 # AI 对话被关但 tts_enabled 仍开（历史配置）→ 不朗读
@@ -2105,7 +2341,14 @@ class AiChatManager(QObject):
         self._speak_text(speak, seq, emo)
 
     def _speak_text(self, text, seq, instruction=''):
-        if self._player is None or seq != getattr(self, '_pending_tts_seq', 0):
+        if self._player is None:
+            # 无播放器（多媒体初始化失败）→ 不能朗读，回退直接蹦字，避免永远等
+            if seq == getattr(self, '_pending_tts_seq', 0):
+                self._hide_thinking()
+                if text:
+                    self._show_bubble(text)
+            return
+        if seq != getattr(self, '_pending_tts_seq', 0):
             return
         cfg = self.cfg()
         voice = (cfg.get('tts_api_voice') or cfg.get('tts_voice') or 'alloy')
@@ -2130,17 +2373,57 @@ class AiChatManager(QObject):
             gain_path = self.gain_wav_if_needed(path, vol)
         # 音频时长（同步蹦字用；失败回退默认间隔）
         dur_ms = self._wav_duration_ms(gain_path)
-        # 文字随音频同步：按音频实际时长逐字蹦（同始同终）
         pending_text = (getattr(self, '_synced_text', '') or '').strip()
         self._synced_text = ''
-        if pending_text:
-            if self._bubble is not None:
-                self._bubble._stop_thinking()
-            self._get_bubble().show_text_synced(pending_text, dur_ms)
-        else:
-            self._hide_thinking()
+        # 先把音频接上、启动播放（音频真正出声的起点）
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(gain_path))
+        # 三点保持到【音频真正开始播放】那一刻，而不是音频刚就绪——
+        # 否则会出现"三点消失→文字先蹦→声音迟个几百ms才来"的错位感。
+        # 监听一次播放状态：进入 PlayingState 才蹦字。
+        revealed = {'done': False}
+        def _on_state(state):
+            if revealed['done']:
+                return
+            if state == QMediaPlayer.PlaybackState.PlayingState:
+                revealed['done'] = True
+                try:
+                    # 主动断开监听（避免后续状态再触发）
+                    self._player.playbackStateChanged.disconnect(_on_state)
+                except Exception:
+                    pass
+                # 音频开始出声 → 结束三点，文字随音频逐字蹦
+                if pending_text:
+                    if self._bubble is not None:
+                        self._bubble._stop_thinking()
+                    try:
+                        self._get_bubble().show_text_synced(pending_text, dur_ms)
+                    except Exception:
+                        self._hide_thinking()
+                else:
+                    self._hide_thinking()
+        try:
+            self._player.playbackStateChanged.connect(_on_state)
+        except Exception:
+            pass
+        # 兜底：若播放状态信号迟迟不来（极慢/异常），等待一小段后仍蹦字
+        def _fallback():
+            if not revealed['done']:
+                revealed['done'] = True
+                try:
+                    self._player.playbackStateChanged.disconnect(_on_state)
+                except Exception:
+                    pass
+                if pending_text:
+                    if self._bubble is not None:
+                        self._bubble._stop_thinking()
+                    try:
+                        self._get_bubble().show_text_synced(pending_text, dur_ms)
+                    except Exception:
+                        pass
+                else:
+                    self._hide_thinking()
+        QTimer.singleShot(1200, _fallback)
         self._player.play()
         # 播完（或超时）后清理临时文件
         def _cleanup():

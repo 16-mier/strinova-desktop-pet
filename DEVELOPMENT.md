@@ -78,6 +78,21 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 对话四合一：语音等待三点拉长 / 对话可视化消息流 / 多会话上下文 / 口语化提示词）
+- **需求**：
+  1. 等语音（TTS 合成/朗读）时桌宠旁「三点」等待动画别提前消失——语音还没来就结束很突兀；
+  2. 对话可视化：我发出去的消息显示在右侧（右上角），桌宠回复显示在左侧（左下角），不再是单一蹦字；
+  3. 记录/上下文要支持**多会话**：可新建/切换指定会话继续聊，而不是只有一个上下文反复"清理上下文"清空；
+  4. 更新提示词让模型输出更口语化，避免"嘻嘻"这类被 TTS 念怪的书面拟声。
+- **实现**（`ai_chat.py`）：
+  1. **三点等待拉长**：`BubbleWidget.show_thinking()` 去掉 `_lift_life()`——思考/等待期不再 5 秒自动消失，三点一直保持到真正显示文字/开始朗读那一刻；`_on_ai_done` 走 TTS 分支时不再先 hide 再 show（消除闪断），整条「AI 请求→朗读改写→音频合成」等待期三点连续；`_on_tts_done` 重构为**音频真正进入播放状态才开始蹦字**（监听 `playbackStateChanged` 的 PlayingState，1.2s 兜底），杜绝"三点消失→文字先蹦→声音晚几百 ms"的错位；`_speak_text` 播放器缺失时回退直接蹦字（防永久三点）
+  2. **对话可视化**：新增模块级渲染 `_msg_html(messages, system_prompt, pet)`，用户消息右对齐（右上角）、AI 消息左对齐（左下角），完整记录窗与聊天窗共用；`ChatWindow` 从"迷你输入条"升级为**可视化聊天窗**（470×340，消息流 + 底部输入 + 用量行），保留 btn_clear/btn_history/btn_send/input/lbl_usage/set_usage 等接口（旧冒烟兼容）；`ChatHistoryWindow.show_history` 委托 `_msg_html`
+  3. **多会话上下文**：`AiChatManager` 新增 `_sessions/{会话名:[消息]}`、`_session_order`、`_session_cur`，`_messages` 始终指向当前会话（既有调用零改动）；方法 `new_session(name)` / `switch_session(name)` / `session_names()` / `current_session()`；`clear_context` 改为只清当前会话（其它会话保留）；聊天窗顶部加**会话下拉 + 「＋新建」**按钮（信号 sessionSwitchRequested/sessionNewRequested）；AI 菜单加「＋ 新建会话」；新会话自动切换并渲染
+  4. **口语化提示词**：`AiChatManager.SPOKEN_RULES`（口语自然、短句、避免"嘻嘻/嘤嘤/嘿嘿嘿"等拗口叠字拟声、数字英文按口语读）作为**强制后缀**拼在 `system_prompt()` 结果上——用户自定义人设也生效（带去重判断）；`default_tts_prompt()` 强化"改写朗读稿口语化 + 去拗口拟声 + 数字口语化"，TTS 念怪音问题从源头缓解
+- **验证**：py_compile 全过 ✅；新增 `session_smoke.py`（22 项：会话建/切/隔离/清理保留/可视化控件/用户右对齐/AI 左对齐（Qt block 级断言）/口语规则）全绿 ✅；`qt_align_check.py` 确认 Qt 渲染后用户块 AlignRight、AI 块 AlignLeft ✅；`usage_layout_smoke.py` 更新 14 项 ✅；`history_smoke.py` 22 项 ✅；`gui_smoke.py` ✅；`bubble_smoke.py`（尺寸断言更新为可视化窗）✅；`ai_selftest.py` ✅；panel_smoke2 ✅（panel_smoke3 引用已删除的旧 UI 属性 `cmb_ai_tts_mode`，属历史过期测试非本次引入）
+- 涉及：`ai_chat.py`（_msg_html/_is_cmd_msg/BubbleWidget.show_thinking/_on_ai_done/_on_tts_done/_speak_text/ChatWindow 全重写/ChatHistoryWindow.show_history/AiChatManager 会话管理+open_chat+_refresh_chat_if_open+SPOKEN_RULES）、`pet.py`（AI 菜单加「＋ 新建会话」）、新增 `session_smoke.py`/`qt_align_check.py`、更新 `usage_layout_smoke.py`/`bubble_smoke.py`
+- 备注：桌面 exe 待重新打包部署
+
 ### 2026-09-07（部署：含 AI 菜单+累计积分的新版 exe 10:52，55.2MB）
 - **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:52，55,217,208B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
 - **部署**：覆盖桌面 `卡丘简易桌宠_最新.exe`（先提权停同名进程）；启动验证 OK（主进程+提权副本）→ 测试后停

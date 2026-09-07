@@ -77,10 +77,11 @@ ok = []
 # 1. 打开迷你条
 mgr.open_chat()
 app.processEvents()
-ok.append(('迷你条创建且可见', mgr._chat is not None and mgr._chat.isVisible()))
-ok.append(('迷你条尺寸小', mgr._chat.width() <= 360 and mgr._chat.height() <= 60))
+ok.append(('聊天窗创建且可见', mgr._chat is not None and mgr._chat.isVisible()))
+ok.append(('聊天窗为可视化消息窗(宽470高340)', mgr._chat.width() == 470 and mgr._chat.height() == 340))
 ok.append(('有关闭按钮(自绘)', hasattr(mgr._chat, 'btn_x')))
 ok.append(('无大历史框', not hasattr(mgr._chat, 'history')))
+ok.append(('有消息流 browser', hasattr(mgr._chat, 'browser')))
 
 # 2. 思考动画
 mgr._show_thinking()

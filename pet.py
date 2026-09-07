@@ -2253,6 +2253,11 @@ class PetWindow(QWidget):
         act_chat.triggered.connect(lambda _c: ai.open_chat())
         menu.addAction(act_chat)
 
+        act_new = QAction("＋ 新建会话", menu)
+        act_new.setToolTip("新建一个独立会话（各自保留上下文，可切换继续聊）")
+        act_new.triggered.connect(lambda _c: ai.new_session())
+        menu.addAction(act_new)
+
         act_hist = QAction("📜 完整对话记录", menu)
         act_hist.triggered.connect(lambda _c: ai.show_history())
         menu.addAction(act_hist)

@@ -61,19 +61,18 @@ cw = mgr._chat
 ck("聊天窗已创建", cw is not None)
 ck("清理上下文按钮文案 = '清理上下文'", cw.btn_clear.text() == "清理上下文")
 ck("清理上下文提示含'全新对话'", "全新对话" in cw.btn_clear.toolTip())
+ck("聊天窗有清楚/记录/发送/关闭按钮", hasattr(cw, 'btn_clear') and hasattr(cw, 'btn_history')
+   and hasattr(cw, 'btn_send') and hasattr(cw, 'btn_x'))
+ck("聊天窗有会话下拉与新建", hasattr(cw, 'combo_session') and hasattr(cw, 'btn_new_sess'))
+ck("聊天窗有消息流 browser", hasattr(cw, 'browser'))
 
-# 验证按钮在最左：取第一行 layout 的 widget 顺序
-row = cw.findChildren(type(cw.btn_clear.parent().layout().itemAt(0).widget()))
-ly = cw.layout().itemAt(0).layout()  # root(QVBoxLayout).itemAt(0) 是 row1
-w0 = ly.itemAt(0).widget()
-ck("第一行第一个控件是 btn_clear(清理上下文)", w0 is cw.btn_clear)
-
-# 尺寸
+# 尺寸（可视化聊天窗固定宽 470，消息流为主区）
 ck("初始宽度=470", cw.width() == 470)
+ck("高度为可视化消息窗高度(340)", cw.height() == 340)
 cw.set_usage("本次 ↑100[缓存50] ↓20 共120 tok ≈ $0.000010")
-ck("有用量时高度=70", cw.height() == 70)
+ck("有用量时用量行可见", cw.lbl_usage.isVisible() and cw.lbl_usage.text().startswith("本次"))
 cw.set_usage("")
-ck("隐藏用量时高度=46", cw.height() == 46)
+ck("隐藏用量时用量行隐藏", not cw.lbl_usage.isVisible())
 
 # usage 文本含缓存
 mgr.cfg = lambda: {'ai_price_in': 0.14, 'ai_price_out': 0.28, 'ai_price_cache': 0.0028}
