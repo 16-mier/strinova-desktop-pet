@@ -80,7 +80,7 @@ mgr.cfg = lambda: {'ai_price_in': 0.14, 'ai_price_out': 0.28, 'ai_price_cache': 
 u = {'prompt_tokens': 1000, 'completion_tokens': 200, 'total_tokens': 1200,
      'prompt_cache_hit_tokens': 400, 'prompt_cache_miss_tokens': 600}
 txt = mgr._usage_text(u)
-ck("usage 文本含缓存命中标记 [缓存400]", "[缓存400]" in txt)
+ck("usage 文本含缓存读取标记 [缓存读400]", "[缓存读400]" in txt)
 cost, desc = mgr.calc_cost(u)
 # 手算：未命中600×0.14/1e6 + 命中400×0.0028/1e6 + 输出200×0.28/1e6
 expect = 600*0.14/1e6 + 400*0.0028/1e6 + 200*0.28/1e6

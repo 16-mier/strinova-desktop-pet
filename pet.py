@@ -1610,6 +1610,11 @@ class PetWindow(QWidget):
         self.setFixedSize(size, size)
         if cx is not None:
             self.move(cx - size // 2, cy - size // 2)
+            try:
+                if self.ai is not None:
+                    self.ai.pet_moved()
+            except Exception:
+                pass
         # 静态角色：从原图直接重缩放（丝滑）；动图角色：重建 QMovie（帧尺寸跟随）
         if self._movie is None and self._src_pixmap is not None and not self._src_pixmap.isNull():
             pm = self._src_pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
@@ -1993,6 +1998,11 @@ class PetWindow(QWidget):
         act_switch.setMenu(self._switch_submenu)   # 关联子菜单 → 原生"指向即开"
         menu.addAction(act_switch)
 
+        # ①-AI 对话子菜单（打开对话/记录/清理/用量积分；三横与托盘共用）
+        act_ai = QAction("AI（对话·用量）", menu)
+        act_ai.setMenu(self._build_ai_menu(menu))
+        menu.addAction(act_ai)
+
         # ② 绑定麦克风/输出（给队友听）: 右扩设备列表
         act_bind = QAction("绑定麦克风（队友听）", menu)
         act_bind.setMenu(self._build_device_submenu('bind'))
@@ -2221,6 +2231,78 @@ class PetWindow(QWidget):
                 self.update()
         menu.aboutToHide.connect(on_hidden)
         menu.popup(anchor)
+
+    # ---------- AI 子菜单（右键/三横/托盘共用） ----------
+    def _build_ai_menu(self, parent):
+        """构建 AI 子菜单（三横/托盘/右键共用）：
+        💬 打开对话 / 📜 完整对话 / 🧹 清理上下文 / 📊 用量·积分
+        AI 未启用 → 整项置灰并提示去设置开启。"""
+        ai = getattr(self, 'ai', None)
+        enabled = ai is not None and ai.enabled()
+        menu = QMenu(parent)
+        menu.setStyleSheet(MENU_QSS)
+        menu.setTitle("AI")
+
+        if not enabled:
+            act_off = QAction("AI 未启用（去 设置→AI 开启）", menu)
+            act_off.setEnabled(False)
+            menu.addAction(act_off)
+            return menu
+
+        act_chat = QAction("💬 打开 AI 对话", menu)
+        act_chat.triggered.connect(lambda _c: ai.open_chat())
+        menu.addAction(act_chat)
+
+        act_hist = QAction("📜 完整对话记录", menu)
+        act_hist.triggered.connect(lambda _c: ai.show_history())
+        menu.addAction(act_hist)
+
+        act_clear = QAction("🧹 清理上下文", menu)
+        act_clear.triggered.connect(lambda _c: ai.clear_context())
+        menu.addAction(act_clear)
+
+        menu.addSeparator()
+
+        # 用量·积分（仅展示不可点）
+        try:
+            stxt = ai.stats_short()
+            act_stats = QAction("📊 用量·积分：" + stxt, menu)
+        except Exception:
+            act_stats = QAction("📊 用量·积分", menu)
+        act_stats.setEnabled(False)
+        act_stats.setToolTip("累计对话 token 消耗统计")
+        menu.addAction(act_stats)
+
+        # 详情弹气泡（复用 manager 的提示气泡展示完整统计）
+        act_detail = QAction("📈 查看统计详情", menu)
+        act_detail.triggered.connect(lambda _c: self._show_ai_stats_detail(ai))
+        menu.addAction(act_detail)
+        return menu
+
+    def _popup_ai_menu(self, gpos):
+        """右键桌宠弹出 AI 快捷菜单（直接展示 AI 项，不包「AI」标题）"""
+        ai = getattr(self, 'ai', None)
+        if ai is None or not ai.enabled():
+            return
+        menu = self._build_ai_menu(self)
+        # 右键已确定 AI 启用，去掉可能出现的"未启用"提示项
+        for a in menu.actions():
+            if a.text().startswith('AI 未启用'):
+                menu.removeAction(a)
+        self._active_menu = menu
+        self._hide_timer.stop()
+        self._hovering = False
+        self.update()
+        menu.popup(gpos)
+
+    def _show_ai_stats_detail(self, ai):
+        """在桌宠旁气泡展示完整用量统计"""
+        try:
+            txt = ai.stats_text()
+            if hasattr(ai, '_bubble_msg'):
+                ai._bubble_msg('📊 ' + txt.replace('\n', ' · '))
+        except Exception:
+            pass
 
     def switch_role(self, role):
         self.load_role(role)
@@ -2638,12 +2720,14 @@ class PetWindow(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.RightButton:
-            # 右键桌宠：AI 对话开启时打开聊天窗（否则仍走默认什么都不做）
+            # 右键桌宠：AI 启用时弹 AI 快捷菜单（对话/记录/清理/用量），未启用则无操作
             ai = getattr(self, 'ai', None)
             if ai is not None and ai.enabled():
-                ai.open_chat()
+                self._popup_ai_menu(e.globalPosition().toPoint())
                 e.accept()
                 return
+            e.accept()
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             lp = e.position().toPoint()
             if self._hovering and self._on_menu_btn(lp):
@@ -2671,6 +2755,12 @@ class PetWindow(QWidget):
                 ny = cur.y() - self._drag_offset.y()
                 nx, ny = self._clamp_to_screen(nx, ny)
                 self.move(nx, ny)
+                # 拖动时气泡/输入条同步跟移（零轮询延迟，一体感）
+                try:
+                    if self.ai is not None:
+                        self.ai.pet_moved()
+                except Exception:
+                    pass
                 # 拖动时实时更新朝向（左半屏脸朝右 / 右半屏脸朝左）
                 self._update_facing()
                 # 拖动时同步更新 hover/按钮高亮

@@ -1629,8 +1629,8 @@ class AiChatManager(QObject):
         cost, _d = self.calc_cost(usage)
         tag = self._peak_tag()
         if pcache:
-            return '本次 ↑%d[缓存%d] ↓%d 共%d tok  ≈ $%.4f%s' % (pin, pcache, pout, total, cost, tag)
-        return '本次 ↑%d ↓%d 共%d tok  ≈ $%.4f%s' % (pin, pout, total, cost, tag)
+            return '本次 输入↑%d[缓存读%d] 输出↓%d 共%d tok ≈ $%.4f%s' % (pin, pcache, pout, total, cost, tag)
+        return '本次 输入↑%d 输出↓%d 共%d tok ≈ $%.4f%s' % (pin, pout, total, cost, tag)
 
     def _sync_chat_usage(self):
         """把上次用量显示到聊天条（打开聊天窗时恢复）"""
@@ -1643,7 +1643,7 @@ class AiChatManager(QObject):
                 pass
 
     def _show_usage(self, usage):
-        """AI 回复后：更新用量/金额到聊天条并记录累计"""
+        """AI 回复后：更新用量/金额到聊天条并累计到会话统计"""
         self._last_usage = usage or {}
         if self._chat is not None and hasattr(self._chat, 'set_usage'):
             try:
@@ -1651,6 +1651,65 @@ class AiChatManager(QObject):
                     self._chat.set_usage(self._usage_text(self._last_usage))
             except Exception:
                 pass
+        # 累计到会话统计（积分）
+        try:
+            self._accumulate_usage(usage)
+        except Exception:
+            pass
+
+    # ------------- 用量统计（积分） -------------
+    def _load_stats(self):
+        """读取累计用量统计（含最近会话），不存在则空"""
+        s = self.cfg().get('stats') or {}
+        if not isinstance(s, dict):
+            s = {}
+        stats = {'in': 0, 'cache': 0, 'out': 0, 'cost': 0.0, 'n': 0}
+        stats.update({k: s.get(k, 0) for k in stats})
+        try:
+            stats['cost'] = float(stats['cost'])
+        except Exception:
+            stats['cost'] = 0.0
+        return stats
+
+    def _save_stats(self, stats):
+        _save_ai_cfg(stats=stats)
+
+    def _accumulate_usage(self, usage):
+        """把一次用量的 token/金额累加进持久化统计（积分）"""
+        usage = usage or {}
+        try:
+            pin = int(usage.get('prompt_tokens') or 0)
+            pcache = int(usage.get('prompt_cache_hit_tokens') or 0)
+            pout = int(usage.get('completion_tokens') or 0)
+        except Exception:
+            pin = pout = pcache = 0
+        pcache = min(pcache, pin) if pin else 0
+        if not (pin or pout):
+            return
+        cost, _d = self.calc_cost(usage)
+        st = self._load_stats()
+        st['in'] += pin
+        st['cache'] += pcache
+        st['out'] += pout
+        st['cost'] += cost
+        st['n'] += 1
+        self._save_stats(st)
+
+    def stats_text(self):
+        """累计用量统计文案（用于右键菜单「用量·积分」展示）"""
+        st = self._load_stats()
+        total = st['in'] + st['out']
+        return ('累计对话 %d 次\n'
+                '累计输入 %d tok（其中缓存读取 %d）\n'
+                '累计输出 %d tok\n'
+                '累计消耗 ≈ $%.4f'
+                % (st['n'], st['in'], st['cache'], st['out'], st['cost']))
+
+    def stats_short(self):
+        """一行简版：'N次 · 输入X·缓存Y·输出Z tok · $F'（菜单项前缀用）"""
+        st = self._load_stats()
+        return '%d次 · ↑%d[缓存%d] ↓%d · $%.4f' % (
+            st['n'], st['in'], st['cache'], st['out'], st['cost'])
 
     @staticmethod
     def gain_wav_if_needed(path, volume):

@@ -78,6 +78,22 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 对话支持上下文选项菜单 + 每次对话 token 分类统计累计积分）
+- **需求（用户）**：①每次对话要知道输入/输出/缓存读取各用了多少 token 并**单独累计成积分**；②把上下文操作做成**可选的菜单**入口
+- **确认（用户选 A/B）**：A=分类显示+累计积分；B=加到右键菜单，且三处（右键/三横/托盘）都加 AI 子菜单
+- **实现**（`ai_chat.py`）：
+  1. **本次用量文案更清晰**：`_usage_text` → 「本次 输入↑N[缓存读N] 输出↓N 共N tok ≈ $金额」（输入/缓存读取/输出三类分开）
+  2. **累计积分**：新增 `_load_stats/_save_stats/_accumulate_usage`——`_show_usage` 每次回复后把 `prompt_tokens/prompt_cache_hit_tokens/completion_tokens/金额/次数` 累加进 `ai.stats`（{in,cache,out,cost,n}，持久化，清理上下文不重置）；`stats_text()` 完整文案「累计对话 N 次/累计输入 X（其中缓存读取 Y）/累计输出 Z/累计消耗 $F」；`stats_short()` 一行简版
+- **实现**（`pet.py`）：
+  1. **右键改弹 AI 快捷菜单**：`mousePressEvent` 右键 AI 启用时 → `_popup_ai_menu`（弹「💬 打开 AI 对话 / 📜 完整对话记录 / 🧹 清理上下文 / 📊 用量·积分(简版不可点) / 📈 查看统计详情」），不再直接开聊天窗
+  2. **AI 子菜单三处共用**：`_build_ai_menu(parent)` 统一构建（AI 未启用 → 单条「AI 未启用（去 设置→AI 开启）」置灰）；`_build_role_menu` 主菜单（三横/托盘）切角色后加「AI（对话·用量）」子菜单；`_show_ai_stats_detail` 用桌宠气泡展示完整统计
+- **验证**：
+  - 累计积分：两次回复累加 输入1500/缓存300/输出300/2次/金额 ✅；stats_text/stats_short 文案正确 ✅；持久化写 ai.stats ✅
+  - AI 子菜单两态：启用 6 项（对话/记录/清理/sep/用量·积分不可点/统计详情）、未启用 1 项提示 ✅
+  - gui_smoke/history_smoke 22/usage_layout 11/py_compile 全过 ✅
+- 涉及：`ai_chat.py`（_usage_text 文案/累计积分 6 方法）、`pet.py`（右键改 AI 菜单/_build_ai_menu/_popup_ai_menu/_show_ai_stats_detail/_build_role_menu 加 AI 子菜单）、`usage_layout_smoke.py`（[缓存读400] 断言）
+- 备注：积分存 `ai.stats`（累计不清零，清理上下文不重置）；「查看统计详情」在桌宠气泡显示完整累计
+
 ### 2026-09-07（部署：含峰谷计价的新版 exe 10:29，55.2MB）
 - **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:29，55,213,333B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
 - **部署**：覆盖桌面 `卡丘简易桌宠_最新.exe`（先提权停同名进程再复制）；启动验证 OK（主进程+提权副本）→ 测试后停
