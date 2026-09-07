@@ -78,6 +78,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 对话条悬停交互：鼠标移到桌宠上自动展开、离开 1 秒后收起）
+- **需求**：鼠标移到桌宠身上 → 直接显示下方对话条；鼠标离开桌宠 → 1 秒后对话条消失
+- **实现**：
+  1. `ai_chat.py` `AiChatManager.open_chat(focus=True)`：新增 `focus` 参数——`True`（右键快速提问）抢焦点聚焦输入框；`False`（悬停展开）静默显示不抢焦点、不打断用户在其它窗口的输入
+  2. 新增 4 个悬停辅助方法：`chat_bar_on_enter()`（鼠标进宠：静默显示条并贴住桌宠）、`chat_bar_on_leave()`（启动 1s 单次定时器）、`chat_bar_cancel_hide()`（回到宠上取消）、`_do_hide_bar()`（1 秒后鼠标若仍停在桌宠/输入条内则再等 1s 轮询，真正离开才隐藏——避免鼠标从桌宠挪到输入条时被误收）
+  3. `pet.py` `enterEvent` / `leaveEvent` 挂接：进入 → `ai.chat_bar_on_enter()`；离开 → `ai.chat_bar_on_leave()`（与原有三横按钮 1s 缓冲互不冲突）
+- **验证**：
+  - 单元冒烟（绑定 pet_mod 后）：进入→显示 ✓；鼠标在桌宠内/输入条上→不隐藏 ✓；离开→`_do_hide_bar` 隐藏 ✓；再进入→重新显示 ✓
+  - 事件循环实测：`chat_bar_on_leave()` 启动后 1.6s 内输入条已隐藏（1s 延迟生效）✓
+  - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
+- 涉及：`ai_chat.py`（open_chat focus 参数 + 悬停显隐 4 方法）、`pet.py`（enterEvent/leaveEvent 挂接）
+- **部署**：桌面 exe 重新打包替换（下一步）
+
 ### 2026-09-07（AI 交互改「极简模式」：横线输入条 + 右侧大字气泡 5 秒消失 + 去掉系统提示词）
 - **需求**：
   1. 输入框要【随桌宠移动】（此前点输入条空白会永久取消跟随 → 拖动桌宠后输入条留在原地）

@@ -1469,6 +1469,7 @@ class AiChatManager(QObject):
         self._chat = None
         self._history = None
         self._bubble = None
+        self._hover_hide_timer = None   # 鼠标悬停展开输入条后，离开 1s 再隐藏
         # ---------- 多会话上下文 ----------
         # 每个会话独立保留自己的消息历史；_messages 指向当前会话（兼容既有调用）
         self._sessions = {}            # 会话名 -> 消息列表
@@ -2034,7 +2035,10 @@ class AiChatManager(QObject):
             pass
 
     # ------------- 聊天窗 -------------
-    def open_chat(self):
+    def open_chat(self, focus=True):
+        """显示横线输入条（贴桌宠下方跟随）。focus=True 抢焦点并聚焦输入框
+        （右键「✏️ 快速提问」用）；focus=False 静默显示（鼠标悬停展开用），
+        不抢焦点、不打断用户在其它窗口的输入。"""
         if self._chat is None:
             self._chat = ChatWindow(self._pet)
             self._chat.sendRequested.connect(self._on_send)
@@ -2054,11 +2058,22 @@ class AiChatManager(QObject):
             self._sync_chat_usage()
         except Exception:
             pass
+        try:
+            self.chat_bar_cancel_hide()
+        except Exception:
+            pass
         self._chat.show_near(self._pet.frameGeometry())
         self._chat.show()
         self._chat.raise_()
-        self._chat.activateWindow()
-        self._chat.input.setFocus()
+        if focus:
+            try:
+                self._chat.activateWindow()
+            except Exception:
+                pass
+            try:
+                self._chat.input.setFocus()
+            except Exception:
+                pass
 
     def _new_session_from_ui(self):
         """聊天窗「＋新建」按钮 → 新建会话并切换"""
@@ -2163,6 +2178,85 @@ class AiChatManager(QObject):
                 and not getattr(self._history, '_user_dragged', False):
             try:
                 self._history._follow_pet()
+            except Exception:
+                pass
+
+    # ------------- 鼠标悬停展开/收起输入条 -------------
+    def chat_bar_on_enter(self):
+        """鼠标进入桌宠：静默显示输入条（不抢焦点、不打断其它窗口输入）"""
+        if self._chat is not None and self._chat.isVisible():
+            # 已显示：仅确保贴住桌宠 + 取消延迟隐藏
+            try:
+                self.chat_bar_cancel_hide()
+            except Exception:
+                pass
+            try:
+                self._chat._follow_pet()
+            except Exception:
+                pass
+            return
+        if not self.enabled():
+            return
+        try:
+            self.open_chat(focus=False)
+        except Exception:
+            pass
+
+    def chat_bar_on_leave(self):
+        """鼠标离开桌宠：1 秒后若仍未回来则隐藏输入条。"""
+        try:
+            if self._hover_hide_timer is None:
+                self._hover_hide_timer = QTimer(self)
+                self._hover_hide_timer.setSingleShot(True)
+                self._hover_hide_timer.setInterval(1000)
+                self._hover_hide_timer.timeout.connect(self._do_hide_bar)
+        except Exception:
+            return
+        try:
+            if self._chat is None or not self._chat.isVisible():
+                return
+            self._hover_hide_timer.start()
+        except Exception:
+            pass
+
+    def chat_bar_cancel_hide(self):
+        """鼠标回到桌宠：取消延迟隐藏"""
+        try:
+            if getattr(self, '_hover_hide_timer', None) is not None:
+                self._hover_hide_timer.stop()
+        except Exception:
+            pass
+
+    def _do_hide_bar(self):
+        """1 秒延迟到点：若鼠标仍停留在桌宠或输入条上则再等 1 秒；
+        鼠标离开两者后才真正隐藏输入条。"""
+        try:
+            if self._chat is None or not self._chat.isVisible():
+                return
+            inside = False
+            if self._pet is not None:
+                try:
+                    from PyQt6.QtGui import QCursor
+                    gp = QCursor.pos()
+                    if self._pet.geometry().contains(gp):
+                        inside = True
+                    elif self._chat.geometry().contains(gp):
+                        inside = True
+                except Exception:
+                    pass
+            if inside:
+                # 鼠标还在桌宠/输入条上：再轮询一次，避免“离开输入条后残留”
+                try:
+                    if self._hover_hide_timer is not None:
+                        self._hover_hide_timer.start()
+                except Exception:
+                    pass
+                return
+            self._chat.hide()
+        except Exception:
+            try:
+                if self._chat is not None:
+                    self._chat.hide()
             except Exception:
                 pass
 

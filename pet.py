@@ -2715,6 +2715,12 @@ class PetWindow(QWidget):
         # 鼠标进入：取消延迟隐藏，按钮立即显示
         self._hide_timer.stop()
         self._hovering = True
+        # 悬停展开 AI 对话条（静默、不抢焦点）；若 AI 未启用则忽略
+        try:
+            if getattr(self, 'ai', None) is not None and self.ai.enabled():
+                self.ai.chat_bar_on_enter()
+        except Exception:
+            pass
         self.update()
         super().enterEvent(e)
 
@@ -2722,6 +2728,12 @@ class PetWindow(QWidget):
         # 鼠标离开窗口（可能只是划过透明空白区）：不立即隐藏，启动 1 秒缓冲
         # 1 秒内回到窗口（enterEvent）则取消；真停在空白处 1 秒后才隐藏
         self._hide_timer.start()
+        # 悬停展开的对话条：离开桌宠 1 秒后隐藏
+        try:
+            if getattr(self, 'ai', None) is not None:
+                self.ai.chat_bar_on_leave()
+        except Exception:
+            pass
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
