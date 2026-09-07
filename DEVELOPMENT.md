@@ -78,6 +78,11 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（部署：含峰谷计价的新版 exe 10:29，55.2MB）
+- **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:29，55,213,333B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
+- **部署**：覆盖桌面 `卡丘简易桌宠_最新.exe`（先提权停同名进程再复制）；启动验证 OK（主进程+提权副本）→ 测试后停
+- 涉及：`dsh-desktop-pet\dist\卡丘简易桌宠.exe`、桌面 `卡丘简易桌宠_最新.exe`
+
 ### 2026-09-07（智能识别 DeepSeek 高峰时段：峰谷自动计价，空闲半价）
 - **需求（用户）**：价格那里要能**智能识别 DeepSeek 的高峰期**（高峰全价/空闲半价自动切换）
 - **官方依据**（api-docs.deepseek.com 中文/英文页一致）：高峰 = **北京时间周一至周五 9:00-12:00、14:00-18:00**（UTC 01-04/06-10）；其余时间 + 周六/日 = 空闲，**空闲价 = 高峰价一半**
