@@ -78,6 +78,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（角色点按触发音 = 各角色自我介绍台词语音（wiki 下载）+ 修复菜单重复角色 Bug）
+- **需求（用户）**：每个角色点按触发音用各自那句自我介绍（用户提供 23 句台词清单，星绘跳过保留时段问候）；旧角色（白墨/艾卡等）也要新触发音
+- **语音来源调研**：biligame 卡拉彼丘 WIKI 每角色有「语音台词」子页（如 `米雪儿·李/语音台词`），页内 mp3 托管在 `patchwiki.biligame.com/images/klbq/`；**防爬**：直连 api.php/子页返回 567，需 Session 先 GET 主页拿 cookie 再访问（实测 UA/Referer 头为主因）；HTML 结构 = 每条语音一个 `<tr>`，td[0] 含 `.media-audio[data-file]` mp3、td[1] 台词文本（须剔除 smw 悬浮注释）
+- **实现**：`voice_parser.py`（解析器，`parse_voice_page(html)->[{text,mp3}]`，subagent 产出）+ `download_voices.py`（23 角色批量：抓页→宽松归一化匹配台词→下载存「完整台词.mp3」到 数据目录+源码 assets 双写）
+- **点按逻辑改造**（`pet.py`）：新增模块级 `pick_click_voice(d)`——角色目录里「非内置名(morning/noon/evening/sprint/click/hello)」音频取文件名最长者（即台词自我介绍）→ `play_click_voice`/`_preload_click_audio` 优先用它；无台词则旧规则（星绘时段/白墨 sprint/其它 morning）
+- **Bug 修复**：菜单里星绘/白墨/艾卡出现两次——数据目录存在平铺残留（`characters/星绘/` 等）与阵营内（`characters/乌尔比诺/星绘/` 等）并存（旧版 exe seed 补回），`list_roles()` 两者都扫到；删除 3 个平铺残留目录 + dist 旧数据残留
+- **下载结果**：22/23 一次成功；伊薇特台词与用户给的有差异（页面实际「我是伊薇特，这是我的伙伴，菲。呵呵，你一次认识了两个新朋友啊。」）单独修正下载 → **24 角色全有音频**（23 句台词 + 星绘保留 3 时段语音）
+- **验证**：`pick_click_voice` 离屏 5 例（米雪儿/白墨/艾卡/伊薇特命中台词、星绘 None 走旧规则）✅；角色列表 24 无重复 ✅；py_compile ✅
+- 涉及：`pet.py`、`DEVELOPMENT.md`、`assets/characters/`（各角色台词 mp3）、新增 `_voice_probe/`（voice_parser.py）、`download_voices.py`、`probe_*.py`（临时探测）
+- git：（待提交）
+
 ### 2026-09-07（角色体系升级为「阵营/角色/形象」三级结构 + 导入欧泊/乌尔比诺/剪刀手 21 新角色）
 - **需求（用户）**：①同角色可放多套形象；②角色按阵营分组：欧泊 / 剪刀手 / 乌尔比诺（晶源体不做）；③后续自动识别游戏角色并自动切换桌宠（识别可行性已另调研）
 - **归属确认（用户）**：旧角色归阵营——星绘→乌尔比诺、白墨→乌尔比诺、艾卡→剪刀手；桌面三文件夹 `桌面\欧泊`（伊薇特/信/千代/心夏/忧雾/米雪儿/芙拉薇娅/蕾欧娜）、`桌面\乌尔比诺`（加拉蒂亚/奥黛丽/汐/玛德蕾娜gif/绯莎）、`桌面\剪刀手`（令/拉薇/明/梅瑞狄斯/玛拉/珐格兰丝/诺诺/香奈美）
