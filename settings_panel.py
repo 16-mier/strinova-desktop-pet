@@ -833,8 +833,9 @@ class SettingsPanel(QWidget):
                 self._watch_current_dir()
         # 2) 导入文件夹作为新角色
         if char_dirs:
-            chars = os.path.join(pet.base_dir(), 'assets', 'characters')
-            os.makedirs(chars, exist_ok=True)
+            chars = self._faction_target_dir()
+            if chars:
+                os.makedirs(chars, exist_ok=True)
             for d in char_dirs:
                 name = os.path.basename(d)
                 dst = os.path.join(chars, name)
@@ -847,8 +848,9 @@ class SettingsPanel(QWidget):
                     print('drop char dir fail:', d, e)
         # 3) 导入单张角色图
         if char_imgs:
-            chars = os.path.join(pet.base_dir(), 'assets', 'characters')
-            os.makedirs(chars, exist_ok=True)
+            chars = self._faction_target_dir()
+            if chars:
+                os.makedirs(chars, exist_ok=True)
             for img in char_imgs:
                 name = os.path.splitext(os.path.basename(img))[0]
                 ext = os.path.splitext(img)[1].lower()
@@ -1163,8 +1165,8 @@ class SettingsPanel(QWidget):
             pet.set_pet_size(val)
 
     def _on_role_clicked(self, item):
-        # 单击=切换
-        role = item.text().replace("  ←当前", "")
+        # 单击=切换（路径存在 UserRole，显示名用角色名）
+        role = item.data(Qt.ItemDataRole.UserRole)
         if role and role != getattr(self._current_pet(), 'role', None):
             self._switch_role(role)
 
@@ -1191,7 +1193,7 @@ class SettingsPanel(QWidget):
             "", "图片 (%s)" % pat)
         if not files:
             return
-        chars = os.path.join(pet.base_dir(), 'assets', 'characters')
+        chars = self._faction_target_dir()
         os.makedirs(chars, exist_ok=True)
         imported = []
         for img in files:
@@ -1227,12 +1229,10 @@ class SettingsPanel(QWidget):
         item = self.role_list.currentItem()
         if pet is None or item is None:
             return
-        role = item.text().replace("  ←当前", "")
+        role = item.data(Qt.ItemDataRole.UserRole) or item.text().replace("  ←当前", "")
         if role == getattr(pet, 'role', None):
             QMessageBox.information(self, "提示", "不能删除正在使用的角色，请先切换到其它角色。")
             return
-        chars = os.path.join(pet.base_dir(), 'assets', 'characters')
-        dst = os.path.join(chars, role)
         ret = QMessageBox.question(self, "确认", "删除角色「%s」？（会删除其文件夹）" % role)
         if ret == QMessageBox.StandardButton.Yes:
             if hasattr(pet, 'remove_role'):
@@ -1241,8 +1241,11 @@ class SettingsPanel(QWidget):
                     QMessageBox.critical(self, "错误", msg)
                     return
             else:
-                # 兼容旧实现
+                # 兼容旧实现（role 可能含 '/' → 直接拼路径）
                 try:
+                    chars = os.path.join(pet.base_dir(), 'assets', 'characters')
+                    parts = [p for p in role.replace('\\', '/').split('/') if p]
+                    dst = os.path.join(chars, *parts)
                     shutil.rmtree(dst)
                 except Exception as e:
                     QMessageBox.critical(self, "错误", "删除失败: %s" % e)
@@ -1292,6 +1295,20 @@ class SettingsPanel(QWidget):
         self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
         self._refresh_audio_list()  # 立即刷新显示绑定的快捷键
 
+    def _faction_target_dir(self):
+        """导入角色的目标目录：当前角色有阵营 → chars/<阵营>；否则 chars 根"""
+        pet = self._current_pet()
+        base = os.path.join(pet.base_dir(), 'assets', 'characters') if pet is not None else None
+        if base is None:
+            return base
+        try:
+            fac = pet_mod.role_faction(getattr(pet, 'role', ''))
+            if fac:
+                return os.path.join(base, fac)
+        except Exception:
+            pass
+        return base
+
     def _current_audio_dir(self):
         """当前语音来源对应的资源目录（导入/监视用）"""
         pet = self._current_pet()
@@ -1301,7 +1318,16 @@ class SettingsPanel(QWidget):
             if hasattr(pet, 'base_dir'):
                 return os.path.join(pet.base_dir(), 'assets', 'common_voice')
             return None
-        return os.path.join(pet.base_dir(), 'assets', 'characters', pet.role)
+        # 角色语音目录 = 角色根（多形象时去掉形象段，语音共用）
+        try:
+            root = getattr(pet_mod, 'role_root', None) or getattr(pet, 'role_root', None)
+            if root:
+                rdir = root(getattr(pet, 'role', ''))
+                if os.path.isdir(rdir):
+                    return rdir
+        except Exception:
+            pass
+        return os.path.join(pet.base_dir(), 'assets', 'characters', str(getattr(pet, 'role', '')).replace('\\', '/'))
 
     def _import_audio(self):
         pet = self._current_pet()
@@ -1462,16 +1488,27 @@ class SettingsPanel(QWidget):
         pet = self._current_pet()
         if pet is None:
             return
+        # 显示名辅助：优先 pet_mod.role_display（新三级），否则取路径末段
+        def disp(r):
+            try:
+                fn = getattr(pet_mod, 'role_display', None)
+                if fn:
+                    return fn(r)
+            except Exception:
+                pass
+            return r.rsplit('/', 1)[-1]
         self.role_list.blockSignals(True)
         self.role_list.clear()
         for r in getattr(pet, 'roles', []) or []:
-            item = QListWidgetItem(r)
+            label = disp(r)
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, r)   # 存完整路径（切换/删除用）
             if r == getattr(pet, 'role', None):
-                item.setText(r + "  ←当前")
+                item.setText(label + "  ←当前")
                 item.setForeground(QColor('#ffd76e'))
             self.role_list.addItem(item)
         self.role_list.blockSignals(False)
-        self.lbl_cur_role.setText(getattr(pet, 'role', '-') or '-')
+        self.lbl_cur_role.setText(disp(getattr(pet, 'role', '-')) if getattr(pet, 'role', '-') != '-' else '-')
 
     def _open_characters_folder(self):
         """打开当前语音来源所在目录（通用语音→common_voice；角色→角色目录）"""

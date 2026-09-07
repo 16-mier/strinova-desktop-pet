@@ -304,19 +304,108 @@ def role_image(d):
 
 
 def list_roles():
-    """从 assets/characters/ 扫描角色子目录（可扩展：丢文件夹即加角色，支持 image.png 或 .gif 动图）"""
+    """从 assets/characters/ 扫描可展示角色形象 → 相对 chars_dir 的路径列表。
+
+    支持三种磁盘布局（阵营为一级目录，可含任意层形象子目录）：
+      characters/星绘/image.png            → "星绘"        （无阵营，历史平铺）
+      characters/欧泊/米雪儿/image.png     → "欧泊/米雪儿"（单形象直放角色目录）
+      characters/欧泊/米雪儿/泳装/image.png→ "欧泊/米雪儿/泳装"（多形象）
+    规则：目录含角色图 → 该目录即一个可展示形象（角色根含图=默认形象）；
+          目录不含图但子目录含图 → 每个含图子目录是一个形象（角色根仅为语音层）。
+    返回按 阵营/角色 排序。无任何可用角色时兜底 DEFAULT_ROLE。"""
     roles = []
     d = chars_dir()
     if os.path.isdir(d):
-        for name in os.listdir(d):
-            full = os.path.join(d, name)
-            if os.path.isdir(full) and role_image(full):
-                roles.append(name)
+        for top in sorted(os.listdir(d)):
+            full = os.path.join(d, top)
+            if not os.path.isdir(full):
+                continue
+            if role_image(full):
+                # 顶级目录本身就是角色（历史平铺 / 或"阵营目录直接含图"的退化）
+                roles.append(top)
+                continue
+            # 顶级目录当作阵营：扫描其下角色目录
+            for name in sorted(os.listdir(full)):
+                rdir = os.path.join(full, name)
+                if not os.path.isdir(rdir):
+                    continue
+                base = "%s/%s" % (top, name)
+                if role_image(rdir):
+                    # 角色目录含图 → 默认形象
+                    roles.append(base)
+                else:
+                    # 角色目录无图 → 找含图的形象子目录（语音留在角色根）
+                    subs = [s for s in sorted(os.listdir(rdir))
+                            if os.path.isdir(os.path.join(rdir, s))
+                            and role_image(os.path.join(rdir, s))]
+                    for s in subs:
+                        roles.append("%s/%s" % (base, s))
     return roles or [DEFAULT_ROLE]
 
 
 def role_dir(role):
-    return os.path.join(chars_dir(), role)
+    """角色展示目录（相对 chars_dir 的路径，兼容含 '/' 的多级标识）"""
+    # 防路径穿越：只允许正常拼接
+    parts = [p for p in str(role).replace('\\', '/').split('/') if p and p not in ('.', '..')]
+    return os.path.join(chars_dir(), *parts)
+
+
+def default_role_pick(roles):
+    """从角色列表挑默认角色：优先名字等于 DEFAULT_ROLE 的项（任意阵营/形象），
+    再退为列表首个；列表空 → DEFAULT_ROLE。"""
+    if not roles:
+        return DEFAULT_ROLE
+    for r in roles:
+        if role_character_name(r) == DEFAULT_ROLE or role_display(r) == DEFAULT_ROLE:
+            return r
+    return roles[0]
+
+
+def role_root(role):
+    """角色根路径 = 语音所在目录（去掉末尾形象段）：
+      "乌尔比诺/星绘"       → "乌尔比诺/星绘"
+      "乌尔比诺/星绘/泳装"  → "乌尔比诺/星绘"（泳装形象共用角色语音）
+    无形象（1-2 段）时返回自身。"""
+    parts = [p for p in str(role).replace('\\', '/').split('/') if p and p not in ('.', '..')]
+    # 段数 > 2（阵营/角色/形象…）→ 角色根取前两段
+    if len(parts) > 2:
+        parts = parts[:2]
+    return os.path.join(chars_dir(), *parts)
+
+
+def role_display(role):
+    """角色显示名：取角色名段（去掉阵营与形象段）：
+      "欧泊/米雪儿" → "米雪儿"；"乌尔比诺/星绘/泳装" → "星绘·泳装"
+    """
+    parts = [p for p in str(role).replace('\\', '/').split('/') if p and p not in ('.', '..')]
+    if not parts:
+        return str(role)
+    if len(parts) >= 3:
+        # 阵营/角色/形象 → "角色·形象"
+        return "%s·%s" % (parts[-2], parts[-1])
+    return parts[-1]
+
+
+def role_faction(role):
+    """角色阵营显示名：无阵营（历史平铺）→ ''；否则返回一级目录名"""
+    parts = [p for p in str(role).replace('\\', '/').split('/') if p and p not in ('.', '..')]
+    return parts[0] if len(parts) >= 2 else ''
+
+
+def role_variant(role):
+    """形象名（多形象时末段；无形象 → ''）：用于 UI 显示“第几套”"""
+    parts = [p for p in str(role).replace('\\', '/').split('/') if p and p not in ('.', '..')]
+    return parts[-1] if len(parts) >= 3 else ''
+
+
+def role_character_name(role):
+    """角色基础名（去掉阵营/形象，供语音规则硬编码判断）：
+      "乌尔比诺/星绘" → "星绘"；"乌尔比诺/星绘/泳装" → "星绘"；"白墨" → "白墨"
+    """
+    parts = [p for p in str(role).replace('\\', '/').split('/') if p and p not in ('.', '..')]
+    if len(parts) >= 2:
+        return parts[-2] if len(parts) >= 3 else parts[-1]
+    return parts[-1] if parts else ''
 
 
 # 支持的音频扩展名（角色目录下这些文件都会出现在菜单里）
@@ -347,15 +436,22 @@ def friendly_audio_name(name):
 
 
 def list_role_audio(role):
-    """列出角色目录下所有音频文件 → [(显示名, 绝对路径)]（按文件名排序）"""
-    d = role_dir(role)
+    """列出角色语音（角色根目录下所有音频）→ [(显示名, 绝对路径)]。
+    多形象时语音共用角色根（形象目录只放图）。"""
+    # 先找角色根（去掉形象段）；若角色根不存在（平铺单角色）则回退 role_dir
+    candidates = [role_root(role), role_dir(role)]
+    seen = set()
     out = []
-    if os.path.isdir(d):
-        for f in sorted(os.listdir(d)):
-            full = os.path.join(d, f)
-            if os.path.isfile(full) and f.lower().endswith(AUDIO_EXTS):
-                name = os.path.splitext(f)[0]
-                out.append((friendly_audio_name(name), full))
+    for d in candidates:
+        if d in seen:
+            continue
+        seen.add(d)
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                full = os.path.join(d, f)
+                if os.path.isfile(full) and f.lower().endswith(AUDIO_EXTS):
+                    name = os.path.splitext(f)[0]
+                    out.append((friendly_audio_name(name), full))
     return out
 
 
@@ -1395,7 +1491,8 @@ class PetWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.roles = list_roles()
-        self.role = DEFAULT_ROLE if DEFAULT_ROLE in self.roles else self.roles[0]
+        # 默认角色：优先角色名=DEFAULT_ROLE 的那项（无论阵营/形象），否则取列表首个
+        self.role = default_role_pick(self.roles)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -1529,12 +1626,15 @@ class PetWindow(QWidget):
         """后台预解码当前最可能播放的音频（当前角色的点击语音）→ 首次播放免等待"""
         def work():
             try:
-                d = role_dir(self.role)
+                d = role_root(self.role)
+                if not os.path.isdir(d):
+                    d = role_dir(self.role)
                 if not os.path.isdir(d):
                     return
-                if self.role == "白墨":
+                cname = role_character_name(self.role)
+                if cname == "白墨":
                     f = os.path.join(d, "sprint.mp3")
-                elif self.role == "星绘":
+                elif cname == "星绘":
                     f = os.path.join(d, self.greeting_for_now() + ".mp3")
                 else:
                     click = os.path.join(d, "click.mp3")
@@ -1943,10 +2043,13 @@ class PetWindow(QWidget):
             QTimer.singleShot(0, fallback)
 
     def play_click_voice(self):
-        d = role_dir(self.role)
-        if self.role == "白墨":
+        d = role_root(self.role)
+        if not os.path.isdir(d):
+            d = role_dir(self.role)
+        cname = role_character_name(self.role)
+        if cname == "白墨":
             f = os.path.join(d, "sprint.mp3")
-        elif self.role == "星绘":
+        elif cname == "星绘":
             f = os.path.join(d, self.greeting_for_now() + ".mp3")
         else:
             click = os.path.join(d, "click.mp3")
@@ -2172,10 +2275,20 @@ class PetWindow(QWidget):
     def init_tray(self):
         """创建托盘图标（仅一次，避免图标堆积）。菜单更新走 refresh_tray"""
         self.tray = QSystemTrayIcon(self)
-        # 托盘图标：用星绘形象，缩放到 32px（Windows 托盘实际显示 ~16-32px）
-        star = os.path.join(role_dir("星绘"), "image.png")
-        if os.path.exists(star):
-            pm = QPixmap(star)
+        # 托盘图标：优先当前角色形象；找不到再找默认星绘；缩放到 32px
+        img_path = None
+        for probe in (self.role, DEFAULT_ROLE):
+            try:
+                rd = role_dir(probe)
+                if os.path.isdir(rd):
+                    found = role_image(rd)
+                    if found:
+                        img_path = found[0]
+                        break
+            except Exception:
+                continue
+        if img_path and os.path.exists(img_path):
+            pm = QPixmap(img_path)
             if not pm.isNull():
                 pm = pm.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation)
@@ -2199,6 +2312,51 @@ class PetWindow(QWidget):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.open_settings_panel()
 
+    def _fill_roles_menu(self, m):
+        """把全部可用角色填进子菜单，按阵营分组（阵营标题不可点，勾选当前角色）。
+        role 含 '/' → 阵营/角色 分组；纯角色名（历史平铺）→ 直接列出。
+        同一角色多形象（阵营/角色/形象）→ 各形象分行显示「角色·形象」。"""
+        roles = list(self.roles)
+        # 分出带阵营的角色
+        factioned = [r for r in roles if role_faction(r)]
+        flat = [r for r in roles if not role_faction(r)]
+        cur = self.role
+        group = QActionGroup(m)
+        group.setExclusive(True)
+        added = 0
+
+        def add_item(text, role_key):
+            act = QAction(text, m)
+            act.setCheckable(True)
+            act.setChecked(role_key == cur)
+            act.triggered.connect(lambda checked, rr=role_key: self.switch_role(rr))
+            group.addAction(act)
+            m.addAction(act)
+
+        # 未分组（历史平铺）角色排最前
+        for r in flat:
+            add_item(role_display(r), r)
+            added += 1
+
+        # 按阵营分组显示
+        by_faction = {}
+        for r in factioned:
+            by_faction.setdefault(role_faction(r), []).append(r)
+        for fac in sorted(by_faction):
+            if added:
+                m.addSeparator()
+            title = QAction(fac, m)
+            title.setEnabled(False)
+            m.addAction(title)
+            for r in sorted(by_faction[fac], key=role_display):
+                add_item(role_display(r), r)
+            added += 1
+
+        if not added:
+            na = QAction("（无角色）", m)
+            na.setEnabled(False)
+            m.addAction(na)
+
     def _build_role_menu(self, parent):
         """构建主菜单（三横/托盘共用）：
         ①「切换角色」→ 点击向右扩展角色子菜单（当前角色 ✓）
@@ -2215,15 +2373,7 @@ class PetWindow(QWidget):
         #    故角色列表用非模态 popup 方式"向右展开"，行为=点一下右扩）
         self._switch_submenu = QMenu(menu)   # 存引用防 GC
         self._switch_submenu.setStyleSheet(MENU_QSS)
-        group = QActionGroup(self._switch_submenu)
-        group.setExclusive(True)
-        for r in self.roles:
-            act = QAction(r, self._switch_submenu)
-            act.setCheckable(True)
-            act.setChecked(r == self.role)
-            act.triggered.connect(lambda checked, rr=r: self.switch_role(rr))
-            group.addAction(act)
-            self._switch_submenu.addAction(act)
+        self._fill_roles_menu(self._switch_submenu)
         act_switch = QAction("切换角色", menu)
         act_switch.setMenu(self._switch_submenu)   # 关联子菜单 → 原生"指向即开"
         menu.addAction(act_switch)
@@ -2351,7 +2501,7 @@ class PetWindow(QWidget):
         grp.setExclusive(True)
         n_common = len(list_common_audio())
         # 当前角色
-        act_role = QAction("当前角色（%s）" % self.role, menu)
+        act_role = QAction("当前角色（%s）" % role_display(self.role), menu)
         act_role.setCheckable(True)
         act_role.setChecked(self._voice_source != 'common')
         act_role.triggered.connect(lambda c: self.set_voice_source('role'))
@@ -2558,7 +2708,7 @@ class PetWindow(QWidget):
         """重新扫描角色目录（导入/删除角色后调用）"""
         self.roles = list_roles()
         if self.role not in self.roles:
-            self.role = self.roles[0] if self.roles else DEFAULT_ROLE
+            self.role = default_role_pick(self.roles)
             self.load_role(self.role)
         # 同步打开的面板（角色列表/当前角色显示/音频列表）
         if getattr(self, '_settings_panel', None) is not None:

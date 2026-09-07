@@ -78,6 +78,23 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（角色体系升级为「阵营/角色/形象」三级结构 + 导入欧泊/乌尔比诺/剪刀手 21 新角色）
+- **需求（用户）**：①同角色可放多套形象；②角色按阵营分组：欧泊 / 剪刀手 / 乌尔比诺（晶源体不做）；③后续自动识别游戏角色并自动切换桌宠（识别可行性已另调研）
+- **归属确认（用户）**：旧角色归阵营——星绘→乌尔比诺、白墨→乌尔比诺、艾卡→剪刀手；桌面三文件夹 `桌面\欧泊`（伊薇特/信/千代/心夏/忧雾/米雪儿/芙拉薇娅/蕾欧娜）、`桌面\乌尔比诺`（加拉蒂亚/奥黛丽/汐/玛德蕾娜gif/绯莎）、`桌面\剪刀手`（令/拉薇/明/梅瑞狄斯/玛拉/珐格兰丝/诺诺/香奈美）
+- **新磁盘布局**：`assets/characters/<阵营>/<角色>/image.png(.gif)` + 语音在角色根；兼容历史平铺（`characters/星绘/` 无阵营）
+- **实现**（`pet.py`）：
+  1. 角色标识 `role` = 相对 chars_dir 的路径（可含 `/`）：`"欧泊/米雪儿"`、多形象 `"乌尔比诺/星绘/泳装"`
+  2. 新增模块级函数：`role_dir(role)`（多级安全拼接）、`role_root(role)`（语音根=去掉形象段）、`role_display(role)`（显示名，多形象显示「角色·形象」）、`role_faction(role)`、`role_variant(role)`、`role_character_name(role)`（供星绘/白墨硬编码语音判断）、`default_role_pick(roles)`（默认优先找角色名=星绘）
+  3. `list_roles()` 三级扫描：顶级目录含图=平铺角色；顶级目录无图→当阵营，扫其下角色（角色目录含图=默认形象；无图→形象子目录逐个列出）
+  4. 硬编码 `self.role == "星绘"/"白墨"` → `role_character_name()` 判断；语音路径走角色根（多形象共用语音）
+  5. 主菜单「切换角色」子菜单 `_fill_roles_menu()` 按阵营分组（组标题不可点+分隔线）；托盘/按钮/设置三处共用
+- **实现**（`settings_panel.py`）：角色列表项 UserRole 存完整 role 路径（文本仅显示名）；`_on_role_clicked/_delete_selected_role` 取 UserRole；`_current_audio_dir` 走角色根；新增 `_faction_target_dir()`（导入/拖放默认落入当前角色阵营目录）
+- **迁移执行**：桌面三文件夹 21 图已移入数据目录 `桌面\卡丘简易桌宠数据\assets\characters\<阵营>\<角色>\image.png`（gif 保留原名），桌面原件已清空；旧三角色迁入阵营；源码 assets/characters 同步同结构（打包种子）；旧音频键自动迁移 `星绘/x→乌尔比诺/星绘/x` 等（`pet_config.json` audio_hotkeys）
+- **验证**：`role_smoke.py`（新增）21/21 ✅（扫描/阵营/显示名/默认选择/主图/语音枚举）；离屏 PetWindow 构造+4 角色切换 pixmap 正常 ✅（含 gif 艾卡/玛德蕾娜）；面板角色列表 24 项显示+UserRole+点击切换 ✅；菜单构建三阵营 29 动作 ✅；回归 session 25 / usage 16 / history 23 / gui / panel_smoke2 全绿 ✅
+- **待办**：每个角色专属语音（用户稍后提供下载菜单 → 放入 `characters/<阵营>/<角色>/`，点按触发音自动识别 `click.mp3`/`morning.mp3`）；自动识别角色切换（BitBlt+OCR 已证可行，待用户进对局标定）
+- 涉及：`pet.py`（角色模型/list_roles/菜单）、`settings_panel.py`（角色列表/删除/导入归阵营）、新增 `role_smoke.py`、`assets/characters/` 大改
+- git：（待提交）
+
 ### 2026-09-07（卡拉彼丘"回车自动加喵"v6 最终可用方案：鼠标可见性判定 + PostMessage，实测通过）
 - **需求**：卡拉彼丘聊天框打字按回车发送时自动在句尾补词（默认"喵"，可自定义、可开关）
 - **排查过程（多轮实测发现的真相）**：
