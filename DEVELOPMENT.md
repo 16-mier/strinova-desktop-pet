@@ -78,6 +78,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（每角色独立上下文 + 对话结束显示 API/TTS 延迟）
+- **需求（用户）**：①每个角色独立上下文（各自的对话历史互不干扰）；②每次对话结束，在下方显示语言模型 API 延迟 和 TTS 合成延迟
+- **实现**（`ai_chat.py` + `pet.py`）：
+  1. **角色分会话**：`AiChatManager` 新增 `role_session_name(role)`（`角色:<角色名>`，多形象按角色名归并）与 `switch_to_role(role)`（切角色自动建/切到该角色会话）；`PetWindow.switch_role` 里调用 → 每个角色聊天历史独立，切回角色恢复自己上下文
+  2. **API 延迟**：`_on_send` 记 `_api_t0`（monotonic），`_on_ai_done` 计算 `api_ms` 存 `_last_delay['api']`，随用量行显示
+  3. **TTS 延迟**：`_speak_text` 记 `_tts_t0`，`_on_tts_done`（音频就绪）计算 `tts_ms` 存 `_last_delay['tts']` 并刷新显示
+  4. **显示**：`_delay_suffix()` 生成 `· API 1234ms · TTS 568ms` 后缀，`_show_usage`/`_sync_chat_usage`/`_refresh_delay_line` 追加到聊天条用量行下方（本次 输入↑…输出↓ 共N tok ≈ $X · API 1234ms · TTS 568ms）
+- **验证**：角色会话名/切换/消息隔离（切米雪儿→星绘→切回消息保留）✅；延迟后缀三态（双值/仅API/空）✅；session_smoke 25 项回归全过 ✅
+- 涉及：`ai_chat.py`（AiChatManager 会话/延迟）、`pet.py`（switch_role 接 switch_to_role）
+- git：（待提交）
+
 ### 2026-09-07（修复 TTS 启动/合成 500 + 设置面板角色列表按阵营分组 + 克隆参考英文路径）
 - **问题（用户）**：①"启动 TTS 功能有问题"——本地录音服务跑不起来/合成 502；②设置面板角色列表平铺无阵营，不好挑角色；③TTS 参考语音路径太长且为中文路径
 - **TTS 根因**：

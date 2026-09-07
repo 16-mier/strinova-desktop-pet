@@ -1559,6 +1559,9 @@ class AiChatManager(QObject):
         self._seq = 0                 # 递增序号：新 TTS 打断旧 TTS
         self._synced_text = ''        # 待朗读文本（音频就绪后随音频同步蹦字）
         self._last_usage = {}         # 最近一次 token 用量
+        self._api_t0 = 0.0            # 本次 API 请求开始（monotonic）
+        self._tts_t0 = 0.0            # 本次 TTS 合成开始（monotonic）
+        self._last_delay = {}         # {'api': ms, 'tts': ms} 最近一次延迟
         self._player = None
         self._audio_out = None
         try:
@@ -1649,6 +1652,32 @@ class AiChatManager(QObject):
         self._last_usage = {}
         self._sync_ui_to_current()
         return True
+
+    # ------------- 按角色自动分会话 -------------
+    def role_session_name(self, role):
+        """角色专属会话名：「角色:<角色名>」；role 为空返回默认。
+        角色名 = 路径末段（去掉阵营/形象，如 乌尔比诺/米雪儿 → 米雪儿）。"""
+        try:
+            parts = [p for p in str(role).replace('\\', '/').split('/') if p]
+            cname = parts[-2] if len(parts) >= 3 else (parts[-1] if parts else '')
+        except Exception:
+            cname = ''
+        return '角色:' + (cname or str(role))
+
+    def switch_to_role(self, role):
+        """切角色时自动切到该角色的独立会话（不存在则建）。
+        保证每个角色自己的上下文互不干扰。"""
+        name = self.role_session_name(role)
+        try:
+            if name not in self._sessions:
+                self._push_session(name)
+            self._session_cur = name
+            self._messages = self._sessions[name]
+            self._last_usage = {}
+            self._sync_ui_to_current()
+        except Exception:
+            pass
+        return name
 
     def delete_session(self, name):
         """删除指定会话（连同其消息）。被删的是当前会话时自动切到相邻会话；
@@ -1919,17 +1948,39 @@ class AiChatManager(QObject):
             return
         if self._last_usage:
             try:
-                self._chat.set_usage(self._usage_text(self._last_usage))
+                self._chat.set_usage(
+                    self._usage_text(self._last_usage) + self._delay_suffix())
             except Exception:
                 pass
 
+    def _delay_suffix(self):
+        """延迟后缀文案：'· API 1234ms · TTS 567ms'；无数据返回 ''"""
+        d = getattr(self, '_last_delay', {}) or {}
+        parts = []
+        if 'api' in d:
+            parts.append('API %.0fms' % d['api'])
+        if 'tts' in d:
+            parts.append('TTS %.0fms' % d['tts'])
+        return ' · ' + ' · '.join(parts) if parts else ''
+
+    def _refresh_delay_line(self):
+        """TTS 延迟就绪后：刷新聊天条用量行（在用量文案末尾追加延迟）"""
+        if self._chat is None or not hasattr(self._chat, 'set_usage'):
+            return
+        try:
+            txt = self._usage_text(self._last_usage) + self._delay_suffix()
+            self._chat.set_usage(txt)
+        except Exception:
+            pass
+
     def _show_usage(self, usage):
-        """AI 回复后：更新用量/金额到聊天条并累计到会话统计"""
+        """AI 回复后：更新用量/金额+延迟到聊天条并累计到会话统计"""
         self._last_usage = usage or {}
         if self._chat is not None and hasattr(self._chat, 'set_usage'):
             try:
                 if self._last_usage:
-                    self._chat.set_usage(self._usage_text(self._last_usage))
+                    self._chat.set_usage(
+                        self._usage_text(self._last_usage) + self._delay_suffix())
             except Exception:
                 pass
         # 累计到会话统计（积分）
@@ -2351,6 +2402,9 @@ class AiChatManager(QObject):
             # 发送时清掉上一次用量显示（新请求的用量回来前保持干净）
             self._chat.set_usage('')
         self._last_usage = {}
+        # 记录本次 API 请求起点（用于结束时的延迟显示）
+        self._api_t0 = time.monotonic()
+        self._last_delay = {}
         # 思考指示：AI 思考中在桌宠旁显示三点跳动
         self._show_thinking()
         # 多轮上下文：system（可自定义）+ 最近 20 条
@@ -2418,6 +2472,12 @@ class AiChatManager(QObject):
             self._bubble_msg('AI 请求失败：%s\n（检查 设置→AI 的服务器/密钥/模型）' % err)
             return
         usage = usage or {}
+        # API 延迟（从发送到回复返回）
+        try:
+            api_ms = (time.monotonic() - self._api_t0) * 1000.0
+            self._last_delay['api'] = api_ms
+        except Exception:
+            pass
         # 单次用量：显示在桌宠旁的状态条
         try:
             self._show_usage(usage)
@@ -2538,6 +2598,8 @@ class AiChatManager(QObject):
         voice = (cfg.get('tts_api_voice') or cfg.get('tts_voice') or 'alloy')
         # 记录将朗读的文本 → 音频就绪时按音频时长同步蹦字
         self._synced_text = text
+        # 记录 TTS 合成起点（结束算延迟）
+        self._tts_t0 = time.monotonic()
         self._tts_worker = TTSWorker(text, voice, seq, self, instruction=instruction)
         self._tts_worker.done.connect(
             lambda path, err, s=seq: self._on_tts_done(path, err, s))
@@ -2550,6 +2612,13 @@ class AiChatManager(QObject):
         if not path:
             self._bubble_msg('朗读失败：%s' % err)
             return
+        # TTS 合成延迟（就绪时刻 - 开始时刻）
+        try:
+            tts_ms = (time.monotonic() - self._tts_t0) * 1000.0
+            self._last_delay['tts'] = tts_ms
+            self._refresh_delay_line()
+        except Exception:
+            pass
         vol = self.tts_volume()
         # 音量 >100% → 数字增益（QAudioOutput 上限 1.0）
         gain_path = path

@@ -2741,6 +2741,12 @@ class PetWindow(QWidget):
         self._schedule_menu_refresh()
         # 同步角色的 AI 专属配置：TTS 克隆参考 + 系统提示词（切角色自动换人设/音色）
         self._apply_role_ai_profile(role)
+        # 每个角色独立上下文：自动切到该角色的会话
+        try:
+            if self.ai is not None and hasattr(self.ai, 'switch_to_role'):
+                self.ai.switch_to_role(role)
+        except Exception:
+            pass
         # 同步打开的面板：刷新列表 + 重新监视新角色的目录
         if getattr(self, '_settings_panel', None) is not None:
             try:
