@@ -817,6 +817,37 @@ class GUITHREADINFO(ctypes.Structure):
     ]
 
 
+def _foreground_exe():
+    """返回当前前台窗口所属进程的 exe 名（小写，不含 .exe）；失败返回 ''。
+    供游戏联动钩子判断"目标游戏是否在前台"。"""
+    try:
+        fg = _user32.GetForegroundWindow()
+        if not fg:
+            return ''
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+        if not pid.value:
+            return ''
+        hProc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+        if not hProc:
+            return ''
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            sz = wintypes.DWORD(len(buf))
+            ctypes.windll.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            ctypes.windll.kernel32.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD)]
+            if ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                    hProc, 0, buf, ctypes.byref(sz)):
+                return os.path.basename(buf.value).lower().replace('.exe', '')
+            return ''
+        finally:
+            ctypes.windll.kernel32.CloseHandle(hProc)
+    except Exception:
+        return ''
+
+
 # 智能钩子使用的 Win32 API 原型（防 64 位截断 + HWND 指针正确）
 _user32.GetForegroundWindow.restype = wintypes.HWND
 _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -1149,6 +1180,170 @@ def ptt_key_up(vk=VK_V):
     _send_key(vk, keyup=True)
 
 
+# ---------- 游戏内"回车自动补词"联动 ----------
+# 目标：卡拉彼丘（官方启动器 / WeGame）对局聊天输入框，回车发送时自动在句尾
+# 补一个词（默认 喵，可自定义）。
+# 判定（启发式）：当前台为目标游戏且检测到"开聊天 → 打了字 → 再回车"序列时，
+# 拦截这次回车并先注入补词再放行，实现"回车时自动加喵"。纯菜单/切换窗口回车
+# （两次回车间没打字）不触发，避免误伤。
+# 注：游戏内输入判定无法从系统层面 100% 准确（UE4 游戏输入是引擎内处理），
+# 本钩子为最稳的启发式方案；是否开启由用户决定（默认关）。
+VK_RETURN = 0x0D
+KEYEVENTF_UNICODE = 0x0004
+
+# 目标游戏 exe 名（小写，不含 .exe）：官方启动器 + WeGame 都覆盖
+_MEOW_TARGET_EXES = {"calabiyau-win64-shipping", "calabiyau"}
+
+# 可打印字符判定：小键盘之外的数字/字母/标点等（用于判断"开聊天后打了字"）。
+# 不含 Enter/方向/功能/修饰键。
+_PRINTABLE_VK = set(range(0x20, 0x31)).union(range(0x41, 0x5B)).union(
+    range(0x30, 0x3A))  # 空格+可打印ASCII大致区间
+# 常用中英文标点/字母实际都落在上述区间；方向键等不在此列。
+# 明确排除的修饰/功能键（不在区间内，无需额外处理）。
+
+
+class MeowHook:
+    """常驻低层键盘钩子：目标游戏前台 + 回车发送时自动补词。
+    线程结构仿 NumpadPlayHook：独立线程 GetMessage 循环驱动钩子回调，
+    回调只做检测与轻量注入（注入用 SendInput，低层钩子回调内安全）。
+    开关由 PetWindow 控制（默认关）。"""
+
+    def __init__(self, get_word):
+        self._get_word = get_word      # 回调返回当前补词（如 '喵'）
+        self._hook = None
+        self._thread = None
+        self._running = False
+        self._lock = threading.Lock()
+        self._typed = False            # 自最近回车间是否打过可打印字
+        self._target = False           # 当前前台是否目标游戏（缓存）
+
+    def _proc(self, nCode, wParam, lParam):
+        if nCode < 0:
+            return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                          ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+        kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+        vk = int(kbd.vkCode)
+        flags = int(kbd.flags)
+        # 程序注入的键一律放行（避免我们注入的字符再被本钩子吞掉/循环）
+        if flags & LLKHF_INJECTED:
+            return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                          ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+        try:
+            is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if not is_down:
+                return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                              ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+            # 前台是否目标游戏
+            target = self._is_target_foreground()
+            if not target:
+                self._target = False
+                self._typed = False
+                return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                              ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+            self._target = True
+            if vk == VK_RETURN:
+                if self._typed:
+                    # 打了字再回车 → 判定为"发送"：注入补词 + 放行回车
+                    self._typed = False
+                    word = self._get_word() or ''
+                    if word:
+                        try:
+                            _send_unicode_text(word)
+                        except Exception:
+                            pass
+                # 第一次回车（开聊天/选菜单）不补词；放行
+                return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                              ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+            # 可打印字符 → 标记"打了字"（仅键按下，防重复计数用 down）
+            if vk in _PRINTABLE_VK or 32 <= vk <= 0xDE:
+                self._typed = True
+            return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                          ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+        except Exception:
+            return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                          ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+
+    def _is_target_foreground(self):
+        exe = _foreground_exe()
+        if not exe:
+            return False
+        # 官方版/wegame 版进程名都含 calabiyau；覆盖 do 全部
+        return exe in _MEOW_TARGET_EXES or 'calabiyau' in exe
+
+    def _message_loop(self):
+        try:
+            self._proc_ref = _LLKBD_ProcType(self._proc)
+            self._hook = _user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL, self._proc_ref, None, 0)
+        except Exception as e:
+            print('meow hook install fail:', e)
+            return
+        if not self._hook:
+            print('meow hook install failed (hook=0)')
+            return
+        msg = wintypes.MSG()
+        while self._running:
+            r = _user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
+            if r == 0 or r == -1:
+                break
+            _user32.TranslateMessage(ctypes.byref(msg))
+            _user32.DispatchMessageW(ctypes.byref(msg))
+        if self._hook:
+            _user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._message_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._hook:
+            try:
+                _user32.UnhookWindowsHookEx(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+
+
+def _send_unicode_text(text):
+    """用 SendInput(KEYEVENTF_UNICODE) 逐字注入 UTF-16 文本（中文等任意字符）。
+    适合游戏输入框（UE/DirectInput 游戏也能收到）。低层钩子回调内调用安全。"""
+    try:
+        if not hasattr(_send_unicode_text, '_ready'):
+            _user32.SendInput.argtypes = [
+                wintypes.UINT,
+                ctypes.POINTER(INPUT),
+                ctypes.c_int,
+            ]
+            _user32.SendInput.restype = wintypes.UINT
+            _send_unicode_text._ready = True
+        events = []
+        for ch in text:
+            code = ord(ch)
+            for cu in (code & 0xFFFF, (code >> 16) & 0xFFFF):
+                down = INPUT()
+                down.type = INPUT_KEYBOARD
+                down.u.ki.wVk = 0
+                down.u.ki.wScan = cu
+                down.u.ki.dwFlags = KEYEVENTF_UNICODE
+                up = INPUT()
+                up.type = INPUT_KEYBOARD
+                up.u.ki.wVk = 0
+                up.u.ki.wScan = cu
+                up.u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                events.append(down)
+                events.append(up)
+        arr = (INPUT * len(events))(*events)
+        _user32.SendInput(len(events), ctypes.byref(arr), ctypes.sizeof(INPUT))
+        time.sleep(0.02)  # 给游戏 UI 一点时间在回车处理前收到字符
+    except Exception as e:
+        print('send_unicode fail:', e)
+
+
 # 音频时长缓存（path → (mtime, 秒)）：避免每次播放都重读文件头
 _dur_cache = {}
 
@@ -1202,6 +1397,10 @@ class PetWindow(QWidget):
         self._numpad_enabled = bool(_cfg.get('numpad_hotkeys', False))
         # 智能小键盘钩子（开时用低层钩子拦截 1-9，聚焦输入框自动放行）
         self._numpad_hook = None
+        # 卡拉彼丘"回车自动补词"联动（默认关，需在 设置→卡丘游戏设置 开启）
+        self._meow_enabled = bool(_cfg.get('meow_hotkeys', False))
+        self._meow_word = str(_cfg.get('meow_word', '喵') or '喵')
+        self._meow_hook = None
         # 语音自定义快捷键: { 音频key(角色/文件名): 键名 }
         self._audio_hotkeys = dict(_cfg.get('audio_hotkeys', {}))
         # 语音来源：'role'=角色专属语音（默认）/ 'common'=通用语音（任何角色共用一套）
@@ -1296,6 +1495,9 @@ class PetWindow(QWidget):
         # 若配置开启小键盘智能播放 → 启动钩子
         if self._numpad_enabled:
             QTimer.singleShot(350, self._numpad_hook_start)
+        # 若配置开启卡丘回车补词 → 启动钩子
+        if self._meow_enabled:
+            QTimer.singleShot(400, self._meow_hook_start)
         # 空闲预解码：启动 1.5s 后在后台线程解码「当前点击语音」，让首次点击秒播
         QTimer.singleShot(1500, self._preload_click_audio)
 
@@ -1486,6 +1688,10 @@ class PetWindow(QWidget):
             pass
         try:
             self._numpad_hook_stop()
+        except Exception:
+            pass
+        try:
+            self._meow_hook_stop()
         except Exception:
             pass
         try:
@@ -2547,6 +2753,56 @@ class PetWindow(QWidget):
             self._numpad_hook_stop()
         self.refresh_tray_menu()
         print('numpad_hotkeys(smart) ->', self._numpad_enabled)
+
+    # ------------- 卡丘游戏联动：回车自动补词 -------------
+    def _meow_hook_start(self):
+        """启动卡丘回车补词钩子（前台为卡拉彼丘且检测到"打字后回车"才补词）"""
+        if self._meow_hook is not None:
+            return
+        try:
+            self._meow_hook = MeowHook(self._meow_word_now)
+            self._meow_hook.start()
+            _dbg('meow hook started')
+        except Exception as e:
+            print('meow hook start fail:', e)
+            self._meow_hook = None
+
+    def _meow_hook_stop(self):
+        """停止卡丘回车补词钩子"""
+        if self._meow_hook is not None:
+            try:
+                self._meow_hook.stop()
+            except Exception:
+                pass
+            self._meow_hook = None
+            _dbg('meow hook stopped')
+
+    def _meow_word_now(self):
+        """供钩子回调取当前补词（线程安全，只读字符串）"""
+        return getattr(self, '_meow_word', '喵')
+
+    def set_meow_enabled(self, enabled):
+        """卡拉彼丘"回车自动补词"开关（默认关）"""
+        self._meow_enabled = bool(enabled)
+        cfg = load_config()
+        cfg['meow_hotkeys'] = self._meow_enabled
+        save_config(cfg)
+        if self._meow_enabled:
+            self._meow_hook_start()
+        else:
+            self._meow_hook_stop()
+        print('meow_hotkeys ->', self._meow_enabled)
+
+    def set_meow_word(self, word):
+        """设置自定义补词（默认 喵）"""
+        word = (word or '').strip()
+        if not word:
+            word = '喵'
+        self._meow_word = word
+        cfg = load_config()
+        cfg['meow_word'] = self._meow_word
+        save_config(cfg)
+        print('meow_word ->', self._meow_word)
 
     def set_ptt_key(self, key_name):
         """设置开麦键（键名）。持久化并更新 ptt_vk"""

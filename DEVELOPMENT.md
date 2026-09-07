@@ -78,6 +78,22 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（新增「卡丘游戏设置」栏：卡拉彼丘回车自动补词联动，可开关/自定义词）
+- **需求**：在游戏（卡拉彼丘，官方启动器 + WeGame）聊天输入框打字按回车发送时，自动在句尾补一个词（默认"喵"，可自定义）
+- **机制说明（重要）**：卡拉彼丘为 UE4（Unreal Engine）游戏，文字输入由引擎内部处理，系统层无法 100% 判定"是否在输入"。采用最稳的**启发式**：常驻低层键盘钩子（WH_KEYBOARD_LL）检测"目标游戏前台 + 开聊天后打了字 + 再回车"序列，才拦截回车并先注入补词再放行——纯菜单/换窗口回车（两次回车间未打字）不触发，避免误伤
+- **实现**（`pet.py` + `settings_panel.py`）：
+  1. 新增 `MeowHook` 常驻钩子类（仿 NumpadPlayHook：独立线程 GetMessage 循环驱动回调）；`_foreground_exe()` 抽取出前台进程名；`_send_unicode_text()` 用 SendInput(KEYEVENTF_UNICODE) 逐字注入 UTF-16 文本
+  2. 目标进程名单：`calabiyau-win64-shipping` / 含 `calabiyau` 的进程名（官方版 + WeGame 都覆盖）
+  3. PetWindow 新增配置：`_meow_enabled`（default False）、`_meow_word`（default 喵）、`_meow_hook`，方法 `_meow_hook_start/stop`、`set_meow_enabled`、`set_meow_word`；退出时在 closeEvent 停止钩子
+  4. 设置面板新增独立折叠栏「🎮 卡丘游戏设置」（置于 快捷键/开麦 之后）：`chk_meow` 开关 + `ed_meow_word` 自定义补词输入框；refresh_all 回填状态
+- **验证**：
+  - MeowHook 状态机四场景单元级全过：未打字回车不补 ✓ / 打字后回车补"喵" ✓ / 发送后再直接回车不补 ✓ / 失焦重置后回车不补 ✓
+  - 设置面板「卡丘游戏设置」栏构建、开关与词输入、折叠开合、refresh_all 回填全部正常 ✅
+  - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
+- 涉及：`pet.py`（MeowHook/_foreground_exe/_send_unicode_text/配置字段与方法/closeEvent）、`settings_panel.py`（卡丘游戏设置折叠栏）
+- **部署**：打包后替换桌面 exe（默认关闭该功能；需在 设置→卡丘游戏设置 手动开启）
+- git：待提交（`_next`）
+
 ### 2026-09-07（交互收敛：悬停收起改 0.5s + 右键菜单去 AI 对话项只留用量 + 修复设置面板打开卡 2 秒）
 - **需求**：① 鼠标离开桌宠后对话条改为 **0.5 秒**收起；② 右键桌宠的 AI 对话/新建/记录/清理功能都不需要了，**只留「查看用量」**（AI 交互已全由悬停对话条承担）；③ 打开设置面板等待变长、点 ✕ 收起也卡 → 需优化
 - **实现**：

@@ -657,6 +657,43 @@ class SettingsPanel(QWidget):
         hl.addWidget(tip3)
         bl.addWidget(gb_hk)
 
+        # ---- 模块5：卡丘游戏设置（折叠头）----
+        self.game_expanded = True      # 卡丘游戏设置默认展开
+        self.btn_game_head = QPushButton("🎮 卡丘游戏设置")
+        self.btn_game_head.setCheckable(True)
+        self.btn_game_head.setStyleSheet(
+            "QPushButton{background:#3a3350; border:1px solid #5a4a80; border-radius:10px;"
+            " padding:10px 14px; font-size:15px; font-weight:bold; color:#e0d0ff; text-align:left;}"
+            "QPushButton:hover{background:#4a3f68;}"
+            "QPushButton:checked{background:#51437c; border-color:#7a66b8;}")
+        self.btn_game_head.clicked.connect(self._toggle_game_page)
+        bl.addWidget(self.btn_game_head)
+
+        self.game_box = QWidget()
+        self.game_box.setStyleSheet("background:#22252f; border:1px solid #33374a; border-radius:10px;")
+        gl = QVBoxLayout(self.game_box)
+        gl.setContentsMargins(12, 10, 12, 10)
+        gl.setSpacing(8)
+        self.chk_meow = QCheckBox("卡拉彼丘聊天回车自动补词（输入'喵'后回车自动加在句尾）")
+        self.chk_meow.toggled.connect(self._on_meow_toggled)
+        gl.addWidget(self.chk_meow)
+        r_word = QHBoxLayout()
+        r_word.addWidget(QLabel("补词："))
+        self.ed_meow_word = QLineEdit()
+        self.ed_meow_word.setPlaceholderText("喵")
+        self.ed_meow_word.setMaxLength(8)
+        self.ed_meow_word.editingFinished.connect(self._on_meow_word)
+        r_word.addWidget(self.ed_meow_word, 1)
+        gl.addLayout(r_word)
+        tip_game = QLabel("💡 生效范围：卡拉彼丘（官方启动器 / WeGame）。对局聊天输入框按回车发送时，"
+                          "自动在句尾补上上面填的词。仅当开聊天后真的打了字再回车才会补，避免菜单误触。")
+        tip_game.setWordWrap(True)
+        tip_game.setStyleSheet("color:#7a8099; font-size:11px;")
+        gl.addWidget(tip_game)
+        bl.addWidget(self.game_box)
+        self.game_box.setVisible(True)
+        self.btn_game_head.setChecked(True)
+
         # 底部按钮
         bottom = QHBoxLayout()
         btn_refresh = QPushButton("↻ 刷新")
@@ -916,6 +953,15 @@ class SettingsPanel(QWidget):
         self.chk_numpad.blockSignals(True)
         self.chk_numpad.setChecked(bool(getattr(pet, '_numpad_enabled', False)))
         self.chk_numpad.blockSignals(False)
+        # 卡丘游戏设置：回车自动补词
+        if hasattr(self, 'chk_meow'):
+            self.chk_meow.blockSignals(True)
+            self.chk_meow.setChecked(bool(getattr(pet, '_meow_enabled', False)))
+            self.chk_meow.blockSignals(False)
+        if hasattr(self, 'ed_meow_word'):
+            self.ed_meow_word.blockSignals(True)
+            self.ed_meow_word.setText(str(getattr(pet, '_meow_word', '喵') or '喵'))
+            self.ed_meow_word.blockSignals(False)
         self.chk_ptt.blockSignals(True)
         self.chk_ptt.setChecked(bool(getattr(pet, '_auto_ptt', False)))
         self.chk_ptt.blockSignals(False)
@@ -1460,6 +1506,25 @@ class SettingsPanel(QWidget):
             # 展开后刷新并尝试自动检测
             self.refresh_all()
             QTimer.singleShot(150, self._ai_auto_fetch)
+
+    # ---------------- 卡丘游戏设置 ----------------
+    def _toggle_game_page(self):
+        """点「卡丘游戏设置」折叠头：展开/收起"""
+        self.game_expanded = not self.game_expanded
+        self.game_box.setVisible(self.game_expanded)
+        self.btn_game_head.setChecked(self.game_expanded)
+
+    def _on_meow_toggled(self, on):
+        """「回车自动补词」开关"""
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'set_meow_enabled'):
+            pet.set_meow_enabled(on)
+
+    def _on_meow_word(self):
+        """自定义补词（默认 喵）"""
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'set_meow_word'):
+            pet.set_meow_word(self.ed_meow_word.text().strip())
 
     def _ai_tts_can_enable(self, pet=None):
         """TTS 朗读是否可开：必须 AI 对话已开启"""
