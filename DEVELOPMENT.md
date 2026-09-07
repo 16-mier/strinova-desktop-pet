@@ -91,7 +91,8 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   4. **口语化提示词**：`AiChatManager.SPOKEN_RULES`（口语自然、短句、避免"嘻嘻/嘤嘤/嘿嘿嘿"等拗口叠字拟声、数字英文按口语读）作为**强制后缀**拼在 `system_prompt()` 结果上——用户自定义人设也生效（带去重判断）；`default_tts_prompt()` 强化"改写朗读稿口语化 + 去拗口拟声 + 数字口语化"，TTS 念怪音问题从源头缓解
 - **验证**：py_compile 全过 ✅；新增 `session_smoke.py`（22 项：会话建/切/隔离/清理保留/可视化控件/用户右对齐/AI 左对齐（Qt block 级断言）/口语规则）全绿 ✅；`qt_align_check.py` 确认 Qt 渲染后用户块 AlignRight、AI 块 AlignLeft ✅；`usage_layout_smoke.py` 更新 14 项 ✅；`history_smoke.py` 22 项 ✅；`gui_smoke.py` ✅；`bubble_smoke.py`（尺寸断言更新为可视化窗）✅；`ai_selftest.py` ✅；panel_smoke2 ✅（panel_smoke3 引用已删除的旧 UI 属性 `cmb_ai_tts_mode`，属历史过期测试非本次引入）
 - 涉及：`ai_chat.py`（_msg_html/_is_cmd_msg/BubbleWidget.show_thinking/_on_ai_done/_on_tts_done/_speak_text/ChatWindow 全重写/ChatHistoryWindow.show_history/AiChatManager 会话管理+open_chat+_refresh_chat_if_open+SPOKEN_RULES）、`pet.py`（AI 菜单加「＋ 新建会话」）、新增 `session_smoke.py`/`qt_align_check.py`、更新 `usage_layout_smoke.py`/`bubble_smoke.py`
-- 备注：桌面 exe 待重新打包部署
+- **打包部署**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dist\卡丘简易桌宠.exe`（11:39，55,221,883B）；备份上一版 → 桌面 `卡丘简易桌宠_上一版.exe`（10:52 版）；覆盖桌面 `卡丘简易桌宠_最新.exe`；启动验证 OK（主进程+提权副本，内存正常）→ 测试后停
+- git：`6c5bcd0`（AI 对话四合一）
 
 ### 2026-09-07（部署：含 AI 菜单+累计积分的新版 exe 10:52，55.2MB）
 - **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:52，55,217,208B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
