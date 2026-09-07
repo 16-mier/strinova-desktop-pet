@@ -104,6 +104,53 @@ import html
 safe = html.escape('<script>alert(1)</script>')
 ck("html escaped", '<script>' not in safe and '&lt;' in safe)
 
+# ===== 7. 跟随桌宠 + 实时刷新 =====
+# 重新打开历史窗（带消息）
+mgr._messages = [
+    {'role': 'user', 'content': 'msg one', 'ts': '10:00:01'},
+    {'role': 'assistant', 'content': 'reply one', 'ts': '10:00:02'},
+]
+hw.show_history(mgr._messages, mgr.system_prompt())
+hw.show()
+mgr._history = hw
+hw._start_follow()
+app.processEvents()
+ck("follow timer running", hw._follow.isActive())
+
+# 记录初始位置，模拟桌宠从 (600,400) 移到 (700,500)
+pos0 = hw.pos()
+hw._follow_offset = hw.pos() - pet.frameGeometry().topLeft()
+# 模拟 pet.frameGeometry 改变
+class _Pet2:
+    role = 'xinghui'
+    def frameGeometry(self):
+        return QRect(700, 500, 200, 200)
+    def load_config(self): return {}
+    def save_config(self, c): pass
+    def base_dir(self): return '.'
+hw._pet = _Pet2()
+hw._follow_pet()   # 手动触发一次跟移
+app.processEvents()
+pos1 = hw.pos()
+ck("history follows pet move (x changed)", pos1.x() == pos0.x() + 100 and pos1.y() == pos0.y() + 100)
+ck("follow continues after move", hw._follow.isActive())
+
+# 实时刷新：历史窗开着时往 _messages 加消息再调刷新
+mgr._messages.append({'role': 'user', 'content': 'brand new q', 'ts': '10:02:00'})
+mgr._refresh_history_if_open()
+ck("refresh adds new msg", "brand new q" in hw.browser.toPlainText())
+mgr._messages.append({'role': 'assistant', 'content': 'brand new a', 'ts': '10:02:01'})
+mgr._refresh_history_if_open()
+ck("refresh adds new ai reply", "brand new a" in hw.browser.toPlainText())
+
+# 清理后刷新 → 空提示
+mgr._messages = []
+mgr._refresh_history_if_open()
+ck("refresh after clear shows empty", "暂无对话内容" in hw.browser.toPlainText())
+ck("follow stopped after hide", (hw.hide(), not hw._follow.isActive())[1])
+
+# 恢复 pet 供后续（无）
+
 print("\n==== results ====")
 fails = [n for n, ok in checks if not ok]
 print("total %d, failed %d" % (len(checks), len(fails)))

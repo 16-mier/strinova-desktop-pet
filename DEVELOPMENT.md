@@ -78,6 +78,21 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（历史窗增强：跟随桌宠移动 + 实时自动刷新）
+- **需求（用户）**：完整对话窗口要能**跟着桌宠移动**；且要**实时刷新数据**——新聊内容自动出现，不用重新打开
+- **实现**（`ai_chat.py`）：
+  1. **历史窗跟随桌宠**：ChatHistoryWindow 加 `_follow` QTimer(16ms)+`_follow_pet()`（保持相对偏移平移，参照 ChatWindow）；**`_start_follow` 立即锚定偏移**（而非首 tick 才算，避免第一跳）；拖动窗口时停跟随、松开 **1.5s 后自动恢复**（`_resume_timer`，大窗友好）；hideEvent 停跟随
+  2. **Manager 接线跟随**：`show_history()` 打开后 `_start_follow()`；`pet_moved()` 对历史窗（可见且非拖动中）调 `_follow_pet()` → 桌宠拖动时历史窗/气泡/输入条三者同步跟移
+  3. **实时刷新**：新增 `_refresh_history_if_open()`（历史窗可见时用当前 `_messages` 重渲染，保留位置不动）；在 `_on_send`（用户消息入列）、`_on_ai_done`（assistant 回复入列）、`clear_context`（清空）三处调用 → 开着历史窗时新消息/新回复自动出现，不用重开
+  4. **定位边界修复**：`show_history` 对"大窗放不下 pet 上方/下方"退化——优先上方、上方不够放下方、都不够贴屏顶；x/y 都 clamp 屏内
+- **实现**（测试）：`history_smoke.py` 扩充到 22 项——新增跟随定时器在跑、pet 移动窗口跟移(delta=位移量)、刷新后新消息/新回复出现、清理后变空、hide 停跟随
+- **验证**：
+  - `history_smoke.py` 22/22 PASS ✅
+  - 离屏集成：pet +50,+50 → 历史窗精确平移 (50,50) ✅；实时刷新 live 窗口内容更新 ✅
+  - `usage_layout_smoke.py` 11 项 + `gui_smoke.py` 回归 + py_compile 全过 ✅
+- 涉及：`ai_chat.py`（ChatHistoryWindow 跟随/_start_follow 锚定/拖动暂停恢复/show_history 定位/Manager pet_moved+show_history+_refresh_history_if_open+_on_send+_on_ai_done+clear_context）、`history_smoke.py`
+- 备注：历史窗拖动松开 1.5s 自动恢复跟随（可在 `_resume_timer.setInterval` 调）；实时刷新不改窗口位置、不清滚动位置到顶
+
 ### 2026-09-07（新增「📜 记录」按钮 + 完整对话上下文窗口 ChatHistoryWindow）
 - **需求（用户）**：添加一个按键，能查看当前对话的完整上下文，直接列出一个完整的对话窗口；要求开发得精致
 - **实现**（`ai_chat.py`）：

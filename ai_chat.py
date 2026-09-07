@@ -907,9 +907,77 @@ class ChatHistoryWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._drag_offset = None
+        self._user_dragged = False    # 用户手动拖动 → 暂停跟随
+        self._follow = QTimer(self)   # 跟随桌宠移动
+        self._follow.setInterval(16)
+        self._follow.timeout.connect(self._follow_pet)
+        self._resume_timer = QTimer(self)   # 拖后自动恢复跟随
+        self._resume_timer.setSingleShot(True)
+        self._resume_timer.setInterval(1500)
+        self._resume_timer.timeout.connect(self._resume_follow)
         self.setStyleSheet("ChatHistoryWindow{background:%s; }"
                            % self._BG)
         self._build_ui()
+
+    # ---------- 跟随桌宠 ----------
+    def _follow_pet(self):
+        if self._user_dragged or self._pet is None:
+            return
+        try:
+            pet_rect = self._pet.frameGeometry()
+        except Exception:
+            return
+        if pet_rect is None:
+            return
+        off = getattr(self, '_follow_offset', None)
+        if off is None:
+            off = self.pos() - pet_rect.topLeft()
+            self._follow_offset = off
+        nx = pet_rect.left() + off.x()
+        ny = pet_rect.top() + off.y()
+        try:
+            scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
+            if scr is not None:
+                geo = scr.availableGeometry()
+                nx = max(geo.left(), min(nx, geo.right() - self.width()))
+                ny = max(geo.top(), min(ny, geo.bottom() - self.height()))
+        except Exception:
+            pass
+        self.move(nx, ny)
+
+    def _resume_follow(self):
+        """拖动松开 1.5s 后若未再次拖动 → 恢复跟随并重算偏移"""
+        self._user_dragged = False
+        self._follow_offset = None
+        try:
+            pet_rect = self._pet.frameGeometry()
+        except Exception:
+            return
+        if pet_rect is not None:
+            self._follow_offset = self.pos() - pet_rect.topLeft()
+
+    def _start_follow(self, initial_pos=None):
+        """开始跟随。initial_pos 为 None 时用当前窗口位置立即锚定相对偏移，
+        之后桌宠移动窗口按相对偏移平移（避免首 tick 才锚导致第一跳）。"""
+        self._user_dragged = False
+        if initial_pos is not None:
+            self._follow_offset = initial_pos
+        else:
+            try:
+                pet_rect = self._pet.frameGeometry()
+                if pet_rect is not None:
+                    self._follow_offset = self.pos() - pet_rect.topLeft()
+                else:
+                    self._follow_offset = None
+            except Exception:
+                self._follow_offset = None
+        self._follow.start()
+
+    def stop_follow(self):
+        try:
+            self._follow.stop()
+        except Exception:
+            pass
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -1049,11 +1117,20 @@ class ChatHistoryWindow(QWidget):
         QTimer.singleShot(1200,
                           lambda: self.btn_copy.setText("复制全文"))
 
-    # ---------- 窗口拖动 ----------
+    # ---------- 窗口拖动（拖动时停跟随，松开 1.5s 后自动恢复） ----------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_offset = e.globalPosition().toPoint() - \
                 self.frameGeometry().topLeft()
+            self._user_dragged = True
+            try:
+                self._follow.stop()
+            except Exception:
+                pass
+            try:
+                self._resume_timer.stop()
+            except Exception:
+                pass
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -1064,7 +1141,11 @@ class ChatHistoryWindow(QWidget):
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        was_drag = self._drag_offset is not None
         self._drag_offset = None
+        if was_drag and self._user_dragged:
+            # 短暂停顿后恢复跟随（除非期间又拖动）
+            self._resume_timer.start()
         super().mouseReleaseEvent(e)
 
     def keyPressEvent(self, e):
@@ -1073,6 +1154,17 @@ class ChatHistoryWindow(QWidget):
             e.accept()
             return
         super().keyPressEvent(e)
+
+    def hideEvent(self, ev):
+        try:
+            self._follow.stop()
+        except Exception:
+            pass
+        try:
+            self._resume_timer.stop()
+        except Exception:
+            pass
+        super().hideEvent(ev)
 
 
 class ChatWindow(QWidget):
@@ -1596,27 +1688,52 @@ class AiChatManager(QObject):
         self._chat.input.setFocus()
 
     def show_history(self):
-        """点「📜 记录」：弹出完整对话上下文窗口"""
+        """点「📜 记录」：弹出完整对话上下文窗口并跟随桌宠"""
         if self._history is None:
             self._history = ChatHistoryWindow(self._pet)
         self._history.show_history(self._messages, self.system_prompt())
-        # 显示在桌宠附近（聊天气泡同侧，略偏上）
+        # 显示在桌宠附近：优先放桌宠上方，上方不够放下方，都不够则贴屏顶
+        # 定位后记录相对偏移供跟随
         try:
             pr = self._pet.frameGeometry()
             scr = QApplication.screenAt(pr.center()) or QApplication.primaryScreen()
             geo = scr.availableGeometry() if scr is not None else None
-            x = pr.right() - self._history.width()
+            w, h = self._history.width(), self._history.height()
+            x = pr.right() - w
             if geo is not None:
-                x = max(geo.left(), min(x, geo.right() - self._history.width()))
-            y = pr.top() - self._history.height() - 6
-            if geo is not None and y < geo.top():
-                y = pr.bottom() + 10
+                # x：尽量不遮 pet 且不越屏
+                x = max(geo.left(), min(x, geo.right() - w))
+            # y：优先 pet 上方
+            y = pr.top() - h - 6
+            if geo is not None:
+                if y < geo.top():
+                    # 上方放不下 → pet 下方
+                    y = pr.bottom() + 10
+                    if y + h > geo.bottom():
+                        # 下方也放不下 → 贴屏顶（尽量可见）
+                        y = geo.top()
+                if y + h > geo.bottom():
+                    y = max(geo.top(), geo.bottom() - h)
             self._history.move(x, y)
         except Exception:
             pass
         self._history.show()
         self._history.raise_()
         self._history.activateWindow()
+        # 跟随桌宠移动
+        try:
+            self._history._start_follow(initial_pos=None)
+        except Exception:
+            pass
+
+    def _refresh_history_if_open(self):
+        """消息有变化时：若历史窗可见则实时刷新（不用重开）"""
+        if self._history is None or not self._history.isVisible():
+            return
+        try:
+            self._history.show_history(self._messages, self.system_prompt())
+        except Exception:
+            pass
 
     def clear_context(self):
         """清理多轮上下文（开始全新对话）"""
@@ -1627,12 +1744,11 @@ class AiChatManager(QObject):
                 self._chat.set_usage('')
             except Exception:
                 pass
-        # 历史窗同步为空
-        if self._history is not None and self._history.isVisible():
-            try:
-                self._history.show_history([], self.system_prompt())
-            except Exception:
-                pass
+        # 历史窗实时刷新（清空后同步为空）
+        try:
+            self._refresh_history_if_open()
+        except Exception:
+            pass
         try:
             self._show_bubble('已清理上下文，开始全新对话 ✨')
         except Exception:
@@ -1652,7 +1768,7 @@ class AiChatManager(QObject):
                 pass
 
     def pet_moved(self):
-        """桌宠拖动/移动时调用：气泡与输入条立即重定位（无轮询延迟，一体跟随）"""
+        """桌宠拖动/移动时调用：气泡/输入条/历史窗立即重定位（无轮询延迟，一体跟随）"""
         if self._bubble is not None and self._bubble.isVisible():
             try:
                 self._bubble._reposition()
@@ -1661,6 +1777,12 @@ class AiChatManager(QObject):
         if self._chat is not None and self._chat.isVisible() and not getattr(self._chat, '_user_dragged', False):
             try:
                 self._chat._follow_pet()
+            except Exception:
+                pass
+        if self._history is not None and self._history.isVisible() \
+                and not getattr(self._history, '_user_dragged', False):
+            try:
+                self._history._follow_pet()
             except Exception:
                 pass
 
@@ -1691,6 +1813,11 @@ class AiChatManager(QObject):
         # 本地完整上下文：带时间戳（供「完整对话」窗口展示）
         self._messages.append({'role': 'user', 'content': text,
                                'ts': time.strftime('%H:%M:%S')})
+        # 实时刷新历史窗（若开着：立刻能看到自己刚发的消息）
+        try:
+            self._refresh_history_if_open()
+        except Exception:
+            pass
         self._ai_worker = AIWorker(base_url, api_key, model, msgs, self)
         self._ai_worker.done.connect(self._on_ai_done)
         self._ai_worker.finished.connect(self._ai_worker.deleteLater)
@@ -1744,6 +1871,11 @@ class AiChatManager(QObject):
             pass
         self._messages.append({'role': 'assistant', 'content': reply,
                                'ts': time.strftime('%H:%M:%S')})
+        # 实时刷新历史窗（若开着：自动补上 AI 新回复，无需重开）
+        try:
+            self._refresh_history_if_open()
+        except Exception:
+            pass
         # TTS 依附 AI：若朗读开，则气泡文字等音频就绪后随音频同步蹦字（同始同终）
         if self.tts_enabled() and self.enabled():
             self._seq += 1
