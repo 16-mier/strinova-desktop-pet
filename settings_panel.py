@@ -384,6 +384,17 @@ class SettingsPanel(QWidget):
         lbl_price_hint = QLabel("选模型时若单价仍是默认值会自动按官方价带入（deepseek-v4-flash 0.14/0.28/缓存0.0028）；改后不再联动。")
         lbl_price_hint.setStyleSheet("color:#6f7899; font-size:10px; margin-top:0px;")
         ail.addWidget(lbl_price_hint)
+        # DeepSeek 峰谷自动计价：高峰用所填价，空闲时段半价（北京时间周一至五 9-12/14-18 高峰）
+        peak_row = QHBoxLayout()
+        peak_row.setSpacing(6)
+        self.chk_ai_peak = QCheckBox("⚡ 按 DeepSeek 峰谷自动计价（空闲半价）")
+        self.chk_ai_peak.toggled.connect(self._ai_apply_peak)
+        peak_row.addWidget(self.chk_ai_peak)
+        peak_row.addStretch(1)
+        ail.addLayout(peak_row)
+        self.lbl_peak_state = QLabel("")
+        self.lbl_peak_state.setStyleSheet("color:#6f7899; font-size:10px;")
+        ail.addWidget(self.lbl_peak_state)
         # TTS（朗读，依附 AI：AI 对话开启才能开启朗读）
         self.chk_ai_tts = QCheckBox("朗读 AI 回复（TTS）")
         self.chk_ai_tts.toggled.connect(self._ai_apply_tts)
@@ -981,6 +992,15 @@ class SettingsPanel(QWidget):
             self.ed_ai_price_in.setText('0.14')
             self.ed_ai_price_out.setText('0.28')
             self.ed_ai_price_cache.setText('0.0028')
+        # 峰谷自动计价开关回填 + 当前状态
+        try:
+            peak_on = bool(ai.get('peak_pricing', True))
+            self.chk_ai_peak.blockSignals(True)
+            self.chk_ai_peak.setChecked(peak_on)
+            self.chk_ai_peak.blockSignals(False)
+            self._refresh_peak_state()
+        except Exception:
+            pass
         tp = ai.get('tts_prompt', '')
         tp_def = ai_mgr.default_tts_prompt() if ai_mgr is not None else ''
         self.ed_ai_ttsprompt.blockSignals(True)
@@ -1597,6 +1617,38 @@ class SettingsPanel(QWidget):
             except Exception:
                 pcache = 0.0028
             pet.ai.set_prices(pin, pout, pcache)
+
+    def _ai_apply_peak(self, on):
+        """峰谷自动计价开关 → 存 ai.peak_pricing（默认开启）"""
+        pet = self._current_pet()
+        if pet is not None and hasattr(pet, 'ai'):
+            from ai_chat import _save_ai_cfg as _sv
+            _sv(peak_pricing=bool(on))
+            self._refresh_peak_state()
+
+    def _refresh_peak_state(self):
+        """更新峰谷状态小字：当前高峰(全价) / 空闲(半价)"""
+        try:
+            pet = self._current_pet()
+            ai = pet.ai if pet is not None and hasattr(pet, 'ai') else None
+            if ai is None or not getattr(self, 'lbl_peak_state', None):
+                return
+            peak_on = bool(ai.cfg().get('peak_pricing', True))
+            if not peak_on:
+                self.lbl_peak_state.setText("峰谷计价已关闭（按所填单价计）")
+                return
+            peak = ai.is_peak_time()
+            in_, out, cache = ai.raw_prices()
+            if peak:
+                self.lbl_peak_state.setText(
+                    "当前：高峰时段（北京时间周一至五 9-12/14-18）→ 全价 %.4g/%.4g/%.4g $/M"
+                    % (in_, out, cache))
+            else:
+                self.lbl_peak_state.setText(
+                    "当前：空闲时段 → 自动半价 %.4g/%.4g/%.4g $/M"
+                    % (in_ / 2, out / 2, cache / 2))
+        except Exception:
+            pass
 
     def _ai_apply_ttsprompt(self):
         pet = self._current_pet()

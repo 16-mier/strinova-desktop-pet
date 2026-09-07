@@ -1401,6 +1401,28 @@ class AiChatManager(QObject):
             self._player = None
             self._audio_out = None
 
+        # 跨时段自动刷新：高峰↔空闲翻转时，若用量行可见则用新单价重算显示
+        self._last_peak = self.is_peak_time()
+        self._peak_timer = QTimer(self)
+        self._peak_timer.setInterval(60000)   # 每分钟检查一次
+        self._peak_timer.timeout.connect(self._on_peak_tick)
+        self._peak_timer.start()
+
+    def _on_peak_tick(self):
+        """每分钟检查峰谷时段是否翻转；翻转则刷新用量显示"""
+        try:
+            now_peak = self.is_peak_time()
+            if now_peak != self._last_peak:
+                self._last_peak = now_peak
+                # 时段变了 → 用量按新单价重算
+                if self._last_usage:
+                    try:
+                        self._sync_chat_usage()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     @staticmethod
     def default_system_prompt():
         return ('你是桌宠「卡丘」里的 AI 小伙伴，活泼友善，'
@@ -1457,24 +1479,83 @@ class AiChatManager(QObject):
     # 默认按 deepseek-v4-flash 官网价（每百万 token，美元）：
     #   输入（缓存未命中）0.14 / 输入（缓存命中）0.0028 / 输出 0.28
     # 面板可覆盖（ai_price_in / ai_price_cache / ai_price_out）。
+    # DeepSeek 采用峰谷定价：高峰价 = 面板填的价；空闲时段 = 高峰价的一半。
+    #   高峰时段（北京时间周一至五）：9:00-12:00、14:00-18:00；其余（含周六日）为空闲。
+    @staticmethod
+    def is_peak_time(dt=None):
+        """判断给定时间（缺省=现在）是否处于 DeepSeek 高峰时段（北京时间）。
+        高峰 = 周一至周五 9:00-12:00 或 14:00-18:00（含边界）；周六/日全天空闲。"""
+        try:
+            import datetime as _dt
+            if dt is None:
+                # 统一用 UTC+8 计算，不依赖机器时区设置
+                now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8)))
+            elif dt.tzinfo is None:
+                now = dt.replace(tzinfo=_dt.timezone(_dt.timedelta(hours=8)))
+            else:
+                now = dt
+            wd = now.weekday()          # Mon=0..Sun=6
+            if wd >= 5:                 # 周六日空闲
+                return False
+            hm = now.hour * 60 + now.minute
+            # 09:00-12:00 (含 12:00 整点前) / 14:00-18:00
+            return (9 * 60 <= hm < 12 * 60) or (14 * 60 <= hm < 18 * 60)
+        except Exception:
+            return True   # 判断失败按高峰（保守用面板原价）
+
+    def peak_pricing_enabled(self):
+        """是否启用 DeepSeek 峰谷自动计价。默认开启（ai.peak_pricing 默认 true）。"""
+        return bool(self.cfg().get('peak_pricing', True))
+
+    def _peak_factor(self):
+        """当前计价系数：高峰=1.0；空闲且启用峰谷=0.5（官方半价）；未启用=1.0"""
+        if not self.peak_pricing_enabled():
+            return 1.0
+        return 0.5 if not self.is_peak_time() else 1.0
+
+    def _peak_tag(self):
+        """用量行的时段标注文本（空=高峰/未启用）"""
+        if not self.peak_pricing_enabled():
+            return ''
+        return '' if self.is_peak_time() else '· 空闲半价'
+
     def input_price(self):
         try:
-            return float(self.cfg().get('ai_price_in', 0.14) or 0.14)
+            base = float(self.cfg().get('ai_price_in', 0.14) or 0.14)
         except Exception:
-            return 0.14
+            base = 0.14
+        return base * self._peak_factor()
 
     def cache_price(self):
         """输入缓存命中单价（$ / 百万 token）。默认 deepseek-v4-flash 缓存命中 0.0028"""
         try:
-            return float(self.cfg().get('ai_price_cache', 0.0028) or 0.0028)
+            base = float(self.cfg().get('ai_price_cache', 0.0028) or 0.0028)
         except Exception:
-            return 0.0028
+            base = 0.0028
+        return base * self._peak_factor()
 
     def output_price(self):
         try:
-            return float(self.cfg().get('ai_price_out', 0.28) or 0.28)
+            base = float(self.cfg().get('ai_price_out', 0.28) or 0.28)
         except Exception:
-            return 0.28
+            base = 0.28
+        return base * self._peak_factor()
+
+    def raw_prices(self):
+        """面板填的原始单价（高峰价），不含峰谷折扣。返回 (in, out, cache)。"""
+        try:
+            pin = float(self.cfg().get('ai_price_in', 0.14) or 0.14)
+        except Exception:
+            pin = 0.14
+        try:
+            pout = float(self.cfg().get('ai_price_out', 0.28) or 0.28)
+        except Exception:
+            pout = 0.28
+        try:
+            pc = float(self.cfg().get('ai_price_cache', 0.0028) or 0.0028)
+        except Exception:
+            pc = 0.0028
+        return pin, pout, pc
 
     @staticmethod
     def suggested_prices(model):
@@ -1546,9 +1627,10 @@ class AiChatManager(QObject):
             pin = pout = total = pcache = 0
         pcache = min(pcache, pin) if pin else 0   # 脏数据防护：缓存命中不应超过总输入
         cost, _d = self.calc_cost(usage)
+        tag = self._peak_tag()
         if pcache:
-            return '本次 ↑%d[缓存%d] ↓%d 共%d tok  ≈ $%.4f' % (pin, pcache, pout, total, cost)
-        return '本次 ↑%d ↓%d 共%d tok  ≈ $%.4f' % (pin, pout, total, cost)
+            return '本次 ↑%d[缓存%d] ↓%d 共%d tok  ≈ $%.4f%s' % (pin, pcache, pout, total, cost, tag)
+        return '本次 ↑%d ↓%d 共%d tok  ≈ $%.4f%s' % (pin, pout, total, cost, tag)
 
     def _sync_chat_usage(self):
         """把上次用量显示到聊天条（打开聊天窗时恢复）"""

@@ -78,6 +78,25 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（智能识别 DeepSeek 高峰时段：峰谷自动计价，空闲半价）
+- **需求（用户）**：价格那里要能**智能识别 DeepSeek 的高峰期**（高峰全价/空闲半价自动切换）
+- **官方依据**（api-docs.deepseek.com 中文/英文页一致）：高峰 = **北京时间周一至周五 9:00-12:00、14:00-18:00**（UTC 01-04/06-10）；其余时间 + 周六/日 = 空闲，**空闲价 = 高峰价一半**
+- **实现**（`ai_chat.py`）：
+  1. `is_peak_time(dt=None)` 静态判断：UTC+8 固定算（不依赖机器时区）；工作日 9-12/14-18 区间含 9:00/14:00 整点、不含 12:00/18:00 整点；周六/日全天空闲；异常保守按高峰
+  2. `peak_pricing_enabled()` 读 `ai.peak_pricing`（**默认 True**）
+  3. `_peak_factor()`：空闲且启用 → 0.5（官方半价）；否则 1.0。`input_price/output_price/cache_price` 返回值 = 配置原始价 × 因子
+  4. `raw_prices()`：面板原始高峰价（不含折扣）
+  5. `_peak_tag()`：空闲时返回 `· 空闲半价` 标注；`_usage_text` 金额后追加
+  6. **跨时段自动刷新**：`_peak_timer` QTimer 每 60s 检查 `_last_peak` 翻转，翻转时 `_sync_chat_usage()` 用新单价重算用量行（开着聊天窗时自动切换高峰/半价显示）
+- **实现**（`settings_panel.py`）：单价区加「⚡ 按 DeepSeek 峰谷自动计价（空闲半价）」开关（默认勾选）+ 状态小字 `lbl_peak_state`（当前高峰→全价 0.14/0.28/0.0028 或 空闲→自动半价 0.07/0.14/0.0014，随开关变化）；`_ai_apply_peak` 写 `ai.peak_pricing` + 刷新状态；`_refresh_peak_state` 动态读 is_peak_time/raw_prices 显示；refresh_all 回填开关与状态
+- **验证**：
+  - `is_peak_time` 11 边界全对（8:59 空/9:00 峰/11:59 峰/12:00 空/13:59 空/14:00 峰/17:59 峰/18:00 空/23:00 空/周六 10:00 空/周日 15:00 空）✅
+  - 空闲半价 0.14→0.07、0.28→0.14、0.0028→0.0014 ✅；高峰全价、关闭开关全价 ✅
+  - 用量文本带「· 空闲半价」标注 ✅；面板开关默认开/关闭写入 peak_pricing=False/状态字三态切换 ✅
+  - history_smoke 22 项 + usage_layout 11 项 + gui_smoke + py_compile 全过 ✅
+- 涉及：`ai_chat.py`（is_peak_time/peak_pricing_enabled/_peak_factor/_peak_tag/raw_prices/input·output·cache·price×因子/_peak_timer/_on_peak_tick/_usage_text 标注）、`settings_panel.py`（chk_ai_peak/lbl_peak_state/_ai_apply_peak/_refresh_peak_state/refresh_all 回填）
+- 备注：面板填的单价视为**高峰价**，空闲自动 ×0.5；关闭开关即回到"恒按所填价"。用户 commandcode 中转若已按其自身峰谷计价，可关掉本开关避免双重折扣
+
 ### 2026-09-07（部署：含「跟随桌宠+实时刷新」历史窗的新版 exe 10:18，55.2MB）
 - **打包**：`python -m PyInstaller --noconfirm --clean '卡丘简易桌宠.spec'` → `dsh-desktop-pet\dist\卡丘简易桌宠.exe`（10:18，55,210,955B）；exit 1 仍为 UPX 个别 DLL 告警、产物完整
 - **部署**：覆盖桌面 `卡丘简易桌宠_最新.exe`；启动验证 OK（主进程+提权副本）→ 测试后停
