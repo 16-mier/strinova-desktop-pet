@@ -78,6 +78,20 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（修复 TTS 启动/合成 500 + 设置面板角色列表按阵营分组 + 克隆参考英文路径）
+- **问题（用户）**：①"启动 TTS 功能有问题"——本地录音服务跑不起来/合成 502；②设置面板角色列表平铺无阵营，不好挑角色；③TTS 参考语音路径太长且为中文路径
+- **TTS 根因**：
+  1. `_AUDIO_CPP_SERVER` 只找 `ai_chat.py` 同级 `audio-cpp/bin-cuda/`（源码/打包内不存在）；服务实际部署在 `breeze-tts-local/audio-cpp/bin-cuda` → 找不到服务程序 → 8080 无监听 → 请求 502
+  2. 模型查找 `_models_paths()` 只搜 `svc_dir/models`（bin-cuda/models 空），真模型在上一级 `audio-cpp/models`（q8 4.7G / bf16 6.8G）
+  3. **audiocpp_server 只支持纯 ASCII 路径/文件名**：克隆参考在中文路径（`卡丘简易桌宠数据/...`）下报 "could not open WAV input" → 合成 HTTP 500；复制到纯英文目录 `references/refs_en/<英文名>.wav` 后合成 OK
+- **修复**（`ai_chat.py`）：`_find_tts_server()` 多级候选（环境变量→同级→数据目录→breeze-tts-local 常见部署→_MEIPASS 打包场景向上探测）；`bind_pet_module()` 注入后重新定位；`_models_paths()` 增加上级 models 目录候选
+- **修复**（`pet.py`）：新增 `ROLE_EN_NAMES`（24 角色英文名映射，源自 wiki）；`_apply_role_ai_profile` 克隆参考优先写纯英文路径（refs_en/<英文名>.wav），无副本回退中文 tts_refs
+- **修复**（`settings_panel.py`）：`_refresh_role_list` 加阵营分组标题（— 欧泊 — 等，灰色加粗不可点，UserRole=None）；`_on_role_clicked`/`_delete_selected_role` 防点标题误操作
+- **克隆参考英文副本**：24 角色 ref.wav+txt 已复制到 `breeze-tts-local/audio-cpp/references/refs_en/`（不含中文）
+- **验证**：`tts_service_start()` 实测启动+加载 bf16 ✅；英文路径合成 276KB wav ✅；面板角色列表 27 项（3 阵营标题+24 角色）分组正确 ✅
+- 涉及：`ai_chat.py`、`pet.py`、`settings_panel.py`、`assets/`（refs_en 外部目录）
+- git：（待提交）
+
 ### 2026-09-07（语音功能最终形态：点按触发音=每角色"卡拉彼丘"台词；TTS克隆参考+系统提示词随角色自动切换）
 - **需求澄清（用户纠正）**：之前下载的自我介绍台词**不是**点按触发音，而是**TTS 克隆语句**；点按触发音应该是每角色说"卡拉彼丘"那句；切换角色要自动切换 TTS 克隆配置与系统提示词
 - **每角色"卡拉彼丘"触发音**：wiki 语音页每角色都有台词纯为「卡拉彼丘」的独立 mp3 → 全部下载成功 24/24，集中存 `assets/trigger_voice/<角色名>/卡拉彼丘.mp3`（角色目录保持干净只留形象图）

@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -71,8 +72,13 @@ pet_mod = None
 
 
 def bind_pet_module(mod):
-    global pet_mod
+    global pet_mod, _AUDIO_CPP_SERVER
     pet_mod = mod
+    # pet_mod 注入后再定位一次 TTS 服务（数据目录候选此时才可探测）
+    try:
+        _AUDIO_CPP_SERVER = _find_tts_server()
+    except Exception:
+        pass
 
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
@@ -143,9 +149,65 @@ def _tts_dir():
 # audio-cpp/bin-cuda/audiocpp_server.exe 查找（便于在本地部署 audio.cpp 后使用）。
 # 找不到服务程序时相关启动/停止接口返回明确错误，不影响其它功能。
 # ============================================================================
-_AUDIO_CPP_SERVER = os.environ.get('AUDIOCPP_SERVER', '') or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'audio-cpp', 'bin-cuda', 'audiocpp_server.exe')
+def _find_tts_server():
+    """按优先级定位 audiocpp_server.exe：
+    1) 环境变量 AUDIOCPP_SERVER
+    2) 本文件同级的 audio-cpp/bin-cuda/（打包后 _MEIPASS 内）
+    3) 用户数据目录下 audio-cpp/bin-cuda（可写持久，桌面部署常用）
+    4) 常见本地部署目录：<项目>/breeze-tts-local/audio-cpp/bin-cuda
+    """
+    env = (os.environ.get('AUDIOCPP_SERVER') or '').strip()
+    if env:
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands = [
+        os.path.join(here, 'audio-cpp', 'bin-cuda', 'audiocpp_server.exe'),
+    ]
+    if pet_mod is not None:
+        try:
+            cands.append(os.path.join(pet_mod.base_dir(), 'audio-cpp',
+                                      'bin-cuda', 'audiocpp_server.exe'))
+        except Exception:
+            pass
+    # 项目根/上级目录常见的 breeze-tts-local 部署
+    try:
+        root = os.path.dirname(here)
+        cands.append(os.path.join(root, 'breeze-tts-local', 'audio-cpp',
+                                  'bin-cuda', 'audiocpp_server.exe'))
+        cands.append(os.path.join(root, 'audio-cpp', 'bin-cuda',
+                                  'audiocpp_server.exe'))
+    except Exception:
+        pass
+    # 打包后（_MEIPASS 临时目录内）：向上探测用户桌面/工作目录的常见部署
+    if hasattr(sys, '_MEIPASS'):
+        try:
+            user_home = os.path.expanduser('~')
+            cands.append(os.path.join(user_home, 'Desktop', 'deepseek work',
+                                      'breeze-tts-local', 'audio-cpp',
+                                      'bin-cuda', 'audiocpp_server.exe'))
+            # exe 所在目录旁（用户把 audio-cpp 放桌宠数据目录外）
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            cands.append(os.path.join(exe_dir, 'audio-cpp', 'bin-cuda',
+                                      'audiocpp_server.exe'))
+            if pet_mod is not None:
+                try:
+                    base_dir_ = pet_mod.base_dir()
+                    cands.append(os.path.join(base_dir_, 'audio-cpp',
+                                              'bin-cuda', 'audiocpp_server.exe'))
+                    cands.append(os.path.join(os.path.dirname(base_dir_),
+                                              'breeze-tts-local', 'audio-cpp',
+                                              'bin-cuda', 'audiocpp_server.exe'))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return cands[0]
+
+
+_AUDIO_CPP_SERVER = _find_tts_server()
 _SERVICE_PROC = None   # 由本模块启动的进程引用
 _SERVICE_LOCK = threading.Lock()
 
@@ -176,20 +238,31 @@ def tts_service_health(timeout=2.0):
 
 
 def _models_paths():
-    """在 bin-cuda/models 下查找 breeze 家族 GGUF，返回可加载的模型文件列表。
-    遍历 models_root 各子目录，取含 gguf 的路径（按文件名 bf16 优先）。"""
+    """查找 breeze 家族 GGUF 模型文件（可加载列表，bf16 优先）。
+    候选根目录：
+      1) svc_dir/models            （bin-cuda/models，旧约定）
+      2) svc_dir 上级/models       （audio-cpp/models，bin-cuda 与 models 平级部署）
+    遍历各子目录取含 gguf 的路径。"""
     svc_dir = os.path.dirname(_AUDIO_CPP_SERVER)
-    root = os.path.join(svc_dir, 'models')
-    if not os.path.isdir(root):
-        return []
+    roots = [os.path.join(svc_dir, 'models')]
+    parent_models = os.path.join(os.path.dirname(svc_dir), 'models')
+    if parent_models != roots[0]:
+        roots.append(parent_models)
     hits = []
-    for sub in sorted(os.listdir(root)):
-        subdir = os.path.join(root, sub)
-        if not os.path.isdir(subdir):
+    seen = set()
+    for root in roots:
+        if not os.path.isdir(root):
             continue
-        for fn in os.listdir(subdir):
-            if fn.lower().endswith('.gguf'):
-                hits.append(os.path.join(subdir, fn))
+        for sub in sorted(os.listdir(root)):
+            subdir = os.path.join(root, sub)
+            if not os.path.isdir(subdir):
+                continue
+            for fn in os.listdir(subdir):
+                if fn.lower().endswith('.gguf'):
+                    p = os.path.join(subdir, fn)
+                    if p not in seen:
+                        seen.add(p)
+                        hits.append(p)
     # 优先 bf16，再 q8；排序稳定
     hits.sort(key=lambda p: (0 if 'bf16' in p.lower() else 1, p))
     return hits

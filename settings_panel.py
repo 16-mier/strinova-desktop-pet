@@ -1165,9 +1165,11 @@ class SettingsPanel(QWidget):
             pet.set_pet_size(val)
 
     def _on_role_clicked(self, item):
-        # 单击=切换（路径存在 UserRole，显示名用角色名）
+        # 单击=切换（路径存在 UserRole，显示名用角色名；标题项 UserRole=None 忽略）
         role = item.data(Qt.ItemDataRole.UserRole)
-        if role and role != getattr(self._current_pet(), 'role', None):
+        if not role:
+            return
+        if role != getattr(self._current_pet(), 'role', None):
             self._switch_role(role)
 
     def _switch_role(self, role):
@@ -1229,7 +1231,10 @@ class SettingsPanel(QWidget):
         item = self.role_list.currentItem()
         if pet is None or item is None:
             return
-        role = item.data(Qt.ItemDataRole.UserRole) or item.text().replace("  ←当前", "")
+        role = item.data(Qt.ItemDataRole.UserRole)
+        if not role:
+            QMessageBox.information(self, "提示", "这是阵营分组标题，请选择具体角色再删除。")
+            return
         if role == getattr(pet, 'role', None):
             QMessageBox.information(self, "提示", "不能删除正在使用的角色，请先切换到其它角色。")
             return
@@ -1497,18 +1502,55 @@ class SettingsPanel(QWidget):
             except Exception:
                 pass
             return r.rsplit('/', 1)[-1]
+        def fac(r):
+            try:
+                fn = getattr(pet_mod, 'role_faction', None)
+                if fn:
+                    return fn(r)
+            except Exception:
+                pass
+            return ''
         self.role_list.blockSignals(True)
         self.role_list.clear()
-        for r in getattr(pet, 'roles', []) or []:
+        roles = list(getattr(pet, 'roles', []) or [])
+        cur = getattr(pet, 'role', None)
+
+        def add_title(text):
+            """阵营分组标题：灰色、不可交互"""
+            it = QListWidgetItem(text)
+            it.setFlags(Qt.ItemFlag.NoItemFlags)          # 不可选不可点
+            it.setForeground(QColor('#8fa3c8'))
+            f = it.font(); f.setBold(True); f.setPointSize(f.pointSize() + 1)
+            it.setFont(f)
+            it.setData(Qt.ItemDataRole.UserRole, None)     # 非角色项
+            self.role_list.addItem(it)
+
+        def add_role(r):
             label = disp(r)
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, r)   # 存完整路径（切换/删除用）
-            if r == getattr(pet, 'role', None):
-                item.setText(label + "  ←当前")
-                item.setForeground(QColor('#ffd76e'))
-            self.role_list.addItem(item)
+            it = QListWidgetItem(label)
+            it.setData(Qt.ItemDataRole.UserRole, r)
+            if r == cur:
+                it.setText(label + "  ←当前")
+                it.setForeground(QColor('#ffd76e'))
+            self.role_list.addItem(it)
+
+        # 无阵营（历史平铺）角色排最前
+        flats = [r for r in roles if not fac(r)]
+        if flats:
+            for r in flats:
+                add_role(r)
+        # 按阵营分组
+        by_fac = {}
+        for r in roles:
+            f = fac(r)
+            if f:
+                by_fac.setdefault(f, []).append(r)
+        for f in sorted(by_fac):
+            add_title('— %s —' % f)
+            for r in sorted(by_fac[f], key=disp):
+                add_role(r)
         self.role_list.blockSignals(False)
-        self.lbl_cur_role.setText(disp(getattr(pet, 'role', '-')) if getattr(pet, 'role', '-') != '-' else '-')
+        self.lbl_cur_role.setText(disp(cur) if cur else '-')
 
     def _open_characters_folder(self):
         """打开当前语音来源所在目录（通用语音→common_voice；角色→角色目录）"""

@@ -81,6 +81,17 @@ PET_VERSION = "1.6.0"
 DEFAULT_ROLE = "星绘"
 BASE_SIZE = 200
 
+# 角色英文名映射（用于 TTS 克隆参考的纯英文路径/文件名——audiocpp 只支持 ASCII 路径）
+ROLE_EN_NAMES = {
+    '米雪儿': 'MicheleLee', '信': 'Nobunaga', '心夏': 'Kokona', '伊薇特': 'Yvette',
+    '芙拉薇娅': 'Flavia', '忧雾': 'Yugiri', '蕾欧娜': 'Leona', '千代': 'Chiyo',
+    '明': 'Ming', '拉薇': 'Lawine', '梅瑞狄斯': 'Meredith', '令': 'Reiichi',
+    '香奈美': 'Kanami', '艾卡': 'Eika', '诺诺': 'Nora', '珐格兰丝': 'Fragrans',
+    '玛拉': 'Mara', '奥黛丽': 'AudreyGrove', '玛德蕾娜': 'MaddelenaLeary',
+    '绯莎': 'Fuchsia', '星绘': 'Celestia', '白墨': 'BaiMo',
+    '加拉蒂亚': 'GalateaLeary', '汐': 'Cielle',
+}
+
 # ── 用户数据目录 ─────────────────────────────────────────────
 # 打包后所有可写数据（pet_config.json / assets 角色与语音 / pet_debug.log）
 # 统一收纳到 exe 同目录下的「卡丘简易桌宠数据」子文件夹，exe 旁只留一个数据夹，
@@ -2740,11 +2751,10 @@ class PetWindow(QWidget):
 
     def _apply_role_ai_profile(self, role):
         """切换角色时自动更新 AI 配置（TTS 克隆音色 + 系统提示词）：
-        - TTS 克隆参考：assets/tts_refs/<角色名>/ref.wav + ref.txt
-          → 写 ai.tts_api_ref / ai.tts_api_ref_text（若目录有该角色素材）
-        - 系统提示词：assets/tts_refs/<角色名>/system_prompt.txt
-          → 写 ai.system_prompt（若存在）
-        仅当角色名素材存在时才覆盖（避免误清空用户手动配置）；星绘等无素材角色不覆盖。
+        - TTS 克隆参考：优先纯英文路径 references/refs_en/<英文名>.wav（audiocpp 只支持
+          ASCII 路径，中文路径/文件名会 500）；无英文副本时回退中文 assets/tts_refs/<角色名>/ref.wav
+        - ref.txt 转录文本 与 system_prompt.txt 提示词都从 tts_refs/<角色名>/ 读取
+        仅当角色名素材存在时才覆盖（避免误清空用户手动配置）。
         """
         cname = role_character_name(role)
         if not cname or self.ai is None:
@@ -2756,10 +2766,28 @@ class PetWindow(QWidget):
             cfg = load_config()
             ai = cfg.get('ai') or {}
             changed = False
-            # 1) 克隆参考音频 + 转录
-            ref_wav = os.path.join(ref_dir, 'ref.wav')
+            # 1) 克隆参考音频 + 转录（参考音频优先纯英文路径）
+            #    英文路径：breeze-tts-local/audio-cpp/references/refs_en/<英文名>.wav
+            en_name = ROLE_EN_NAMES.get(cname)
+            ref_wav = None
+            if en_name:
+                for cand_root in (
+                    # 当前机器固定部署
+                    r'C:\Users\mier\Desktop\deepseek work\breeze-tts-local\audio-cpp\references\refs_en',
+                    # 常见相对位置
+                    os.path.join(os.path.expanduser('~'), 'Desktop', 'deepseek work',
+                                 'breeze-tts-local', 'audio-cpp', 'references', 'refs_en'),
+                ):
+                    cand = os.path.join(cand_root, en_name + '.wav')
+                    if os.path.exists(cand):
+                        ref_wav = cand
+                        break
+            if not ref_wav:
+                fallback = os.path.join(ref_dir, 'ref.wav')
+                if os.path.exists(fallback):
+                    ref_wav = fallback
             ref_txt = os.path.join(ref_dir, 'ref.txt')
-            if os.path.exists(ref_wav) and os.path.exists(ref_txt):
+            if ref_wav and os.path.exists(ref_txt):
                 with open(ref_txt, encoding='utf-8') as f:
                     text = f.read().strip()
                 ai['tts_api_ref'] = ref_wav
