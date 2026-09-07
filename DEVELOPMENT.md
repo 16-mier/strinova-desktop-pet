@@ -97,7 +97,8 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 独立事件循环验证：气泡蹦字完整 → 5 秒后自动隐藏 ✅；字号 24 ✅；输入条随桌宠从 (600,400) 移到 (700,500) 位置联动 ✅
   - 输入条尺寸断言 640×48；发送后自动隐藏；`_msg_html` 渲染不含任何系统提示词文案 ✅
 - 涉及：`ai_chat.py`（ChatWindow 重构/_follow_pet/_send/BubbleWidget 字号与定位/_msg_html 去提示词）、`pet.py`（菜单文案）、更新 `session_smoke.py`/`usage_layout_smoke.py`/`bubble_smoke.py`/`history_smoke.py` 结构断言为新输入条
-- **部署**：待打包替换桌面 exe（下一步）
+- **部署**：桌面 exe 已打包替换 `C:\Users\mier\Desktop\卡丘简易桌宠_最新.exe`（13:03，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
+- git：`5d2b7f3`（AI 极简交互改版）
 
 ### 2026-09-07（AI 对话框布局微调 + BreezeTTS2 CUDA 桌面分发 zip 打包）
 - **需求**：
