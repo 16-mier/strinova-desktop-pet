@@ -929,7 +929,9 @@ class BubbleWidget(QWidget):
 class DelayWidget(QWidget):
     """每轮对话结束后显示在【桌宠正下方】的两行小字：
     第一行：本次费用 $金额；第二行：LLM x.xx s · TTS x.xx s。
-    显示数秒自动消失；跟随桌宠移动；点击可立即关闭。"""
+    显示数秒自动消失；跟随桌宠移动；点击可立即关闭。
+    注意：用 QLabel 内嵌文本实现（自绘 paintEvent 在连续刷新时触发
+    Qt6Core 0xc0000409 崩溃），避免 QPainter 自绘。"""
 
     def __init__(self, pet):
         super().__init__(None,
@@ -939,10 +941,20 @@ class DelayWidget(QWidget):
         self._pet = pet
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self._font = QFont('Microsoft YaHei', 10)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setStyleSheet('background:rgba(18,21,30,215); border-radius:8px;')
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(12, 6, 12, 6)
+        self._lay.setSpacing(1)
+        self._lbl1 = QLabel('')
+        self._lbl1.setStyleSheet('color:#f0f2f8; background:transparent; font-size:12px;')
+        self._lbl2 = QLabel('')
+        self._lbl2.setStyleSheet('color:#8fc7ff; background:transparent; font-size:11px;')
+        self._lay.addWidget(self._lbl1)
+        self._lay.addWidget(self._lbl2)
         self._life = QTimer(self)
         self._life.setSingleShot(True)
-        self._life.setInterval(5000)   # 5 秒自动消失
+        self._life.setInterval(5000)
         self._life.timeout.connect(self.hide)
         self._follow = QTimer(self)
         self._follow.setInterval(16)
@@ -955,47 +967,20 @@ class DelayWidget(QWidget):
             line2.append('LLM %.2fs' % llm_s)
         if tts_s is not None:
             line2.append('TTS %.2fs' % tts_s)
-        text = (price_text or '') + ('\n' + ' · '.join(line2) if line2 else '')
-        if not text.strip():
+        l1 = (price_text or '').strip()
+        l2 = '  ·  '.join(line2) if line2 else ''
+        if not l1 and not l2:
             return
-        self._font.setPointSize(10)
-        fm = QFontMetrics(self._font)
-        lines = text.split('\n')
-        w = max(fm.horizontalAdvance(l) for l in lines) + 24
-        h = sum(fm.height() + 2 for _ in lines) + 16
-        self.resize(w, h)
-        self._render(text)
+        self._lbl1.setText(l1)
+        self._lbl1.setVisible(bool(l1))
+        self._lbl2.setText(l2)
+        self._lbl2.setVisible(bool(l2))
         self.adjustSize()
         self._reposition()
         self.show()
         self.raise_()
         self._follow.start()
         self._life.start()
-
-    def _render(self, text):
-        """两行小字：第一行价格(米白)，第二行延迟(浅蓝)；半透明圆角深底"""
-        from PyQt6.QtGui import QPainterPath
-        self._text = text
-        self.update()
-
-    def paintEvent(self, ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        # 半透明圆角底
-        path = QPainterPath()
-        path.addRoundedRect(0, 0, self.width(), self.height(), 8, 8)
-        p.fillPath(path, QColor(20, 23, 32, 200))
-        p.setFont(self._font)
-        lines = self._text.split('\n') if getattr(self, '_text', '') else []
-        if not lines:
-            return
-        fm = QFontMetrics(self._font)
-        y = 8
-        for i, l in enumerate(lines):
-            p.setPen(QColor('#f0f2f8') if i == 0 else QColor('#8fc7ff'))
-            p.drawText(12, y + fm.ascent(), l)
-            y += fm.height() + 2
 
     def _reposition(self):
         if self._pet is None:
@@ -1009,20 +994,15 @@ class DelayWidget(QWidget):
             if geo is not None:
                 x = max(geo.left(), min(x, geo.right() - self.width()))
                 if y + self.height() > geo.bottom():
-                    y = anchor.top() - self.height() - 6   # 下方放不下→桌宠上方
+                    y = anchor.top() - self.height() - 6
             self.move(int(x), int(y))
         except Exception:
             pass
 
     def mousePressEvent(self, e):
-        self.hide()   # 点击立即关闭
+        self.hide()
         e.accept()
 
-
-
-# ============================================================================
-# 迷你输入条（右键桌宠弹出的一小段打字横条）
-# ============================================================================
 class CloseXButton(QPushButton):
     """自绘 ✕ 关闭按钮：用 QPainter 画两条交叉线，任何系统字体都清晰
     （不依赖字体里有没有 ✕ 字形——部分中文字体缺它导致只显示一个点）"""
@@ -1190,6 +1170,8 @@ class ChatHistoryWindow(QWidget):
     _SUB = "#7d87a6"
     _TIME = "#6f7898"
 
+    clearRequested = pyqtSignal()   # 历史窗「清理上下文」按钮 → 清空当前角色上下文
+
     def __init__(self, pet):
         super().__init__(None, Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint
@@ -1290,6 +1272,14 @@ class ChatHistoryWindow(QWidget):
             " padding:2px 8px;" % (self._SUB, self._PANEL))
         head.addWidget(self.lbl_count)
         head.addStretch(1)
+        self.btn_clear_ctx = QPushButton("🧹 清理上下文")
+        self.btn_clear_ctx.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_ctx.setStyleSheet(
+            "QPushButton{background:#4a3238; border:1px solid #8a4a55; border-radius:7px;"
+            " color:#ffd9d9; font-size:12px; padding:4px 10px;}"
+            "QPushButton:hover{background:#6a4248;}")
+        self.btn_clear_ctx.clicked.connect(self._clear_ctx_clicked)
+        head.addWidget(self.btn_clear_ctx)
         self.btn_copy = QPushButton("复制全文")
         self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy.setStyleSheet(
@@ -1343,6 +1333,10 @@ class ChatHistoryWindow(QWidget):
     def _is_cmd(content):
         """判断该条是否是「系统操作」消息（清理上下文等命令回显）"""
         return _is_cmd_msg(content)
+
+    def _clear_ctx_clicked(self):
+        """历史窗「清理上下文」→ 发信号让 manager 清空当前角色上下文"""
+        self.clearRequested.emit()
 
     def _copy_all(self):
         from PyQt6.QtWidgets import QApplication as _A
@@ -1440,35 +1434,28 @@ class ChatWindow(QWidget):
         root.setContentsMargins(10, 6, 8, 6)
         root.setSpacing(0)
 
-        # 单行：会话下拉 + 新建 + 删除 | 输入框 + 发送
+        # 单行：查看上下文 | 输入框 + 发送
         row = QHBoxLayout()
         row.setSpacing(6)
+        self.btn_view_ctx = QPushButton("📖 查看上下文", self)
+        self.btn_view_ctx.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_view_ctx.setFixedWidth(118)
+        self.btn_view_ctx.setStyleSheet(
+            "QPushButton{background:#2f3a57; border:1px solid #5a6ea8; border-radius:8px;"
+            " color:#cfe0ff; font-size:12px; font-weight:bold; padding:2px 6px;}"
+            "QPushButton:hover{background:#3d4d75;}")
+        self.btn_view_ctx.clicked.connect(self._open_history)
+        row.addWidget(self.btn_view_ctx)
+        # 兼容保留：会话下拉/新建/删除不再显示（角色自动定，查看/清理在历史窗）
         self.combo_session = QComboBox(self)
-        self.combo_session.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.combo_session.setMinimumWidth(96)
-        self.combo_session.setStyleSheet(
-            "QComboBox{background:#3a4458; border:none; border-radius:8px;"
-            " color:#e8ecf8; font-size:12px; padding:3px 6px;}"
-            "QComboBox::drop-down{border:none; width:16px;}"
-            "QComboBox QAbstractItemView{background:#22262f; color:#e8ecf8;"
-            " border:none; font-size:12px;}")
+        self.combo_session.setVisible(False)
         self.combo_session.activated.connect(self._on_session_changed)
-        row.addWidget(self.combo_session)
-        # ⚠ 会话只删不建（用户要求）：新建按钮隐藏（保留代码兼容，不外露）
         self.btn_new_sess = QPushButton("＋", self)
         self.btn_new_sess.setVisible(False)
-        self.btn_new_sess.setToolTip("新建会话已禁用：每个角色有自己独立的上下文")
         self.btn_new_sess.clicked.connect(self._new_session)
         self.btn_del_sess = QPushButton("🗑", self)
-        self.btn_del_sess.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_del_sess.setToolTip("删除当前会话及其对话记录")
-        self.btn_del_sess.setFixedWidth(30)
-        self.btn_del_sess.setStyleSheet(
-            "QPushButton{background:#5a3d3d; border:none; border-radius:8px;"
-            " color:#ffd9d9; font-size:13px; padding:3px 0;}"
-            "QPushButton:hover{background:#7a4d4d;}")
+        self.btn_del_sess.setVisible(False)
         self.btn_del_sess.clicked.connect(self._delete_session)
-        row.addWidget(self.btn_del_sess)
         # 输入框（占满中间）
         self.input = QLineEdit(self)
         self.input.setPlaceholderText("问桌宠…（回车发送，输入条将自动收起）")
@@ -2558,10 +2545,21 @@ class AiChatManager(QObject):
             except Exception:
                 pass
 
+    def _history_clear_ctx(self):
+        """历史窗点「清理上下文」：清空当前角色上下文，历史窗立即变空"""
+        self.clear_context()
+        try:
+            if self._history is not None:
+                self._history.show_history(self._messages, self.system_prompt())
+        except Exception:
+            pass
+
     def show_history(self):
-        """点「📜 记录」：弹出完整对话上下文窗口并跟随桌宠"""
+        """点「📖 查看上下文」：弹出完整对话上下文窗口并跟随桌宠"""
         if self._history is None:
             self._history = ChatHistoryWindow(self._pet)
+            # 历史窗「清理上下文」→ 清空当前角色上下文并刷新历史窗
+            self._history.clearRequested.connect(self._history_clear_ctx)
         self._history.show_history(self._messages, self.system_prompt())
         # 显示在桌宠附近：优先放桌宠上方，上方不够放下方，都不够则贴屏顶
         # 定位后记录相对偏移供跟随

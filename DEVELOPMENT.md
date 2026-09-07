@@ -78,6 +78,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（紧急修复：对话完成崩溃 0xC0000409（DelayWidget 自绘）；输入条改为「查看上下文」按钮；历史窗加「清理上下文」）
+- **崩溃报告（用户）**：给角色发话完直接崩溃；Windows 事件日志：BEX64 / 异常 0xc0000409 / Qt6Core.dll 偏移 0x1c8d8（多次复现，exe 与 python 源码模式都崩）
+- **定位**：分阶段复现（真实 GUI，非 offscreen）→ 锁定 **DelayWidget 连续两次 show_delay 即崩**（0xC0000409）；屏蔽 paintEvent / 换 QLabel 内嵌文本方案 → 不再崩。根因：DelayWidget 自绘 paintEvent（QPainter 画圆角底+drawText）在**透明无边框 Tool 窗连续 show/resize/update** 时触发 Qt6Core 崩溃（与 BubbleWidget 的差异待考，但 QLabel 方案稳定）
+- **修复**：DelayWidget 重写为 QLabel 内嵌两行文本（样式化背景+圆角，`_lbl1` 价格米白 12px / `_lbl2` 延迟浅蓝 11px），无自绘 → 复现脚本 4 轮 tick（含连续 delay 显示+清理+删除）exit 0 ✅
+- **输入条改造**：会话下拉/删除按钮区 → 替换为「📖 查看上下文」按钮（118px，点开发 historyRequested → show_history）；combo_session/新建/删除隐藏保留兼容
+- **历史窗增强**：标题栏加「🧹 清理上下文」按钮（红色调），clearRequested 信号 → manager `_history_clear_ctx`（清空当前角色上下文 + 历史窗立即刷新为空）
+- **验证**：真实 GUI 冒烟——查看上下文按钮可见/下拉隐藏/历史窗清理按钮存在/清理后消息 0/延迟小字连续两次不崩（exit 0）✅；回归 session16/usage16/history23/gui 全绿 ✅
+- 涉及：`ai_chat.py`（DelayWidget 重写/ChatWindow 布局/历史窗清理）
+- git：（待提交）
+
 ### 2026-09-07（世界书编辑器支持「全局/当前角色」双范围 + 管理按钮调大）
 - **需求**：①「管理世界书」按钮太小；②每个角色单独世界书要能自己编辑/补充
 - **实现**（`settings_panel.py`）：
