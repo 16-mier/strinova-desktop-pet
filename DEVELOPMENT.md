@@ -89,7 +89,8 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
   - 事件循环实测：`chat_bar_on_leave()` 启动后 1.6s 内输入条已隐藏（1s 延迟生效）✓
   - 回归：session 25 / usage 16 / history 23 / bubble 全绿 ✅
 - 涉及：`ai_chat.py`（open_chat focus 参数 + 悬停显隐 4 方法）、`pet.py`（enterEvent/leaveEvent 挂接）
-- **部署**：桌面 exe 重新打包替换（下一步）
+- **部署**：桌面 exe 已打包替换 `C:\Users\mier\Desktop\卡丘简易桌宠_最新.exe`（13:15，52.7MB，旧版备份为 _上一版）；启动验证正常 ✅
+- git：`43be28b`（悬停交互改版）
 
 ### 2026-09-07（AI 交互改「极简模式」：横线输入条 + 右侧大字气泡 5 秒消失 + 去掉系统提示词）
 - **需求**：
