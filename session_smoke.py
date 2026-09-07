@@ -75,10 +75,11 @@ cw.set_content([
     {'role': 'user', 'content': '用户消息XYZ', 'ts': '10:00:01'},
     {'role': 'assistant', 'content': 'AI 回复ABC', 'ts': '10:00:02'},
 ], mgr.system_prompt())
+# 5b. 聊天窗用 plain-right 样式：无气泡背景、文字靠右
 plain = cw.browser.toPlainText()
 ck("消息流含用户消息", '用户消息XYZ' in plain)
 ck("消息流含AI回复", 'AI 回复ABC' in plain)
-# Qt 富文本归一化后检查块级对齐（右=用户，左=AI）
+# 用户与 AI 消息都靠右（新设计：对话内容在右边）
 from PyQt6.QtCore import Qt as _Qt
 doc = cw.browser.document()
 _ok_u = _ok_a = False
@@ -88,10 +89,13 @@ for i in range(doc.blockCount()):
     al = b.blockFormat().alignment()
     if '用户消息XYZ' in txt and al == _Qt.AlignmentFlag.AlignRight:
         _ok_u = True
-    if 'AI 回复ABC' in txt and al == _Qt.AlignmentFlag.AlignLeft:
+    if 'AI 回复ABC' in txt and al == _Qt.AlignmentFlag.AlignRight:
         _ok_a = True
-ck("消息流用户块右对齐(右上角)", _ok_u)
-ck("消息流AI块左对齐(左下角)", _ok_a)
+ck("消息流用户块右对齐", _ok_u)
+ck("消息流AI块也右对齐(对话内容在右边)", _ok_a)
+# 无气泡背景：检查渲染 HTML 无内联 background 色块样式（span 不带 background）
+html_out = cw.browser.toHtml().lower()
+ck("消息流无气泡背景块", 'background:#1e3a5f' not in html_out and 'background:#2a2e3d' not in html_out)
 
 # 6. 口语化规则强制追加
 sp = mgr.system_prompt()
@@ -101,6 +105,26 @@ ck("系统提示词含基础人设", '桌宠' in sp)
 # 7. TTS 提示词强化
 ttp = ai.AiChatManager.default_tts_prompt()
 ck("TTS 提示词含口语/去拟声规则", '嘻嘻' in ttp and '朗读' in ttp and '情绪' in ttp)
+
+# 8. 删除会话
+mgr.new_session('临时会话X')
+mgr._messages.append({'role': 'user', 'content': '待删', 'ts': 'x'})
+ck("删除前存在 临时会话X", '临时会话X' in mgr.session_names())
+ok_del, msg = mgr.delete_session('临时会话X')
+ck("删除会话成功", ok_del and '临时会话X' not in mgr.session_names())
+# 删除当前会话会自动切到相邻
+n_keep = mgr.new_session('保留会话Y')
+mgr._messages.append({'role': 'user', 'content': 'keep', 'ts': 'y'})
+mgr.switch_session('默认会话')
+mgr.switch_session(n_keep)
+cur_before = mgr.current_session()
+mgr.delete_session('保留会话Y')
+ck("删除当前会话后自动切换", mgr.current_session() != '保留会话Y')
+ck("其它会话内容未受影响", '默认会话' in mgr.session_names())
+# 删除全部 → 自动重建默认
+for s in list(mgr.session_names()):
+    mgr.delete_session(s)
+ck("删除全部后重建默认会话", '默认会话' in mgr.session_names() and mgr.current_session() == '默认会话')
 
 print("\n==== 结果 ====")
 fails = [n for n, ok in checks if not ok]

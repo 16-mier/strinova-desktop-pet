@@ -887,19 +887,22 @@ class CloseXButton(QPushButton):
 # 消息 → 富文本气泡 HTML（完整记录窗与可视化聊天窗共用同一渲染）
 # 用户消息右对齐(右上角)、AI 消息左对齐(左下角)、系统消息置顶居中
 # ============================================================================
-def _msg_html(messages, system_prompt='', pet=None):
-    """把消息列表渲染成气泡 HTML 字符串。
+def _msg_html(messages, system_prompt='', pet=None, style='bubble'):
+    """把消息列表渲染成 HTML。
     messages: [{'role','content','ts'}, ...]（不含 system）；
     system_prompt: 若有，以灰色斜体小块置顶；
-    pet: 用于取 AI 角色名（缺省 'AI'）。"""
+    pet: 用于取 AI 角色名（缺省 'AI'）；
+    style:
+      'bubble'      = 带深色气泡块（完整记录窗用）：用户右对齐青绿块、AI 左对齐深灰块
+      'plain-right' = 无背景、文字靠右、清晰（聊天窗消息流用）"""
     esc = html.escape
     parts = []
-    # 配色（与 ChatHistoryWindow 一致）
-    PANEL = "#1f2430"
+    # 配色
     SYS_COLOR = "#8a93b0"
     SUB = "#7d87a6"
     TIME = "#6f7898"
     TITLE = "#e7eaf4"
+    PANEL = "#1f2430"
     USER_BG = "#1e3a5f"
     USER_BORDER = "#3b6ea5"
     AI_BG = "#2a2e3d"
@@ -938,8 +941,22 @@ def _msg_html(messages, system_prompt='', pet=None):
                 ' margin:3px 0;">⚙ %s · %s</div>'
                 % (SYS_COLOR, esc(content), ts))
             continue
+        if style == 'plain-right':
+            # 无背景、靠右、清晰文字（聊天窗消息流）
+            who = '你' if role == 'user' else ai_name
+            col = '#ffd98a' if role == 'user' else '#bfffd9'
+            name_col = '#9aa7c7' if role == 'user' else '#7fd8a8'
+            parts.append(
+                '<div style="text-align:right; margin:2px 4px;">'
+                '<span style="color:%s; font-size:10px;">%s</span>'
+                ' <span style="color:%s; font-size:9px;">· %s</span><br>'
+                '<span style="color:%s; font-size:14px;">%s</span>'
+                '</div>'
+                % (name_col, esc(who), TIME, ts, col, content.replace('\n', '<br>')))
+            continue
+        # ---- bubble 样式 ----
         if role == 'user':
-            # 用户消息：右对齐（右侧 = 右上角一侧）
+            # 用户消息：右对齐、青绿块；系统操作（清理等）则居中灰字
             parts.append(
                 '<div style="text-align:right; margin:3px 2px;">'
                 '<span style="background:%s; border:1px solid %s;'
@@ -952,7 +969,7 @@ def _msg_html(messages, system_prompt='', pet=None):
                    content.replace('\n', '<br>'),
                    TIME, esc('你'), ts))
         else:
-            # AI / assistant 消息：左对齐（左侧 = 左下角一侧）
+            # AI / assistant 消息：左对齐、白块
             parts.append(
                 '<div style="text-align:left; margin:3px 2px;">'
                 '<span style="background:%s; border:1px solid %s;'
@@ -1212,6 +1229,7 @@ class ChatWindow(QWidget):
     historyRequested = pyqtSignal()
     sessionSwitchRequested = pyqtSignal(str)   # 切换会话（传会话名）
     sessionNewRequested = pyqtSignal()          # 新建会话
+    sessionDeleteRequested = pyqtSignal(str)    # 删除会话（传会话名）
 
     # 窗口尺寸常量
     W_USAGE = 470
@@ -1264,6 +1282,16 @@ class ChatWindow(QWidget):
             "QPushButton:hover{background:#4a8b66;}")
         self.btn_new_sess.clicked.connect(self._new_session)
         top.addWidget(self.btn_new_sess)
+        # 删除会话（仅本地记录，不影响其它会话）
+        self.btn_del_sess = QPushButton("🗑 删除", self)
+        self.btn_del_sess.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_del_sess.setToolTip("删除当前会话及其对话记录")
+        self.btn_del_sess.setStyleSheet(
+            "QPushButton{background:#5a3d3d; border:none; border-radius:9px;"
+            " color:#ffd9d9; font-size:12px; padding:5px 9px;}"
+            "QPushButton:hover{background:#7a4d4d;}")
+        self.btn_del_sess.clicked.connect(self._delete_session)
+        top.addWidget(self.btn_del_sess)
         # 清理上下文按钮（在输入框左边，保留原接口名）
         self.btn_clear = QPushButton("清理上下文", self)
         self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1352,11 +1380,19 @@ class ChatWindow(QWidget):
     def _new_session(self):
         self.sessionNewRequested.emit()
 
+    def _delete_session(self):
+        """删除当前选中的会话（发信号给 manager 处理）"""
+        name = self.combo_session.currentText()
+        if name:
+            self.sessionDeleteRequested.emit(name)
+
     # ---- 消息流展示 ----
     def set_content(self, messages, system_prompt='', ai_name='AI'):
-        """渲染当前会话消息流到中部浏览器；消息多时滚动到底部。"""
+        """渲染当前会话消息流到中部浏览器；消息多时滚动到底部。
+        聊天窗用 'plain-right' 样式：无背景块、文字靠右、字号清晰。"""
         try:
-            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet))
+            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet,
+                                           style='plain-right'))
         except Exception:
             self.browser.setHtml('')
         sb = self.browser.verticalScrollBar()
@@ -1432,17 +1468,21 @@ class ChatWindow(QWidget):
         self.btn_send.setText("…" if busy else "发送")
 
     def show_near(self, pet_rect):
-        """显示在桌宠旁边（优先下方/右侧，保持不遮宠物），并开始跟随桌宠"""
+        """显示在桌宠【正下方】紧贴底部（水平居中对齐桌宠）。
+        下方放不下（靠屏幕底）才改到上方。跟随桌宠移动。"""
         scr = QApplication.screenAt(pet_rect.center()) or QApplication.primaryScreen()
         geo = scr.availableGeometry() if scr is not None else None
-        x = pet_rect.left()
-        if geo is not None and x + self.width() > geo.right():
-            x = geo.right() - self.width()
-        y = pet_rect.bottom() + 10
+        # 水平：窗中心对齐宠中心
+        x = pet_rect.center().x() - self.width() // 2
+        if geo is not None:
+            x = max(geo.left(), min(x, geo.right() - self.width()))
+        # 垂直：紧贴桌宠底部
+        y = pet_rect.bottom() + 6
         if geo is not None and y + self.height() > geo.bottom():
-            y = pet_rect.top() - self.height() - 10
+            # 下方放不下 → 放到桌宠上方
+            y = pet_rect.top() - self.height() - 6
             if y < geo.top():
-                y = pet_rect.bottom() + 10
+                y = max(geo.top(), geo.bottom() - self.height())
         self._follow_offset = None
         self._user_dragged = False   # 每次重新打开都恢复跟随
         self.move(x, y)
@@ -1594,6 +1634,28 @@ class AiChatManager(QObject):
         self._last_usage = {}
         self._sync_ui_to_current()
         return True
+
+    def delete_session(self, name):
+        """删除指定会话（连同其消息）。被删的是当前会话时自动切到相邻会话；
+        删除最后一个会话则重建「默认会话」。返回 (ok, 消息)。"""
+        if name not in self._sessions:
+            return False, '会话不存在'
+        # 防止删除失败后无会话：先保证至少能建回默认
+        del self._sessions[name]
+        if name in self._session_order:
+            self._session_order.remove(name)
+        if self._session_cur == name:
+            # 切到最近一个会话；没有则建新默认
+            if self._session_order:
+                self._session_cur = self._session_order[-1]
+            else:
+                self._session_cur = '默认会话'
+                self._sessions[self._session_cur] = []
+                self._session_order.append(self._session_cur)
+            self._messages = self._sessions[self._session_cur]
+            self._last_usage = {}
+        self._sync_ui_to_current()
+        return True, '已删除会话：%s' % name
 
     def _sync_ui_to_current(self):
         """把当前会话刷到聊天窗与历史窗（若开着）"""
@@ -2041,6 +2103,7 @@ class AiChatManager(QObject):
             self._chat.historyRequested.connect(self.show_history)
             self._chat.sessionSwitchRequested.connect(self.switch_session)
             self._chat.sessionNewRequested.connect(self._new_session_from_ui)
+            self._chat.sessionDeleteRequested.connect(self._delete_session_from_ui)
         # 每次打开都同步会话列表 + 当前消息流到聊天窗
         try:
             self._chat.set_sessions(self.session_names(), self._session_cur)
@@ -2061,6 +2124,19 @@ class AiChatManager(QObject):
     def _new_session_from_ui(self):
         """聊天窗「＋新建」按钮 → 新建会话并切换"""
         self.new_session()
+
+    def _delete_session_from_ui(self, name):
+        """聊天窗「🗑 删除」→ 删除当前会话并切到相邻会话"""
+        if not name or name not in self._sessions:
+            return
+        was = self._session_cur
+        ok, msg = self.delete_session(name)
+        if ok:
+            try:
+                if name == was and hasattr(self, '_show_bubble'):
+                    self._show_bubble(msg + '（已切到「%s」）' % self._session_cur)
+            except Exception:
+                pass
 
     def show_history(self):
         """点「📜 记录」：弹出完整对话上下文窗口并跟随桌宠"""

@@ -78,6 +78,28 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-07（AI 对话框布局微调 + BreezeTTS2 CUDA 桌面分发 zip 打包）
+- **需求**：
+  1. AI 对话框布局：①聊天窗默认显示在桌宠【正下方】紧贴底部（水平居中对齐）；②对话内容消息文字【靠右、去掉气泡底色块】，只留清晰文字；③会话支持【删除】（不只新建）
+  2. 把本地 TTS（audiocpp_server / BreezeTTS 2）打包成「有 NVIDIA 显卡开箱即用」的 zip：含 CUDA 运行库 + 双模型(q8/bf16) + model_specs + 星绘语音克隆 references + 启动/测试/停止 bat
+- **实现**（`ai_chat.py`）：
+  1. `ChatWindow.show_near`：位置改为桌宠正下方紧贴底部（x 居中于宠中心、y=bottom+6），下方放不下才上移
+  2. `_msg_html()` 新增 `style='plain-right'`：用户/AI 消息都靠右、无背景块、14px 清晰文字（用户暖橙/AI 薄荷绿），聊天窗 set_content 用之；'bubble' 样式保留给完整记录窗
+  3. 会话删除：`AiChatManager.delete_session(name)`（删当前会话自动切相邻、删最后一个重建默认）；ChatWindow 新增「🗑 删除」按钮 + `sessionDeleteRequested` 信号；AI 菜单无变化
+- **打包任务（dist: `BreezeTTS2-CUDA`，14.4GB）**：
+  - 运行时= `audio-cpp\bin\*` 全套（含 CUDA13 运行库 cuda.dll/cudart/cublas/cublasLt/nvrtc/nvJitLink/nvcudart_hybrid）+ 补 `cufft64_12.dll`（server 导入但 bin 缺失，自 CUDA toolkit bin\x64 复制）→ 目标机【免装 CUDA Toolkit】
+  - 模型：`models/breeze-tts-2/breeze-tts-2-q8_0.gguf`(默认,4.8G) + `models/Breeze-TTS-2-GGUF/breeze-tts-2-bf16.gguf`(高音质,7G)，各带完整 HF 配套(tokkenizer/config/audio_tokenizer)
+  - 语音克隆预设：`references/star_ref.wav`(星绘 8.39s@24k) + `star_ref.txt`
+  - 脚本：`tts_launcher.py`（含 start/stop/test/status + 中文路径检测）由普通 Python 驱动，规避 cmd 拼 JSON 的转义坑 + 英文 bat 入口（启动TTS服务.bat / 测试星绘语音.bat / 停止TTS服务.bat，GBK+CRLF）
+- **验证**：
+  - 干净目录(ASCII) 启动 server(cuda)→health→POST /v1/models/load(q8 与 bf16 各一次)→合成星绘 wav：均 RIFF 有效，q8 203KB bf16 165KB ✅
+  - 真实 .bat（cmd 双击场景）启动→等待→加载→星绘克隆就绪 OK ✅
+  - 中文路径测试（`...\中文测试目录\`）确认 audiocpp_server **不支持含中文路径**（`model path does not exist`）→ 已在 launcher 加 ASCII 路径检测与提示，README 注明解压到纯英文路径
+  - UI 冒烟回归：session 28 / usage_layout 14 / history 22 / bubble / gui 全绿 ✅
+- 涉及：`ai_chat.py`（show_near/_msg_html style/ChatWindow 删除按钮+set_content）、新增 `tts_launcher.py`、`BreezeTTS2-CUDA/` 分发目录、新增 `stage_run.py`/`dist_verify.py`/`subst_verify.py`/`depscan.py` 验证脚本、更新 `session_smoke.py`
+- **部署**：分发文件夹已移至桌面 `C:\Users\mier\Desktop\BreezeTTS2-CUDA`（14.1GB，含 q8+bf16 双模型+全套 CUDA 运行库+星绘克隆+3 个 bat+launcher+使用说明），由用户自行压缩成 zip；7z 验证 zip 可完整解压 128 文件 14.4GB（C:\Temp 全量解出）✅；桌宠 exe 已重新打包部署（12:18 版，UI 改动生效）✅
+- git：`（待提交本轮）`
+
 ### 2026-09-07（AI 对话四合一：语音等待三点拉长 / 对话可视化消息流 / 多会话上下文 / 口语化提示词）
 - **需求**：
   1. 等语音（TTS 合成/朗读）时桌宠旁「三点」等待动画别提前消失——语音还没来就结束很突兀；
