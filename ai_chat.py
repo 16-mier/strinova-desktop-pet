@@ -2678,10 +2678,17 @@ class AiChatManager(QObject):
                     self._hide_thinking()
         QTimer.singleShot(1200, _fallback)
         self._player.play()
-        # 播完（或超时）后清理临时文件
-        def _cleanup():
+        # 播完（播放器回到 StoppedState）后清理临时文件；不设 30s 强杀 ——
+        # Breeze 合成音频可能有较长静音尾部/大文件异步初始化慢，硬性 30 秒
+        # 上限会把还没播完的语音强行掐断（表现为"只合成半句/半路没声"）。
+        cleaned = {'done': False}
+
+        def _cleanup_now():
+            if cleaned['done']:
+                return
+            cleaned['done'] = True
             try:
-                self._player.stop()
+                self._player.playbackStateChanged.disconnect(_cleanup_on_state)
             except Exception:
                 pass
             try:
@@ -2691,7 +2698,17 @@ class AiChatManager(QObject):
                     os.remove(gain_path)
             except Exception:
                 pass
-        QTimer.singleShot(30000, _cleanup)
+
+        def _cleanup_on_state(state):
+            if state == QMediaPlayer.PlaybackState.StoppedState:
+                _cleanup_now()
+
+        try:
+            self._player.playbackStateChanged.connect(_cleanup_on_state)
+        except Exception:
+            pass
+        # 兜底：极长超时（5 分钟）才清理，避免正常播放被掐断
+        QTimer.singleShot(300000, _cleanup_now)
 
     def _wav_duration_ms(self, path):
         """读取 wav 时长(ms)；失败返回 0"""
