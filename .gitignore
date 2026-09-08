@@ -1,7 +1,6 @@
-﻿__pycache__/
+__pycache__/
 build/
 dist/
-*.spec
 pet_debug.log
 *.pyc
 

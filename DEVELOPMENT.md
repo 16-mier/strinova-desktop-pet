@@ -96,6 +96,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-08（全面体检：修复冒烟崩溃 + spec 通用化入库）
+- **系统检修**交出 3 处修复：
+  1. **panel_smoke3.py 修崩溃**：原脚本引用了早已被删的控件 `cmb_ai_tts_mode`/`cloud_voice_box`（早期「cloud/local/api 三引擎下拉」时代产物，现已精简为唯一的 API 地址表单），一跑就 `AttributeError` 崩测试。已按当前设计重写：断言 `api_tts_box` 表单/克隆三件套/模型版本下拉存在、展开 AI 区后可见、填字段保存、缺字段提示、滑块禁滚轮、refresh 后可再用 → 全绿。
+  2. **卡丘简易桌宠.spec 去本机绝对路径**：`runtime_hooks` 原来写死 `C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet\rthook_fix_urllib_ssl.py`，换机/换目录打包会失败、且泄露本机路径。改为相对路径 `rthook_fix_urllib_ssl.py`（cwd=仓库根时正确解析，已验证）。
+  3. **工程完整性：spec 入库**：`*.spec` 原在 .gitignore 里，导致打包配置永不提交（换机 clone 后无法 `PyInstaller 卡丘简易桌宠.spec`）。因 spec 已通用化（无本机路径），移除该忽略规则，把 spec 纳入版本控制；rthook_fix_urllib_ssl.py 本已跟踪。
+- **全量审查结论**：pet.py / ai_chat.py / settings_panel.py 三核心源码通读，质量高——崩溃加固（switch_role 菜单延后/不重开）、QSoundEffect 播放（isPlaying 安全读/同步 stop 无竞态）、会话磁盘持久化（角色独立/只删不建）、世界书注入、延迟显示均健壮；静态扫描的"重复定义"均为不同类同名方法（正常），`except Exception: pass` 多为 Qt 回调保护性吞异常；print 密集但都在 except/低频 setter，无热路径拖累；资源一致性 24 角色 persona/worldbook/tts_refs/trigger_voice 全对齐。
+- **验证**：8 个冒烟全绿（ai_selftest/session16/usage16/history23/bubble/panel_smoke2/panel_smoke3/gui）；离屏切角色压力 30 次含 gif 角色 exit 0 ✅
+- 涉及：`panel_smoke3.py`、`卡丘简易桌宠.spec`、`.gitignore`、`DEVELOPMENT.md`
+- git：549098b 之后的本提交
+
 ### 2026-09-08（目录结构订正 + 删除早期 C# WPF 调研版 DesktopPet.cs）
 - **目录结构订正**：第 3 节原来停留在「星绘/白墨 早午晚」旧时代，与现状严重不符，已按实际重写——顶层含 `ai_chat.py`/`settings_panel.py`/`卡丘简易桌宠.spec`/`rthook_fix_urllib_ssl.py`；角色图为**阵营/角色/形象**三级结构（乌尔比诺7 / 剪刀手9 / 欧泊）8 角色）；语音从角色目录迁到 `trigger_voice/<角色>/卡拉彼丘.mp3`；新增 `common_voice`/`persona`/`tts_refs`/`role_worldbooks`/`world_book.json`/`app.ico`
 - **删除 DesktopPet.cs**（及本地 DesktopPet.exe）：user 确认无用即删。该文件是 2026-09-04（项目第 0 天）的 C# WPF 早期调研草稿，仅 8.5KB，只实现了透明窗口+点按动画+早午晚播报；现生产已全面迁移到 PyQt6 完整版（pet.py+ai_chat.py+settings_panel.py），无保留价值。重写为 Rust/Zig/C++ 的方案经评估否决（工程量大、Qt 跨语言封装会重踩崩溃坑、性能瓶颈在 Qt 而非语言）。git 历史可回溯该文件
