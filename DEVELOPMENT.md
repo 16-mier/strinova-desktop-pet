@@ -41,14 +41,32 @@
 
 ```
 dsh-desktop-pet/
-├── pet.py                   ← 主程序（PyQt6 桌宠）
-├── DEVELOPMENT.md           ← 本开发日志（持续写入）
+├── pet.py                   ← 主程序（PetWindow：桌宠窗口/动画/按键钩子/游戏联动/切角色）
+├── ai_chat.py               ← AiChatManager：AI 对话 + TTS 朗读（对话条/气泡/多会话/用量/世界书/延迟显示）
+├── settings_panel.py        ← 设置面板窗口（角色列表/模型/TTS/世界书编辑器）
+├── 卡丘简易桌宠.spec         ← PyInstaller 打包配置（`python -m PyInstaller 卡丘简易桌宠.spec`）
+├── rthook_fix_urllib_ssl.py ← PyInstaller 运行时 rthook（修复 SSL 加载），打包打进 exe
+├── DEVELOPMENT.md           ← 本开发日志（持续写入，接手先读）
 ├── README.md
-└── assets/
-    └── characters/          ← 角色目录（每角色一个子目录，放 image.png + 语音 mp3）
-        ├── 星绘/  (image.png 256x256 + morning/noon/evening.mp3)
-        └── 白墨/  (image.png 180x180 + sprint.mp3)
+└── assets/                  ← 资源（开发期直接读源码 assets/；打包后数据落在「卡丘简易桌宠数据」目录）
+    ├── characters/          ← 角色（三级：阵营/角色/形象文件），每角色目录放 image.png（gif 角色放 .gif）
+    │   ├── 乌尔比诺/        ← 7 角色：加拉蒂亚 奥黛丽 星绘 汐 玛德蕾娜*.gif 白墨 绯绯
+    │   │   └── 星绘/image.png
+    │   ├── 剪刀手/          ← 9 角色：令 拉薇 明 梅瑞狄斯 玛拉 琴格兰汀 达卡*.gif 诺诺 香奈美
+    │   └── 欧泊/            ← 8 角色：伊薇特 信 千代 心夏 忧黎 米雪儿 芙拉薇娅 瑞欧娜
+    ├── common_voice/        ← 通用语音（任意角色共用音效，如 06_奈斯！.mp3）
+    ├── trigger_voice/<角色>/ ← 集中触发音：每角色「卡拉彼丘.mp3」（点按桌宠播放，角色目录内不再放语音）
+    ├── tts_refs/<角色>/     ← TTS 克隆参考：ref.wav + ref.txt + system_prompt.txt
+    ├── persona/<角色>.txt   ← 角色人设/自我介绍（点按台词来源 + TTS 克隆参考文案）
+    ├── role_worldbooks/<角色>.json  ← 每角色专属世界书（常驻注入）
+    ├── world_book.json      ← 全局世界书（关键词/常驻注入）
+    └── app.ico              ← 托盘/窗口图标
+
+运行数据（不入库）：contexts/role_<角色>.json（每角色独立会话上下文）、pet_config.json（本地配置含 API 地址）、pet_debug.log
+打包产物（不入库）：build/ dist/ 卡丘简易桌宠.exe
 ```
+
+> 老文件：`DesktopPet.cs`（早期 C# WPF 调研版）已于 2026-09-08 删除（详见变更记录），需要回溯时查 git 历史即可。
 
 ## 4. 编译 / 打包（PyInstaller → 单文件 exe）
 
@@ -77,6 +95,12 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 - **菜单按钮（2026-09-05 起）**：自绘于 `paintEvent`（与角色动画通过 `painter.save/restore` 解耦，按钮恒固定右上角）；仅 `_hovering` 时显示；点按钮不触发按压/播音（`_menu_press` 状态区分）；菜单统一 `_build_role_menu()` 构建（深色 QSS `MENU_QSS` + 角色单选勾选 + 退出）
 
 ## 6. 变更记录
+
+### 2026-09-08（目录结构订正 + 删除早期 C# WPF 调研版 DesktopPet.cs）
+- **目录结构订正**：第 3 节原来停留在「星绘/白墨 早午晚」旧时代，与现状严重不符，已按实际重写——顶层含 `ai_chat.py`/`settings_panel.py`/`卡丘简易桌宠.spec`/`rthook_fix_urllib_ssl.py`；角色图为**阵营/角色/形象**三级结构（乌尔比诺7 / 剪刀手9 / 欧泊）8 角色）；语音从角色目录迁到 `trigger_voice/<角色>/卡拉彼丘.mp3`；新增 `common_voice`/`persona`/`tts_refs`/`role_worldbooks`/`world_book.json`/`app.ico`
+- **删除 DesktopPet.cs**（及本地 DesktopPet.exe）：user 确认无用即删。该文件是 2026-09-04（项目第 0 天）的 C# WPF 早期调研草稿，仅 8.5KB，只实现了透明窗口+点按动画+早午晚播报；现生产已全面迁移到 PyQt6 完整版（pet.py+ai_chat.py+settings_panel.py），无保留价值。重写为 Rust/Zig/C++ 的方案经评估否决（工程量大、Qt 跨语言封装会重踩崩溃坑、性能瓶颈在 Qt 而非语言）。git 历史可回溯该文件
+- 涉及：删除 `DesktopPet.cs`、`DEVELOPMENT.md`（第 3、6 节）
+- git：随 58bdf09 之后的本提交
 
 ### 2026-09-08（游戏运行中切角色崩溃：菜单重开加固 + 崩溃诊断 dump/日志）
 - **问题（用户）**：玩卡拉彼丘时切换角色直接崩溃（桌宠整个消失）；Windows 事件日志 BEX64 0xc0000409 Qt6Core.dll 固定偏移 0x1c8d8（多次）
