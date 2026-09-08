@@ -1,4 +1,4 @@
-# 卡丘简易桌宠（dsh-desktop-pet）
+# 卡丘简易桌宠（strinova-desktop-pet）
 
 一个 **Python 3.14 + PyQt6** 开发的 Windows 桌面桌宠：透明置顶浮窗、点按播音、角色可扩展、可打包成单文件 exe（免 Python 环境）。
 
