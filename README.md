@@ -41,7 +41,7 @@ python -m PyInstaller --noconfirm --clean "卡丘简易桌宠.spec"
 ## 目录结构
 
 ```
-dsh-desktop-pet/
+strinova-desktop-pet/
 ├── pet.py                ← 主程序（桌宠窗口/动画/键盘钩子/游戏联动）
 ├── ai_chat.py            ← AI 对话 + TTS（对话条/气泡/多会话/用量）
 ├── settings_panel.py     ← 设置面板窗口
