@@ -752,6 +752,14 @@ _FOLLOW_MS = 300
 _TYPE_MS = 18          # 每字显示间隔（ms）——约 55 字/秒，快速蹦出
 _THINK_MS = 280        # 思考三点跳动间隔
 
+# 蹦字同步：标点=停顿权重（TTS 在标点处会停顿/拖长，文字也按比例"等"）
+# 普通字 1.0；逗号/顿号 2.0；句号/问号/感叹/省略号 2.5；破折号 3.0
+_PUNCT_WEIGHT = {
+    '，': 2.0, '、': 2.0, '；': 2.0, ',': 1.8, ':': 2.0, ';': 2.0,
+    '。': 2.5, '！': 2.5, '？': 2.5, '.': 2.5, '!': 2.5, '?': 2.5,
+    '…': 2.5, '……': 2.5, '—': 3.0, '——': 3.0, ' ': 1.2,
+}
+
 
 class BubbleWidget(QWidget):
     def __init__(self, pet):
@@ -781,6 +789,10 @@ class BubbleWidget(QWidget):
         self._type_timer.timeout.connect(self._type_step)
         self._type_text = ''
         self._type_pos = 0
+        # 语音同步时间表：show_text_synced 预计算每个字符的显示时刻(ms)，
+        # _type_step 按时间表推进（语音节奏贴合，标点处等待）
+        self._sync_schedule = None
+        self._sync_t0 = 0.0
         # 思考动画
         self._think = 0
         self._think_timer = QTimer(self)
@@ -824,8 +836,10 @@ class BubbleWidget(QWidget):
         self._type_timer.start()
 
     def show_text_synced(self, text, duration_ms):
-        """文字与音频同步：按音频实际时长逐字蹦字（同始同终，速度贴合语速）。
-        duration_ms=音频时长(ms)；每字间隔 = 时长/字数。0 或异常则回退匀速。"""
+        """文字与音频同步：按音频实际时长 + 标点停顿权重逐字蹦字。
+        duration_ms=音频有效时长(ms)（已去掉首尾静音）。
+        时间分配：标点字符权重高（TTS 在标点处停顿），普通字权重低，
+        文字在逗号句号处同步"等" → 与语音节奏贴合。0 或异常则回退匀速。"""
         self._stop_thinking()
         self._type_text = text
         self._type_pos = 0
@@ -838,14 +852,41 @@ class BubbleWidget(QWidget):
         n = len(text)
         if n <= 0:
             return
-        if duration_ms and duration_ms > 0:
-            # 最小间隔防止过快/过慢导致卡顿或超时
-            interval = max(10, min(2000, int(duration_ms / n)))
+        if duration_ms and duration_ms > 0 and n > 1:
+            # 按标点权重分配每字显示时刻
+            total_w = 0.0
+            for ch in text:
+                total_w += _PUNCT_WEIGHT.get(ch, 1.0)
+            sched = []
+            acc = 0.0
+            for ch in text:
+                acc += _PUNCT_WEIGHT.get(ch, 1.0)
+                sched.append(duration_ms * acc / total_w)
+            self._sync_schedule = sched
+            self._sync_t0 = time.monotonic()
+            # 时间表模式：50ms 轮询查进度（间隔短、贴合度高，且不依赖固定速率）
+            self._type_timer.start(50)
         else:
+            self._sync_schedule = None
             interval = _TYPE_MS
-        self._type_timer.start(interval)
+            self._type_timer.start(interval)
 
     def _type_step(self):
+        if self._sync_schedule is not None:
+            # 按时间表推进：当前应显示到第几个字
+            elapsed = (time.monotonic() - self._sync_t0) * 1000.0
+            sched = self._sync_schedule
+            pos = self._type_pos
+            while pos < len(sched) and elapsed >= sched[pos]:
+                pos += 1
+            if pos > self._type_pos:
+                self._type_pos = pos
+                self.update()
+            if self._type_pos >= len(self._type_text):
+                self._type_timer.stop()
+                self._sync_schedule = None
+                self._lift_life()   # 蹦字完成后重新计时自动消失
+            return
         self._type_pos += 1
         self.update()
         if self._type_pos >= len(self._type_text):
@@ -869,6 +910,7 @@ class BubbleWidget(QWidget):
 
     def _stop_type(self):
         self._type_timer.stop()
+        self._sync_schedule = None
         self._type_text = ''
         self._type_pos = 0
 
@@ -3094,6 +3136,11 @@ class AiChatManager(QObject):
             gain_path = self.gain_wav_if_needed(path, vol)
         # 音频时长（同步蹦字用；失败回退默认间隔）
         dur_ms = self._wav_duration_ms(gain_path)
+        # 有效语音区间：去掉首尾静音 → (实际出声起点, 有效时长)。
+        # 用有效时长蹦字（首尾静音不该算进朗读节奏），并在"实际出声点"才开始蹦
+        start_ms, active_ms = self._wav_active_range_ms(gain_path)
+        if active_ms <= 0:
+            active_ms = dur_ms
         pending_text = (getattr(self, '_synced_text', '') or '').strip()
         self._synced_text = ''
         # 先把音频接上、启动播放（音频真正出声的起点）
@@ -3118,7 +3165,8 @@ class AiChatManager(QObject):
                 sfx.play()
             except Exception:
                 pass
-        # 蹦字：播放启动后稍延（QSoundEffect 起播快，100ms 足够）再蹦
+        # 蹦字：播放启动后等"实际出声点"再蹦（首静音跳过；QSoundEffect 起播快，
+        # start_ms 已含首静音，再加 100ms 保险）
         if pending_text:
             def _reveal():
                 if seq != getattr(self, '_pending_tts_seq', 0):
@@ -3126,10 +3174,10 @@ class AiChatManager(QObject):
                 if self._bubble is not None:
                     self._bubble._stop_thinking()
                 try:
-                    self._get_bubble().show_text_synced(pending_text, dur_ms)
+                    self._get_bubble().show_text_synced(pending_text, active_ms)
                 except Exception:
                     self._hide_thinking()
-            QTimer.singleShot(100, _reveal)
+            QTimer.singleShot(max(60, 100 + int(start_ms)), _reveal)
         else:
             QTimer.singleShot(80, self._hide_thinking)
         cleaned = {'done': False}
@@ -3165,6 +3213,45 @@ class AiChatManager(QObject):
                 return int(w.getnframes() / w.getframerate() * 1000)
         except Exception:
             return 0
+
+    def _wav_active_range_ms(self, path):
+        """检测 wav 有效语音区间（去掉首尾静音）。
+        返回 (start_ms, active_ms)：实际出声起点 + 有效时长。
+        无 soundfile/numpy 或全静音/异常时回退 (0, 全时长)。"""
+        if not path or not os.path.exists(path):
+            return (0, 0)
+        try:
+            if not HAS_SF:
+                return (0, self._wav_duration_ms(path))
+            with _sf.SoundFile(path) as f:
+                sr = f.samplerate
+                data = f.read(dtype='float32')
+            if data is None or len(data) == 0:
+                return (0, self._wav_duration_ms(path))
+            if data.ndim > 1:
+                data = data.mean(axis=1)  # 多声道取平均
+            # 每 20ms 一块算 RMS；阈值 = 峰值 RMS 的 4% 或绝对 0.002，取较大
+            block = max(1, int(sr * 0.02))
+            n = len(data) // block
+            if n < 3:
+                return (0, self._wav_duration_ms(path))
+            blocks = data[:n * block].reshape(n, block)
+            rms = _np.sqrt((blocks ** 2).mean(axis=1))
+            peak = float(rms.max())
+            thr = max(peak * 0.04, 0.002)
+            over = _np.where(rms > thr)[0]
+            if len(over) == 0:
+                return (0, self._wav_duration_ms(path))
+            start_b = int(over[0])
+            end_b = int(over[-1]) + 1
+            start_ms = int(start_b * block / sr * 1000)
+            end_ms = int(end_b * block / sr * 1000)
+            active = max(0, end_ms - start_ms)
+            if active < 100:  # 有效语音太短，当作检测失败
+                return (0, self._wav_duration_ms(path))
+            return (start_ms, active)
+        except Exception:
+            return (0, self._wav_duration_ms(path))
 
     # ------------- 测试连接（设置面板用） -------------
     def test_connection(self, base_url, api_key, model, on_done):
