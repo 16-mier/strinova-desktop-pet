@@ -131,6 +131,125 @@ def _world_book_paths(fname='world_book.json', role=None):
     return out or [os.path.join(os.getcwd(), 'assets', fname)]
 
 
+# ---- TTS 提示词预设（基于 Breeze-TTS-2 官方/社区高赞用法调研，见 _worldbook_drafts/breeze_tts_guide.md）----
+TTS_PROMPT_PRESETS = [
+    ('通用均衡（默认）',
+     '你是 TTS 朗读改写助手。把下面的对话文本改写成适合本地语音克隆（breeze-tts-clone）朗读的中文，要求：\n'
+     '1. 只改格式不改意图，保留原意与角色口吻，语气自然不机械；\n'
+     '2. 去掉 markdown 符号、列表序号、表情符号、链接、括号注释；\n'
+     '3. 可在句首或关键停顿处内嵌 [笑] [叹气] [咳嗽] [清嗓子] 等情绪标记；\n'
+     '4. 数字、英文、emoji 转成可读中文（CEO→C-E-O、2030年→二零三零年）；多音字歧义处注音，如 重(chóng)建；\n'
+     '5. 用逗号/句号/省略号控制停顿与节奏，长句拆短，单句不超一句话；\n'
+     '6. 拟声叠字（嘻嘻/嘤嘤/嘿嘿）改写为自然的笑法或删除；不堆砌语气词。\n'
+     '同时判断朗读时的语气/节奏/行为（开心雀跃、轻快带笑、放慢语速、略带讥诮等，10 字以内，可用 [笑] 类标记辅助）。\n'
+     '严格按以下两行格式输出，不要输出任何其它内容或解释：\n'
+     '情绪：<简短中文语气描述，10 字以内>\n'
+     '朗读：<改写后的文本>'),
+    ('情绪生动（台词向）',
+     '把下面台词改写成适合本地语音克隆（breeze-tts-clone）朗读的中文，显著突出情绪与口吻：\n'
+     '语速与停顿按情绪调整（激动=短促紧凑；悲伤=放慢+省略号；撒娇=轻快上挑）；\n'
+     '在句首或关键停顿处保留 [笑] [叹气] 等标记辅助情绪；\n'
+     '数字、英文、符号按读法改写；去掉 markdown 与表情符号；保留角色口吻与关键信息。\n'
+     '严格按以下两行格式输出，不要输出任何其它内容或解释：\n'
+     '情绪：<简短中文语气描述，10 字以内>\n'
+     '朗读：<改写后的文本>'),
+    ('长段防机械（独白向）',
+     '把下面长段改写成适合本地语音克隆（breeze-tts-clone）朗读的口语化短句串：\n'
+     '拆成 2-4 句独立朗读单元，句间用句号或省略号留气口；\n'
+     '避免连续六字以上的书面长并列；语气词适度（哈/呢/啦）但不过度；\n'
+     '可保留 [笑] [叹气] 标记辅助停顿；保持不变的角色身份与要点；去掉 markdown 与表情符号。\n'
+     '严格按以下两行格式输出，不要输出任何其它内容或解释：\n'
+     '情绪：<简短中文语气描述，10 字以内>\n'
+     '朗读：<改写后的文本>'),
+]
+
+
+class TtsPromptDialog(QDialog):
+    """TTS 提示词编辑器：预设下拉 + 大编辑区 + 恢复默认 + 保存。
+    AI 按提示词输出两行（情绪：…/朗读：…），「情绪」行作为语音服务语气指令，
+    「朗读」行送 TTS 合成。"""
+
+    def __init__(self, parent, ai):
+        super().__init__(parent)
+        self.setWindowTitle("TTS 提示词编辑器")
+        self.resize(700, 500)
+        self._ai = ai
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("预设模板："))
+        self.cmb_preset = NoWheelComboBox()
+        for name, _txt in TTS_PROMPT_PRESETS:
+            self.cmb_preset.addItem(name)
+        self.cmb_preset.currentIndexChanged.connect(self._apply_preset)
+        row.addWidget(self.cmb_preset, 1)
+        btn_default = QPushButton("恢复内置默认")
+        btn_default.clicked.connect(self._apply_builtin_default)
+        row.addWidget(btn_default)
+        root.addLayout(row)
+        self.ed = QPlainTextEdit()
+        self.ed.setPlaceholderText("在这里编辑 TTS 改写提示词…")
+        root.addWidget(self.ed, 1)
+        hint = QLabel("AI 必须按两行输出：\n"
+                      "情绪：<简短中文语气/节奏描述，10 字内，可用 [笑][叹气] 等标记>\n"
+                      "朗读：<改写后的朗读文本>\n"
+                      "「情绪」行会作为语音服务的语气指令；「朗读」行送给 TTS 合成。")
+        hint.setStyleSheet("color:#7a8099; font-size:11px;")
+        root.addWidget(hint)
+        # 💡 BreezeTTS 用法参考（官方/社区高赞要点，完整调研见 _worldbook_drafts/breeze_tts_guide.md）
+        use_hint = QLabel(
+            "💡 BreezeTTS 用法参考（教 AI 更好地用 TTS）：\n"
+            "· 语气写「行为/节奏」比抽象情绪词更有效：如「轻快带笑、语速略快、句尾上挑」，\n"
+            "  可配 [笑] [叹气] [清嗓子] 等标记，Breeze 会把它当朗读指令；\n"
+            "· 数字/英文/emoji 必须先转成中文读法（18→十八、CEO→C-E-O、2030年→二零三零年）；\n"
+            "· 多音字歧义要注音（如 重(chóng)建），避免读错；\n"
+            "· 长句拆短、用逗号/句号/省略号控停顿，单句不超过一句话，防机械感；\n"
+            "· 语气词适度（哈/呢/啦），拟声叠字改自然笑法，别堆砌；\n"
+            "· 参考音频用 5~10 秒干净单人 24kHz 音频效果最佳（本机 refs_en 已按此准备）。")
+        use_hint.setStyleSheet("color:#8fa3c8; font-size:11px;")
+        use_hint.setWordWrap(True)
+        root.addWidget(use_hint)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_ok = QPushButton("保存")
+        btn_ok.clicked.connect(self._save)
+        btn_row.addWidget(btn_ok)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        root.addLayout(btn_row)
+        self._load_current()
+
+    def _load_current(self):
+        try:
+            cur = (self._ai.cfg().get('tts_prompt') or '').strip()
+        except Exception:
+            cur = ''
+        if not cur:
+            try:
+                cur = self._ai.default_tts_prompt()
+            except Exception:
+                cur = ''
+        self.ed.setPlainText(cur)
+
+    def _apply_preset(self, idx):
+        if 0 <= idx < len(TTS_PROMPT_PRESETS):
+            self.ed.setPlainText(TTS_PROMPT_PRESETS[idx][1])
+
+    def _apply_builtin_default(self):
+        try:
+            self.ed.setPlainText(self._ai.default_tts_prompt())
+        except Exception:
+            pass
+
+    def _save(self):
+        try:
+            self._ai.set_tts_prompt(self.ed.toPlainText().strip())
+        except Exception:
+            pass
+        self.accept()
+
+
 class WorldBookEditor(QDialog):
     """世界书条目编辑器：列出/新增/删除/修改条目（关键词、内容、常驻勾选），
     保存写回 world_book.json（数据目录 + 源码 assets 双写）。"""
@@ -747,16 +866,23 @@ class SettingsPanel(QWidget):
         vol_row.addWidget(self.spn_tts_volume)
         ail.addLayout(vol_row)
         # TTS 提示词：朗读前让 AI 改写（依附 AI，AI 关则朗读也关）
-        lbl_ttp = QLabel("TTS 提示词（朗读前让 AI 把回答改成适合朗读的稿子）：")
+        lbl_ttp = QLabel("TTS 提示词（朗读前让 AI 把回答改写成朗读稿并判断语气）：")
         lbl_ttp.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:4px;")
         ail.addWidget(lbl_ttp)
-        self.ed_ai_ttsprompt = QPlainTextEdit()
-        self.ed_ai_ttsprompt.setPlaceholderText(
-            "例：请把文字改写成适合语音朗读的版本：口语自然、去掉符号表情、保留原意。只输出改写文本。")
-        self.ed_ai_ttsprompt.setFixedHeight(70)
-        self.ed_ai_ttsprompt.textChanged.connect(self._ai_apply_ttsprompt)
-        ail.addWidget(self.ed_ai_ttsprompt)
-        tip5 = QLabel("朗读的文本会先由 AI 按 TTS 提示词改写，再交给上方填写的语音服务合成。")
+        ttp_row = QHBoxLayout()
+        btn_ttp_edit = QPushButton("✏️ 编辑提示词…")
+        btn_ttp_edit.clicked.connect(self._open_tts_prompt_dialog)
+        ttp_row.addWidget(btn_ttp_edit)
+        btn_ttp_reset = QPushButton("恢复默认")
+        btn_ttp_reset.clicked.connect(self._reset_tts_prompt)
+        ttp_row.addWidget(btn_ttp_reset)
+        ttp_row.addStretch(1)
+        ail.addLayout(ttp_row)
+        self.lbl_ttp_summary = QLabel("（使用默认提示词）")
+        self.lbl_ttp_summary.setStyleSheet("color:#7a8099; font-size:11px;")
+        self.lbl_ttp_summary.setWordWrap(True)
+        ail.addWidget(self.lbl_ttp_summary)
+        tip5 = QLabel("朗读的文本会先由 AI 按 TTS 提示词改写（支持 [笑][叹气] 等情绪标记），再交给上方语音服务合成；「情绪」行会作为语音服务的语气指令。")
         tip5.setStyleSheet("color:#7a8099; font-size:11px;")
         ail.addWidget(tip5)
         bl.addWidget(self.ai_box)
@@ -790,6 +916,14 @@ class SettingsPanel(QWidget):
         self.spn_size.valueChanged.connect(self._on_size_changed)
         size_row.addWidget(self.spn_size)
         rl.addLayout(size_row)
+        # 自动面向屏幕中央（跨到另一半屏时翻转朝向）开关
+        facing_row = QHBoxLayout()
+        self.chk_auto_facing = QCheckBox("自动面向屏幕中央（拖到另一半屏时翻转朝向）")
+        self.chk_auto_facing.setChecked(True)
+        self.chk_auto_facing.toggled.connect(self._on_auto_facing_toggled)
+        facing_row.addWidget(self.chk_auto_facing)
+        facing_row.addStretch(1)
+        rl.addLayout(facing_row)
         # 角色列表 + 侧按钮
         row = QHBoxLayout()
         self.role_list = NoWheelList()
@@ -1181,6 +1315,13 @@ class SettingsPanel(QWidget):
         self.spn_size.blockSignals(True)
         self.spn_size.setValue(sz)
         self.spn_size.blockSignals(False)
+        # 自动面向屏幕中央开关同步
+        try:
+            self.chk_auto_facing.blockSignals(True)
+            self.chk_auto_facing.setChecked(bool(getattr(pet, '_auto_facing', True)))
+            self.chk_auto_facing.blockSignals(False)
+        except Exception:
+            pass
         # 角色
         self._refresh_role_list()
         # 音频
@@ -1301,10 +1442,8 @@ class SettingsPanel(QWidget):
         except Exception:
             pass
         tp = ai.get('tts_prompt', '')
-        tp_def = ai_mgr.default_tts_prompt() if ai_mgr is not None else ''
-        self.ed_ai_ttsprompt.blockSignals(True)
-        self.ed_ai_ttsprompt.setPlainText(tp if tp else tp_def)
-        self.ed_ai_ttsprompt.blockSignals(False)
+        self._refresh_ttp_summary()
+        _ = tp
         # 朗读音量
         try:
             vol = max(0, min(300, int(ai.get('tts_volume', 100) or 100)))
@@ -1397,6 +1536,51 @@ class SettingsPanel(QWidget):
             cmb.blockSignals(False)
 
     # ---------------- 角色操作 ----------------
+    def _open_tts_prompt_dialog(self):
+        """打开 TTS 提示词编辑器（预设 + 大编辑区 + 恢复默认 + 保存）"""
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        dlg = TtsPromptDialog(self, pet.ai)
+        dlg.exec()
+        self._refresh_ttp_summary()
+
+    def _reset_tts_prompt(self):
+        """恢复内置默认 TTS 提示词"""
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        try:
+            pet.ai.set_tts_prompt('')
+        except Exception:
+            pass
+        self._refresh_ttp_summary()
+
+    def _refresh_ttp_summary(self):
+        """刷新 TTS 提示词摘要（当前使用内容首行）"""
+        try:
+            pet = self._current_pet()
+            if pet is None or not hasattr(pet, 'ai'):
+                return
+            ai = pet.ai
+            tp = (ai.cfg().get('tts_prompt') or '').strip()
+            txt = tp if tp else (ai.default_tts_prompt() if hasattr(ai, 'default_tts_prompt') else '')
+            head = txt.splitlines()[0].strip() if txt else ''
+            self.lbl_ttp_summary.setText(('当前：' + head[:60]) if head else '（使用默认提示词）')
+        except Exception:
+            self.lbl_ttp_summary.setText('（使用默认提示词）')
+
+    def _on_auto_facing_toggled(self, on):
+        """自动面向屏幕中央开关：实时生效并持久化"""
+        pet = self._current_pet()
+        if pet is None:
+            return
+        try:
+            if hasattr(pet, 'set_auto_facing'):
+                pet.set_auto_facing(bool(on))
+        except Exception:
+            pass
+
     def _on_size_changed(self, val):
         """大小滑块/输入框：实时调桌宠尺寸；两个控件互相联动（防循环）"""
         pet = self._current_pet()
@@ -2090,11 +2274,6 @@ class SettingsPanel(QWidget):
                     % (in_ / 2, out / 2, cache / 2))
         except Exception:
             pass
-
-    def _ai_apply_ttsprompt(self):
-        pet = self._current_pet()
-        if pet is not None and hasattr(pet, 'ai'):
-            pet.ai.set_tts_prompt(self.ed_ai_ttsprompt.toPlainText())
 
     def _ai_apply_tts_volume(self, val):
         """朗读音量滑块/数字：双向同步 + 实时应用到 AI 播放器"""

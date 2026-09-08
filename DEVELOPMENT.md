@@ -96,7 +96,53 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
-### 2026-09-08（全面体检：修复冒烟崩溃 + spec 通用化入库）
+### 2026-09-09（深夜闪退根治：UIA 跨线程 COM + QThread 被 GC 回收 + 钩子回调异常穿出）
+- **问题（用户）**：桌宠"最近闪退了"（9/8 22:46、23:38、9/9 0:00 三次，进程全部消失）
+- **证据（Windows 事件日志）**：三次崩溃均为 卡丘简易桌宠_最新.exe：①22:46 ntdll.dll 0xc0000374（堆损坏）；②23:38、0:00 Qt6Core.dll 0xc0000409 偏移 0x1c8d8（同 9/7 反复出现的崩溃签名）——Qt 层 C++ 崩溃，Python traceback 抓不到，pet_debug.log 尾部只有 TTS 502/500（BreezeTTS 服务未启动）
+- **根因 1（堆损坏 0xc0000374）**：UIA 兜底判定跨线程使用 COM 对象——`_UIA_AUTO` 在模块加载时于主线程创建（comtypes.CoInitialize 主线程），而 `_uia_focus_is_text()` 被 `NumpadPlayHook._proc`（**钩子线程**）调用 → 钩子线程直接用主线程的 COM 对象 = 未定义行为 → 堆损坏。触发条件：前台是 Chromium/Electron 类窗口（DSH Desktop 本身、新版 QQ/微信）+ 按小键盘数字
+- **修复 1**：UIA 对象线程本地化——新增 `_uia_auto()`（threading.local 缓存 + 每线程 CoInitialize/CreateObject），`_uia_focus_is_text` 改用当前线程自己的对象；钩子线程不再跨线程碰 COM
+- **根因 2（Qt6Core 0xc0000409）**：运行中的 QThread 被 Python GC 回收——`_speak_text`/`_rewrite_for_tts`/`_on_send` 每次新建 worker 直接覆盖 `self._tts_worker`/`_rewrite_worker`/`_ai_worker` 引用，旧 worker 若还在运行（TTS 502 重试中 sleep 0.5）→ 被覆盖后引用归零 → GC 销毁运行中的 QThread → Qt "QThread: Destroyed while thread is still running" fail-fast（0xc0000409）
+- **修复 2**：新增 `_keep_worker(w)` 保活列表——所有后台 worker 创建后加入 `_workers_keepalive`，finished 信号时移除；旧 worker 结束前始终持有引用，杜绝 GC 回收运行中 QThread
+- **根因 3**：`NumpadPlayHook._proc`/`KeyCapture._proc` 钩子回调无整体 try/except——Python 异常穿出 C 回调边界会直接崩进程
+- **修复 3**：两个钩子回调整体 try/except，异常时放行按键（不吞键、不崩）
+- **验证**：py_compile ✅；import 冒烟 ✅；钩子线程模拟（非主线程调 `_uia_auto()` 拿到独立对象、二次调用命中缓存、主线程对象与线程对象不同）✅；待重新打包 exe 实测
+- 涉及：`pet.py`（_uia_auto/_uia_focus_is_text/_proc×2）、`ai_chat.py`（_keep_worker/_workers_keepalive/三处 worker 创建）
+- git：（待提交）
+
+### 2026-09-08（世界书 AI 调研大扩充 + 自动翻转开关）
+- **世界书扩充（11 个 subagent 并行调研，详见 `_worldbook_drafts\RESEARCH-LOG.md`）**：
+  - 全局 `world_book.json` 21 → **155 条**（新增：武器库 38 条【含 24 把角色专属武器+原型】、玩法机制 26 条、地图地点 18 条、剧情时间线 16 条、世界观补全 16 条、概念名词 9 条、社区梗 10 条等）
+  - 角色书 24 → 28 份（新增 莉莉丝/诺诺 角色书；全名并入简名文件：奥黛丽·格罗夫→奥黛丽、玛德蕾娜·利里→玛德蕾娜、加拉蒂亚·利里→加拉蒂亚、米雪儿·李→米雪儿）
+  - 双写：源码 `assets/` + 数据目录 `卡丘简易桌宠数据\assets\`；运行中的 exe 重启后才加载
+- **新增功能：自动面向屏幕中央开关**（`auto_facing`，默认开）：
+  - 桌宠跨屏幕左右半屏时平滑翻转朝向（cos 曲线转身动画）——原机制保留，新增开关可关闭
+  - pet.py：`self._auto_facing`（读 `_cfg.get('auto_facing', True)`）、`_update_facing()` 开头守卫、新 `set_auto_facing(on)`（即时生效+写 pet_config.json）
+  - settings_panel.py：形象角色区新增「自动面向屏幕中央（拖到另一半屏时翻转朝向）」勾选框 + `_on_auto_facing_toggled` + refresh_all 同步
+  - 验证：py_compile OK；ruff 新增行无报告（131 个既有样式告警与本改动无关）
+  - 涉及：`pet.py`、`settings_panel.py`、`assets/world_book.json`、`assets/role_worldbooks/*.json`、`DEVELOPMENT.md`
+- 排队中：persona 深研（24 角色系统提示词，agent 产出中）、11 领域审核（review/ 报告收集中）
+
+### 2026-09-08（世界书审核修复 + 全中文对齐 + 24 角色 persona 部署 + TTS 提示词重构）
+- **世界书审核**：11 个原调研 agent 交叉审核（`_worldbook_drafts\review\*.md`，11 份报告），按【需修正】统一修复（`_fix_worldbook_review.py`，74 处替换）：
+  - 阵营修正：普雷顿=剪刀手控制（剧情设定）、伊莱特隆/纽特朗=乌尔比诺实控、斯崔恩=缓冲地带（删查无的「弗雷特斯联邦」）
+  - 剧情修正：赤刃行动(2023 科莫斯塔)与桎化行动(2025 普雷顿塔)拆分互指；绯莎非欧泊搜查官（神秘雇主赏识入乌尔比诺）；莉莉丝=七魔神之一（非首领级）；白墨词条笔误；第六赛季精确 2024.7；删无据「DSA」；奥黛丽失忆标「官方未证实」；崩溃症「百年」标社区口径
+  - 武器/角色：雨晦 keys 去 Nobunaga、破晓=剪刀手、欺诈师=先锋位、潮音=杠杆式、莉莉丝=鞭武器、香奈美身高 161、明 CV=喵酱（Mace）、珐格兰丝武器笔误
+  - 数值：星绘临时护甲更新现行版本（自身300/队友200/大招1500）；爆破数值标现行版本；晶能冲突补旧值
+- **全中文对齐**（`_align_chinese.py`）：52 文件、156 条 content 清理英文括号注释、删除 82 个纯英文 keys、定位术语统一国服口径（哨兵→守护、Sentinel→移除等），残留 0
+- **persona 部署**：24 角色新 persona（agent 深研，官方台词/称呼「引航者」/诺诺本名「夜守诺」）已覆盖 `assets\persona\` + 数据目录
+- **TTS 提示词重构**（基于 Breeze-TTS-2 调研 `_worldbook_drafts\breeze_tts_guide.md`）：
+  - `ai_chat.py` default_tts_prompt 升级：instruction 写「行为/语气/节奏」+ [笑][叹气] 情绪标记、数字/英文/多音字注音、标点控停顿、长句拆短（保持「情绪：/朗读：」两行格式）
+  - `settings_panel.py`：TTS 提示词区重构为「✏️ 编辑提示词… + 恢复默认 + 摘要」；新增 `TtsPromptDialog` 编辑器弹窗（3 个预设：通用均衡/情绪生动/长段防机械 + 恢复内置默认 + 保存）；删除旧 `ed_ai_ttsprompt` 与 `_ai_apply_ttsprompt`
+  - 验证：py_compile + import 冒烟 OK
+  - 涉及：`ai_chat.py`、`settings_panel.py`、`assets\persona\*.txt`（24）、`assets\world_book.json`、`assets\role_worldbooks\*.json`、`DEVELOPMENT.md`
+
+- **用户要求**：验证桌面 `卡丘简易桌宠_最新.exe` 的世界书是否正常生效
+- **验证方法**（数据目录 = `C:\Users\mier\Desktop\卡丘简易桌宠数据`）：
+  1. 数据文件健康：`assets\world_book.json`（11,641B，UTF-8，21 条 entries，与源码同时间戳同大小）+ `assets\role_worldbooks\` 24 角色书齐全 ✅
+  2. 配置：`pet_config.json → ai.world_book_enabled = true` ✅
+  3. 调用链：`ai_chat.py:2830-2834` 发送前 `_inject_world_entries(msgs, text)`（角色书全常驻 + 全局常驻/关键词命中 → system 尾部【世界知识】段）✅
+  4. 命中逻辑实跑（脚本 `_verify_worldbook.py`，8/8 断言）：「汐，乌尔比诺最近有什么新闻吗？」命中 11 条（汐角色书 8 条 + 全局常驻 3 条），注入块拼装正确 ✅
+- **结论**：世界书机制正常；注入发生在每次发消息时（contexts 存盘无注入痕迹属正常设计）。端到端确认：跟角色说带关键词的话（如问「乌尔比诺」），模型回复会引用世界书内容
 - **系统检修**交出 3 处修复：
   1. **panel_smoke3.py 修崩溃**：原脚本引用了早已被删的控件 `cmb_ai_tts_mode`/`cloud_voice_box`（早期「cloud/local/api 三引擎下拉」时代产物，现已精简为唯一的 API 地址表单），一跑就 `AttributeError` 崩测试。已按当前设计重写：断言 `api_tts_box` 表单/克隆三件套/模型版本下拉存在、展开 AI 区后可见、填字段保存、缺字段提示、滑块禁滚轮、refresh 后可再用 → 全绿。
   2. **卡丘简易桌宠.spec 去本机绝对路径**：`runtime_hooks` 原来写死 `C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet\rthook_fix_urllib_ssl.py`，换机/换目录打包会失败、且泄露本机路径。改为相对路径 `rthook_fix_urllib_ssl.py`（cwd=仓库根时正确解析，已验证）。

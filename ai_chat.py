@@ -1672,6 +1672,10 @@ class AiChatManager(QObject):
         self._ai_worker = None
         self._tts_worker = None
         self._rewrite_worker = None
+        # 运行中 QThread 保活列表：worker 结束前保持引用，防止 Python GC
+        # 提前回收运行中的 QThread → Qt 层 0xc0000409 fail-fast（
+        # "QThread: Destroyed while thread is still running"）
+        self._workers_keepalive = []
         self._pending_tts_seq = 0
         self._seq = 0                 # 递增序号：新 TTS 打断旧 TTS
         self._synced_text = ''        # 待朗读文本（音频就绪后随音频同步蹦字）
@@ -2483,22 +2487,30 @@ class AiChatManager(QObject):
 
     @staticmethod
     def default_tts_prompt():
-        """TTS 系统提示词（朗读前把 AI 回答改写成朗读稿 + 自动补齐情绪）。
+        """TTS 系统提示词（朗读前把 AI 回答改写成朗读稿 + 自动补齐语气）。
+        依据 Breeze-TTS-2 官方/社区高赞用法（见 _worldbook_drafts/breeze_tts_guide.md）：
+        - instruction 写「行为/语气/节奏」而非抽象情绪词；支持 [笑][叹气] 等情绪标记
+        - 数字/英文/多音字注音、标点控制停顿、长句拆短
         模型按要求输出两行：
-            情绪：<简短中文情绪/语气描述，10 字内>
+            情绪：<简短中文语气/节奏描述，10 字内>
             朗读：<改写后适合朗读的文本>
-        情绪行会作为本地 TTS 引擎的 instruction（说话情绪），真正"模型自动补齐情绪"。"""
-        return ('你是一名中文语音播报助手。请把下面这段文字改写成最适合语音朗读的版本：'
-                '必须口语自然、像真人说话，句子完整通顺；'
+        情绪行会作为本地 TTS 引擎的 instruction（说话语气），真正"模型自动补齐情绪"。"""
+        return ('你是一名中文语音播报改写助手。请把下面这段文字改写成最适合本地语音克隆'
+                '（breeze-tts-clone）朗读的版本：'
+                '只改格式不改意图，保留原意和角色口吻，语气自然不机械；'
                 '去掉所有 markdown 符号、列表序号、表情符号、链接、括号注释；'
+                '可在句首或关键停顿处内嵌 [笑] [叹气] [咳嗽] [清嗓子] 等情绪标记；'
                 '把难念的书面词换成顺口说法，把“嘻嘻”“嘤嘤”“嘿嘿嘿”这类拟声'
                 '（尤其叠字怪音）改写成自然的笑法或直接删掉，宁可简短也别拗口；'
-                '数字与英文按口语习惯读出（18→十八、AI→A I、GPT→G P T）；'
-                '不要用语气词堆砌。保留原意和关键信息。'
-                '同时根据这段文字的语气，判断朗读时应该带有的情绪/语气'
-                '（如：开心雀跃、难过低落、生气抱怨、平静温柔、撒娇俏皮、焦急担心等）。'
+                '数字与英文按口语习惯读出（18→十八、AI→A I、GPT→G P T），'
+                '多音字歧义处注明读音（如 重(chóng)建）；'
+                '用逗号、句号、省略号控制停顿与节奏，长句拆短，单句不超过一句话；'
+                '不要用语气词堆砌。'
+                '同时判断这段文字朗读时应带的语气/节奏/行为'
+                '（如：开心雀跃、轻快带笑、放慢语速、略带讥诮、撒娇俏皮、焦急担心等，'
+                '10 字以内，可用 [笑] 类标记辅助）。'
                 '严格按以下两行格式输出，不要输出任何其它内容或解释：\n'
-                '情绪：<简短中文情绪描述，10 字以内>\n'
+                '情绪：<简短中文语气描述，10 字以内>\n'
                 '朗读：<改写后的文本>')
 
     def tts_prompt(self):
@@ -2852,7 +2864,24 @@ class AiChatManager(QObject):
         self._ai_worker = AIWorker(base_url, api_key, model, msgs, self)
         self._ai_worker.done.connect(self._on_ai_done)
         self._ai_worker.finished.connect(self._ai_worker.deleteLater)
+        self._keep_worker(self._ai_worker)
         self._ai_worker.start()
+
+    def _keep_worker(self, w):
+        """保活运行中的 QThread：加入列表持有引用，finished 后移除。
+        防止旧 worker 被新 worker 覆盖引用后，Python GC 提前回收仍
+        在运行的 QThread → Qt 层 0xc0000409（QThread: Destroyed while
+        thread is still running）。所有后台 worker 统一走这里。"""
+        self._workers_keepalive.append(w)
+
+        def _release():
+            try:
+                if w in self._workers_keepalive:
+                    self._workers_keepalive.remove(w)
+            except Exception:
+                pass
+
+        w.finished.connect(_release)
 
     # ------------- 气泡 / 思考 -------------
     def _get_bubble(self):
@@ -3004,6 +3033,7 @@ class AiChatManager(QObject):
         self._rewrite_worker = w
         w.done.connect(lambda txt, e, u, s=seq: self._on_rewrite_done(txt, e, s, reply))
         w.finished.connect(w.deleteLater)
+        self._keep_worker(w)
         w.start()
 
     def _on_rewrite_done(self, text, err, seq, original):
@@ -3040,6 +3070,7 @@ class AiChatManager(QObject):
         self._tts_worker.done.connect(
             lambda path, err, s=seq: self._on_tts_done(path, err, s))
         self._tts_worker.finished.connect(self._tts_worker.deleteLater)
+        self._keep_worker(self._tts_worker)
         self._tts_worker.start()
 
     def _on_tts_done(self, path, err, seq):

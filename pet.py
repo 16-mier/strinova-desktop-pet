@@ -44,6 +44,27 @@ except Exception as _uia_e:
     _UIA_AUTO = None
     HAS_UIA = False
 
+# UIA 对象线程本地化：低层键盘钩子的回调运行在钩子线程（非主线程），
+# COM 对象必须在其创建线程内使用；跨线程调用 comtypes 对象会导致
+# 堆损坏/崩溃（0xc0000374 / 0xc0000409，实测崩在 Qt6Core.dll）。
+_uia_tls = threading.local()
+
+
+def _uia_auto():
+    """返回当前线程自己的 UIA 自动化对象（首次使用时创建 + CoInitialize）。
+    线程安全：每个线程独立对象，绝不跨线程共用。失败返回 None（自动降级）"""
+    if not HAS_UIA:
+        return None
+    try:
+        obj = getattr(_uia_tls, 'auto', None)
+        if obj is None:
+            comtypes.CoInitialize()
+            obj = _cc.CreateObject(_UIA.CUIAutomation, interface=_UIA.IUIAutomation)
+            _uia_tls.auto = obj
+        return obj
+    except Exception:
+        return None
+
 # sounddevice / soundfile：绑定麦克风直出用（可选，缺失则回退 QMediaPlayer）
 try:
     import sounddevice as _sd
@@ -871,20 +892,24 @@ class KeyCapture:
         self._poll_timer = None
 
     def _proc(self, nCode, wParam, lParam):
-        if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-            kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            vk = int(kbd.vkCode)
-            flags = int(kbd.flags)
-            if flags & LLKHF_INJECTED:
-                # 程序注入的键（auto_ptt 等模拟按键）：不录制，且放行给系统
-                return ctypes.windll.user32.CallNextHookEx(
-                    self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
-            with self._result_lock:
-                if vk == VK_ESCAPE:
-                    self._result = 'esc'
-                elif vk not in _MODIFIER_VKS:
-                    self._result = vk
-            return 1  # 吞掉该键（含修饰键，避免其释放事件外泄）
+        # C 回调边界：异常穿出会崩进程，整体防护
+        try:
+            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                vk = int(kbd.vkCode)
+                flags = int(kbd.flags)
+                if flags & LLKHF_INJECTED:
+                    # 程序注入的键（auto_ptt 等模拟按键）：不录制，且放行给系统
+                    return ctypes.windll.user32.CallNextHookEx(
+                        self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+                with self._result_lock:
+                    if vk == VK_ESCAPE:
+                        self._result = 'esc'
+                    elif vk not in _MODIFIER_VKS:
+                        self._result = vk
+                return 1  # 吞掉该键（含修饰键，避免其释放事件外泄）
+        except Exception:
+            pass  # 异常放行，不吞键，不崩
         # lParam 是 64 位指针，CallNextHookEx 需原样透传（用 c_void_p 值）
         return ctypes.windll.user32.CallNextHookEx(
             self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
@@ -1060,15 +1085,19 @@ _UIA_CACHE_TTL = 1.0
 
 def _uia_focus_is_text(hwnd):
     """用 UIA 查前台窗口的焦点元素是否可输入（支持 TextPattern/ValuePattern）。
-    返回 True=正在输入；False/异常=查不到。带 1 秒缓存"""
+    返回 True=正在输入；False/异常=查不到。带 1 秒缓存。
+    线程安全：用当前线程自己的 UIA 对象（_uia_auto），不跨线程共用 COM"""
     if not HAS_UIA or not hwnd:
         return False
     now = time.monotonic()
     c = _uia_cache.get(hwnd)
     if c and now - c[0] < _UIA_CACHE_TTL:
         return c[1]
+    auto = _uia_auto()
+    if auto is None:
+        return False
     try:
-        fe = _UIA_AUTO.GetFocusedElement()
+        fe = auto.GetFocusedElement()
         if fe is None:
             _uia_cache[hwnd] = (now, False)
             return False
@@ -1186,30 +1215,35 @@ class NumpadPlayHook:
         self._down_keys = set()         # 当前按住的数字（keyup 时清）
 
     def _proc(self, nCode, wParam, lParam):
-        if nCode >= 0:
-            kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            vk = int(kbd.vkCode)
-            flags = int(kbd.flags)
-            # 程序注入的键（auto_ptt 等）：放行
-            if flags & LLKHF_INJECTED:
-                return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
-                                              ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
-            is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-            if vk in NUMPAD_VK.values():
-                num = next(n for n, v in NUMPAD_VK.items() if v == vk)
-                if is_down:
-                    if not foreground_is_input():
-                        # 非输入态：吞掉按键
-                        with self._lock:
-                            self._num_pressed = num
-                        return 1  # 吞掉
-                    else:
-                        return _user32.CallNextHookEx(  # 输入态放行
-                            self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
-                else:
-                    # keyup 放行（若 down 被吞则 keyup 也吞保持配对，但这里简单放行）
+        # 钩子回调运行在 C 回调边界：任何 Python 异常穿出都会导致进程崩溃，
+        # 必须整体 try/except，异常时放行按键（不吞键，保守安全）
+        try:
+            if nCode >= 0:
+                kbd = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                vk = int(kbd.vkCode)
+                flags = int(kbd.flags)
+                # 程序注入的键（auto_ptt 等）：放行
+                if flags & LLKHF_INJECTED:
                     return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
                                                   ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+                is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                if vk in NUMPAD_VK.values():
+                    num = next(n for n, v in NUMPAD_VK.items() if v == vk)
+                    if is_down:
+                        if not foreground_is_input():
+                            # 非输入态：吞掉按键
+                            with self._lock:
+                                self._num_pressed = num
+                            return 1  # 吞掉
+                        else:
+                            return _user32.CallNextHookEx(  # 输入态放行
+                                self._hook, ctypes.c_int(nCode), ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+                    else:
+                        # keyup 放行（若 down 被吞则 keyup 也吞保持配对，但这里简单放行）
+                        return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
+                                                      ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
+        except Exception:
+            pass  # 异常放行，绝不吞键，绝不崩
         return _user32.CallNextHookEx(self._hook, ctypes.c_int(nCode),
                                       ctypes.c_size_t(wParam), ctypes.c_void_p(lParam))
 
@@ -1595,6 +1629,8 @@ class PetWindow(QWidget):
         self._scale_y = 1.0
         self._facing = 1.0          # 水平朝向：+1 正常 / -1 镜像（角色面向屏幕中心）
         self._pet_size = int(_cfg.get('pet_size', BASE_SIZE)) or BASE_SIZE  # 桌宠尺寸（滑块可调，持久化）
+        # 自动面向屏幕中央：跨到屏幕左右另一半时平滑翻转朝向（默认开，可在设置关闭）
+        self._auto_facing = bool(_cfg.get('auto_facing', True))
         self.setFixedSize(self._pet_size, self._pet_size)
 
         # 音频播放（QMediaPlayer 支持 mp3，不阻塞主线程；存 self 防 GC）
@@ -2316,6 +2352,8 @@ class PetWindow(QWidget):
         """根据窗口中心相对屏幕的位置决定朝向并播放水平翻转动画：
         （窗口在屏幕左半边 → 脸朝右 +1；右半边 → 脸朝左 -1）
         翻转用水平 scale 平滑过渡（cos 曲线：1→0→-1 = 转身），不瞬间生硬镜像"""
+        if not getattr(self, '_auto_facing', True):
+            return  # 开关关闭：保持当前朝向，不翻转
         try:
             scr = QApplication.screenAt(self.frameGeometry().center())
         except Exception:
@@ -2334,6 +2372,19 @@ class PetWindow(QWidget):
             self._flip_to = want
             self._facing = want  # 目标朝向先记下；绘制用动画进度
             self._start_flip_anim()
+
+    def set_auto_facing(self, on):
+        """自动翻转开关（设置面板调用）：on=True 时跨屏幕左右半屏自动转身面向中央；
+        on=False 保持当前朝向不再翻转。即时生效并持久化到 pet_config.json。"""
+        self._auto_facing = bool(on)
+        try:
+            cfg = load_config()
+            cfg['auto_facing'] = bool(on)
+            save_config(cfg)
+        except Exception:
+            pass
+        if self._auto_facing:
+            self._update_facing()
 
     def _start_flip_anim(self):
         """启动水平翻转动画（约 0.3s：先水平压窄到一线，再反向展开 = 转身）"""
