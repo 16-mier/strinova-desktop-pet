@@ -96,6 +96,16 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（TTS 提示词大幅扩写：官方模型卡 vocal events + 行为化指令）
+- **需求（用户）**：TTS 提示词写更多、让 AI 更懂怎么用好 TTS（继续深挖资料后扩写）
+- **调研新增**（breeze_tts_guide.md 同步）：官方模型卡确认 vocal events 完整清单——中文 `[笑][叹气][咳嗽][清嗓子]`、英文 `(laugh)(sigh)(cough)(clears throat)`；渲染成真实气声/笑声非念出。社区高赞：instruction 写「行为+节奏+神态」而非抽象情绪名；标点=停顿谱
+- **默认提示词重写**（`ai_chat.py default_tts_prompt`，700→1110 字）：开篇先给模型讲引擎特性（vocal events 用法、标点=停顿、instruction 决定语气），再分三步干活：①改朗读稿（9 条规则含数字展开/英文逐字母/多音字注音/长句拆短/语气词适度）②按需嵌标记（位置/频率/语义/中英文形式，宁缺毋滥）③写行为式「情绪」行（15 字内，附 3 个示例写法）
+- **三个预设重写**（`settings_panel.py TTS_PROMPT_PRESETS`）：通用均衡（765 字）/ 情绪生动台词向（449 字，情绪=节奏映射表+演在句子里不要念旁白）/ 长段防机械独白向（479 字，长短句交替+分组气口）
+- **确认链路**：`_api_speech_synth` 用复数 `instructions` 字段（audio.cpp server 语义，单数会被忽略）；`parse_tts_output` 上限 30 字不截断新格式；[笑] 标记在朗读稿中保留 → 引擎渲染真实笑声
+- **验证**：py_compile ✅；默认+3 预设含全部关键要点断言 ✅；parse 链路（情绪行→instructions、[笑] 保留）✅
+- 涉及：`ai_chat.py`、`settings_panel.py`、`_worldbook_drafts/breeze_tts_guide.md`
+- git：（待提交）
+
 ### 2026-09-09（朗读蹦字与语音不同步修复：标点加权时间表 + 去首尾静音）
 - **问题（用户）**：语音吐字和冒文字速度不一致——有时文字快、有时语音快
 - **根因**：①蹦字按「音频总时长 ÷ 字数」**匀速分配**，但语音有停顿/拖长（标点处最明显）→ 长句、带情绪句必然错位；②wav **首尾静音**被算进蹦字时长（实测 3.3s 音频含 0.5s 头静音 + 0.8s 尾静音，语音只有 2s）→ 文字比语音慢；③固定 100ms 起步对不上实际出声时刻
