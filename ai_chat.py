@@ -48,6 +48,17 @@ except Exception:
     _np = None
     HAS_SF = False
 
+
+def _dbg(msg):
+    """调试日志：写 pet_debug.log（与 pet.py 同文件；无控制台环境可回溯）"""
+    try:
+        if pet_mod is not None and hasattr(pet_mod, 'base_dir'):
+            p = os.path.join(pet_mod.base_dir(), 'pet_debug.log')
+            with open(p, 'a', encoding='utf-8') as f:
+                f.write(str(msg) + '\n')
+    except Exception:
+        pass
+
 # ---------- 可选依赖（都失败也能聊天，只是没有朗读） ----------
 try:
     import edge_tts
@@ -2016,6 +2027,7 @@ class AiChatManager(QObject):
             self._messages = self._sessions[name]
             self._last_usage = {}
             self._sync_ui_to_current()
+            _dbg('[ai] switch_to_role -> %s' % name)
         except Exception:
             pass
         return name

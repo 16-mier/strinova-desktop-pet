@@ -2766,24 +2766,41 @@ class PetWindow(QWidget):
             pass
 
     def switch_role(self, role):
-        self.load_role(role)
-        self.refresh_tray_menu()
-        self._schedule_menu_refresh()
+        """切换角色。注意：可能从 QMenu triggered 回调进入——Qt 在菜单回调栈内
+        重建菜单/托盘菜单/弹窗会触发 Qt6Core 0xc0000409（游戏环境更易现），
+        因此除【换图】(load_role 必须同步)外的 UI 刷新全部延后到事件循环。"""
+        try:
+            _dbg('[pet] switch_role -> %s' % role)
+        except Exception:
+            pass
+        self.load_role(role)   # 同步换图（必须立即）
+        # ---- 以下全部延后，避免在菜单回调栈内做 UI 重建 ----
+        # ⚠ 切角色后【不重开菜单】：游戏全屏/锁鼠标时 QMenu popup 重开会触发
+        #    Qt6Core 0xc0000409（用户游戏里切角色崩溃的根因）；切完自然关闭即可。
+        QTimer.singleShot(0, lambda: self.refresh_tray_menu())
         # 同步角色的 AI 专属配置：TTS 克隆参考 + 系统提示词（切角色自动换人设/音色）
-        self._apply_role_ai_profile(role)
+        try:
+            self._apply_role_ai_profile(role)
+        except Exception:
+            pass
         # 每个角色独立上下文：自动切到该角色的会话
         try:
             if self.ai is not None and hasattr(self.ai, 'switch_to_role'):
                 self.ai.switch_to_role(role)
         except Exception:
             pass
-        # 同步打开的面板：刷新列表 + 重新监视新角色的目录
+        # 同步打开的面板：刷新列表 + 重新监视新角色的目录（延后）
         if getattr(self, '_settings_panel', None) is not None:
-            try:
+            QTimer.singleShot(80, self._refresh_panel_after_switch)
+
+    def _refresh_panel_after_switch(self):
+        """切角色后延后刷新设置面板（脱离菜单回调栈执行，防 Qt 崩溃）"""
+        try:
+            if getattr(self, '_settings_panel', None) is not None:
                 self._settings_panel.refresh_all()
                 self._settings_panel._watch_current_dir()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def _apply_role_ai_profile(self, role):
         """切换角色时自动更新 AI 配置（TTS 克隆音色 + 系统提示词）：
@@ -2808,9 +2825,7 @@ class PetWindow(QWidget):
             ref_wav = None
             if en_name:
                 for cand_root in (
-                    # 当前机器固定部署
-                    r'C:\Users\mier\Desktop\deepseek work\breeze-tts-local\audio-cpp\references\refs_en',
-                    # 常见相对位置
+                    # 常见相对位置（用户目录下）
                     os.path.join(os.path.expanduser('~'), 'Desktop', 'deepseek work',
                                  'breeze-tts-local', 'audio-cpp', 'references', 'refs_en'),
                 ):
@@ -3426,6 +3441,31 @@ def _relaunch_as_admin():
 
 
 def main():
+    # ---- 崩溃诊断（写入数据目录 crash_diag.log）----
+    # Qt 层 0xc0000409 是 C++ 崩溃（Python traceback 抓不到），faulthandler
+    # 可记录崩溃瞬间各线程的 Python 栈，帮助定位崩溃前最后动作
+    try:
+        import faulthandler
+        crash_log = os.path.join(base_dir(), 'crash_diag.log')
+        try:
+            faulthandler.enable(open(crash_log, 'a', encoding='utf-8', buffering=1))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        def _hook(exc_type, exc, tb):
+            try:
+                import traceback as _tb
+                with open(os.path.join(base_dir(), 'crash_diag.log'), 'a', encoding='utf-8') as f:
+                    f.write('\n=== unhandled python exception ===\n')
+                    _tb.print_exception(exc_type, exc, tb, file=f)
+            except Exception:
+                pass
+            sys.__excepthook__(exc_type, exc, tb)
+        sys.excepthook = _hook
+    except Exception:
+        pass
     # UAC 自提权：若游戏以管理员运行，桌宠必须同级否则全局热键被 UIPI 屏蔽
     # 普通启动（无 --elevated）→ 检测非管理员则提权重启
     already_elevated = '--elevated' in sys.argv

@@ -78,6 +78,21 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-08（游戏运行中切角色崩溃：菜单重开加固 + 崩溃诊断 dump/日志）
+- **问题（用户）**：玩卡拉彼丘时切换角色直接崩溃（桌宠整个消失）；Windows 事件日志 BEX64 0xc0000409 Qt6Core.dll 固定偏移 0x1c8d8（多次）
+- **分析**：源码/离屏均无法复现（单类/组合/菜单 20-30 次都不崩）→ 差异在**游戏全屏/锁鼠标环境**下 Qt QMenu popup 交互。崩溃前日志常有 TTS [请求]（游戏里按语音键）但用户确认与 TTS 无关
+- **加固修复**（`pet.py`）：
+  1. **切角色后不再自动重开菜单**（去掉 `_schedule_menu_refresh` 调用）——游戏全屏/鼠标被捕获时 QMenu popup 重开是 0xc0000409 高危点；切完自然关闭
+  2. `switch_role` 的 UI 刷新全部延后（refresh_tray_menu singleShot(0)、面板刷新 singleShot(80)），脱离 QMenu triggered 回调栈
+  3. 新增 `_refresh_panel_after_switch` 延后刷新面板
+- **崩溃诊断**（下次崩溃自动留证据）：
+  1. main() 加 faulthandler + sys.excepthook → 写数据目录 `crash_diag.log`（Qt C++ 崩溃时留各线程 Python 栈）
+  2. pet.py/ai_chat.py 关键操作插桩日志（switch_role/switch_to_role）
+  3. Windows LocalDumps 已配置（HKCU WER）→ 崩溃自动留 `_crashes\卡丘简易桌宠_最新.exe.*.dmp`（后续可分析 C++ 栈）
+- **验证**：编译 OK；菜单式切角色 30 次（含 gif 角色）exit 0 ✅；回归 session16/usage16/history23/gui/panel2 全绿 ✅
+- 涉及：`pet.py`、`ai_chat.py`（_dbg）
+- git：（待提交）
+
 ### 2026-09-07（AI 朗读迁移 QSoundEffect：无声+崩溃双修；退出桌宠自动停 TTS；Q8 开箱即用 zip 交付）
 - **问题（用户）**：①语音播报不发声；②（继续）播放/切角色崩溃；③新增：退出桌宠顺手关 TTS 服务；④Q8 模型开箱即用版（新 Win11 无 CUDA/Python）打包
 - **无声根因**：崩溃修复时引入 `_stop_player_safe`（singleShot(0) 延后 stop）→ 排在 `setSource/play` 之后执行 → **刚启播的音频立刻被停 → 无声**；且启动 450ms `_apply_role_ai_profile_on_start` 的 `_invalidate_pending` 同样延后 stop 会杀新播放
