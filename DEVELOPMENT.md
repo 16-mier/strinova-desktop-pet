@@ -96,6 +96,25 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-10（深度集成完成：Doorstop 桥接 MateBridge.dll + PyQt MateLink 客户端双向联动实测通过）
+- **需求（用户）**：'开始深度集成'（此前已确认走 BepInEx 桥接方案）；全程自动推进，用户睡觉，结论先行
+- **BepInEx 实测否决（重要）**：BepInEx 5.4.23.5 与 6.0.0-pre.2 / be.788 均无法在 Unity 6(6000.2.6f2 Mono) 加载——preloader 调用 `Module.GetPEKind` 而 Unity 6 的 mscorlib 已移除该 API（dnfile 确认 Module 类型无此方法）→ MissingMethodException
+- **终极方案：Doorstop 直载自研 C# DLL（绕过 BepInEx）**：游戏目录 winhttp.dll(Doorstop) 读 doorstop_config.ini 指定 target_assembly → 已验证可行
+- **MateBridge.dll 架构（mate-engine\bridge\src\）**：
+  1. `Doorstop.Entrypoint.Start()` 启动唯一编排线程 `BridgeMain.Run()`
+  2. Run 先 Sleep 5s（等 Unity 程序集就绪；JIT 是方法级，早期 JIT 引用 UnityEngine 的方法体会崩——踩坑）→ 等 AvatarDanceHandler 就绪 → 起 Socket HTTP 线程(127.0.0.1:8765) → 消费命令队列
+  3. **全部 UnityEngine 交互走反射**（Reflect.cs 按类型名 FindType + FindObjectsOfTypeAll 反射调用；Actions.cs 不直接引用 UnityEngine 类型——Doorstop 早期线程 JIT 引用 UnityEngine 字面类型会静默死）
+  4. **Unity 6 mscorlib API 陷阱**：`Exception.GetBaseException()` 不存在（MissingMethodException）→ 全用 e.Message
+  5. Socket 必须在后台线程创建（Doorstop 主线程上下文 new Socket 会卡死）；`System.dll` 无 HttpListener/TcpListener（只有 Socket/TcpClient/NetworkStream）→ 手写极简 HTTP（逐字节读头+Content-Length body，注意 body 与 header 同包到达）
+- **HTTP API**：GET /ping、GET /status（dance 状态 + blends 名:权重全量）、POST /cmd（JSON；dance.play/stop/next/prev、food.spawnById/spawnByIndex/feature、sleep.set/wake、scale.set、hide.arm、hide.topmost、blend.reset/set、clothes.activate/next、voice.random）——全部入队即返回 {"ok":true,"queued":true}，由编排线程消费执行
+- **验证（实测通过）**：/ping OK；/status 列出米雪儿全部 VRM 表情（まばたき/ウィンク/あいうえお/にこり/怒り/困る/真面目/笑い）；blend.set にこり=80 → 读回 `にこり:80` 真实生效；blend.reset 清零（直接遍历所有 SMR 清零 + 官方 ResetAllBlendshapes）；scale.set 走 SaveLoadHandler.data.avatarSize + ApplyAllSettingsToAllAvatars
+- **PyQt 侧（strinova-desktop-pet\）**：
+  - 新增 `matelink.py`（MateLink 客户端：纯 socket JSON，ping/status/blends_dict + 全部动作方法 + CLI 自测）
+  - `pet.py` 主菜单新增「✨ 3D 形象」子菜单：状态显示（●在线/○离线，离线可一键启动 MateEngine）、😊 表情（微笑/笑/生气/困扰/认真/重置，实时读权重打 ✓）、🎬 动作（睡觉/唤醒/喂食/随机语音/舞蹈下一首/停止）、📐 尺寸（1.2×/1.0×/0.8×）、🪟 窗口（置顶/取消）、🙈 藏手（左右手）
+  - 冒烟测试：`mate3d_smoke.py`（菜单构建）、`mate3d_action_test.py`（模拟点击菜单→真实联动验证 微笑80/重置0/生气80）、`pet_window_smoke.py`（完整 PetWindow 启动，主菜单含 3D 入口无崩溃）
+- **涉及**：mate-engine\bridge\（C# 源码+build.ps1，外部不入库）、strinova-desktop-pet\matelink.py、pet.py、DEVELOPMENT.md
+- **待办**：用户实测视觉效果（表情/缩放/睡觉动画）；后续可加：跳舞曲目列表、换装列表、说话口型联动（speak 音频→口型）
+
 ### 2026-09-09（3D 桌宠落地：米雪儿 VRM 转换成功 + Mate-Engine 部署运行 + 深度耦合方案定型）
 - **需求（用户）**：确认走 3D 路线（Mate-Engine）；用户下到模型 zip；要求「深度耦合」而非轻联动；随后要求先写开发日志（压缩上下文）
 - **模型落地**（用户提供 `C:\Users\mier\Downloads\【卡拉彼丘】米雪儿-喵萌元气_by_hfmc_*.zip`）：

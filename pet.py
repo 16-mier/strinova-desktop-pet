@@ -22,6 +22,13 @@ import ctypes
 from datetime import datetime
 from ctypes import wintypes
 
+# Mate-Engine 3D 联动（可选模块；缺失时 3D 菜单自动隐藏）
+try:
+    from matelink import MateLink, ALL_OPS
+    _mate_link = MateLink()
+except Exception:
+    _mate_link = None
+
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QUrl, QEvent, QObject
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie
 from PyQt6.QtWidgets import (
@@ -2769,12 +2776,164 @@ class PetWindow(QWidget):
             na.setEnabled(False)
             menu.addAction(na)
 
+        # ✨ 3D 联动（Mate-Engine 桥在线时显示）：3D 桌宠控制入口
+        if _mate_link is not None:
+            menu.addSeparator()
+            act_3d = QAction("✨ 3D 形象", menu)
+            act_3d.setMenu(self._build_mate3d_menu(menu))
+            menu.addAction(act_3d)
+
         menu.addSeparator()
 
         # ③ 退出
         act_quit = QAction("退出", menu)
         act_quit.triggered.connect(QApplication.quit)
         menu.addAction(act_quit)
+        return menu
+
+    # ============ Mate-Engine 3D 联动 ============
+    def _mate3d_online(self):
+        """Mate-Engine 桥是否在线（快速，失败返回 False）"""
+        try:
+            if _mate_link is None:
+                return False
+            return _mate_link.online()
+        except Exception:
+            return False
+
+    def _mate3d_launch(self):
+        """启动 Mate-Engine（若未运行）；需在其目录下启动才能加载 Doorstop/BepInEx"""
+        try:
+            exe = r"C:\Users\mier\Desktop\deepseek work\mate-engine\unpacked\MateEngineX.exe"
+            if not os.path.exists(exe):
+                print('mate3d: exe not found:', exe)
+                return
+            if self._mate3d_online():
+                return
+            import subprocess
+            subprocess.Popen(
+                [exe],
+                cwd=os.path.dirname(exe),
+                creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0),
+            )
+            # 轮询等桥上线（最多 30s）
+            def _wait():
+                for _ in range(30):
+                    time.sleep(1)
+                    if self._mate3d_online():
+                        self.refresh_tray_menu()
+                        break
+            threading.Thread(target=_wait, daemon=True).start()
+        except Exception as e:
+            print('mate3d launch err:', e)
+
+    def _mate3d_cmd(self, op, **kw):
+        """发送命令（带重试：桥可能刚启动还没就绪）"""
+        try:
+            if _mate_link is None:
+                return
+            getattr(_mate_link, op)(**kw)
+        except Exception as e:
+            print('mate3d cmd err:', op, e)
+
+    def _build_mate3d_menu(self, parent):
+        """3D 联动子菜单：表情 / 动作 / 尺寸"""
+        menu = QMenu(parent)
+        menu.setStyleSheet(MENU_QSS)
+        online = self._mate3d_online()
+
+        # 在线状态头
+        st = QAction("3D 状态：%s" % ("● 在线" if online else "○ 离线"), menu)
+        st.setEnabled(False)
+        menu.addAction(st)
+
+        if not online:
+            act_go = QAction("启动 3D 桌宠（Mate-Engine）", menu)
+            act_go.triggered.connect(lambda: self._mate3d_launch())
+            menu.addAction(act_go)
+            return menu
+
+        # 表情（VRM blendshape，动态读）
+        try:
+            blends = _mate_link.blends_dict()
+        except Exception:
+            blends = {}
+        nice = {'にこり': '微笑', '笑い': '笑', '怒り': '生气', '困る': '困扰',
+                '真面目': '认真', 'まばたき': '眨眼', 'ウィンク': '眨眼(右)'}
+        if blends:
+            m_expr = QMenu("😊 表情", menu)
+            m_expr.setStyleSheet(MENU_QSS)
+            for name in ('にこり', '笑い', '怒り', '困る', '真面目'):
+                if name in blends:
+                    cur = blends.get(name, 0)
+                    act = QAction("%s%s" % (nice.get(name, name),
+                                            (" ✓" if cur and cur > 1 else "")), m_expr)
+                    act.triggered.connect(
+                        lambda c, n=name: (self._mate3d_cmd('blend_reset'),
+                                           self._mate3d_cmd('blend_set', name=n, value=80.0)))
+                    m_expr.addAction(act)
+            act_r = QAction("重置表情", m_expr)
+            act_r.triggered.connect(lambda: self._mate3d_cmd('blend_reset'))
+            m_expr.addAction(act_r)
+            menu.addMenu(m_expr)
+
+        # 动作
+        m_act = QMenu("🎬 动作", menu)
+        m_act.setStyleSheet(MENU_QSS)
+        a1 = QAction("💤 睡觉", m_act)
+        a1.triggered.connect(lambda: self._mate3d_cmd('sleep', on=True))
+        m_act.addAction(a1)
+        a2 = QAction("🌞 唤醒", m_act)
+        a2.triggered.connect(lambda: self._mate3d_cmd('sleep', on=False))
+        m_act.addAction(a2)
+        a3 = QAction("🍰 喂食", m_act)
+        a3.triggered.connect(lambda: self._mate3d_cmd('food_spawn', index=0))
+        m_act.addAction(a3)
+        a4 = QAction("🗣 随机语音", m_act)
+        a4.triggered.connect(lambda: self._mate3d_cmd('voice_random'))
+        m_act.addAction(a4)
+        m_act.addSeparator()
+        a5 = QAction("⏭ 舞蹈：下一首", m_act)
+        a5.triggered.connect(lambda: self._mate3d_cmd('dance_next'))
+        m_act.addAction(a5)
+        a6 = QAction("⏹ 舞蹈：停止", m_act)
+        a6.triggered.connect(lambda: self._mate3d_cmd('dance_stop'))
+        m_act.addAction(a6)
+        menu.addMenu(m_act)
+
+        # 尺寸
+        m_size = QMenu("📐 尺寸", menu)
+        m_size.setStyleSheet(MENU_QSS)
+        for label, v in (("放大 1.2×", 1.2), ("还原 1.0×", 1.0), ("缩小 0.8×", 0.8)):
+            act = QAction(label, m_size)
+            act.triggered.connect(lambda c, vv=v: self._mate3d_cmd('scale', value=vv))
+            m_size.addAction(act)
+        menu.addMenu(m_size)
+
+        # 窗口
+        m_win = QMenu("🪟 窗口", menu)
+        m_win.setStyleSheet(MENU_QSS)
+        a_t = QAction("置顶", m_win)
+        a_t.triggered.connect(lambda: self._mate3d_cmd('topmost', on=True))
+        m_win.addAction(a_t)
+        a_nt = QAction("取消置顶", m_win)
+        a_nt.triggered.connect(lambda: self._mate3d_cmd('topmost', on=False))
+        m_win.addAction(a_nt)
+        menu.addMenu(m_win)
+
+        # 隐藏手（Q 版互动）
+        m_hide = QMenu("🙈 藏手", menu)
+        m_hide.setStyleSheet(MENU_QSS)
+        for label, l, r in (("藏左手", True, False), ("藏右手", False, True), ("都藏", True, True), ("都放", False, False)):
+            act = QAction(label, m_hide)
+            act.triggered.connect(lambda c, ll=l, rr=r: self._mate3d_cmd('hide_arm', left=ll, right=rr))
+            m_hide.addAction(act)
+        menu.addMenu(m_hide)
+
+        menu.addSeparator()
+        act_ref = QAction("🔄 刷新", menu)
+        act_ref.triggered.connect(lambda: self.refresh_tray_menu())
+        menu.addAction(act_ref)
         return menu
 
     def _audio_key(self, role, path):
