@@ -96,6 +96,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（Live2D 实测否决 + 3D 工具链就绪：Blender+MMD Tools+VRM 脚本）
+- **需求（用户）**：继续研究 Live2D/3D 形象落地
+- **Live2D 实测结论（重要更正）**：live2d-py Windows 实际渲染崩——0.7.0.4 无正式 cp314-win wheel（pip 装到 0.7.0 的 cp314 产物，`_v3cpp.LoadModelJson` 即 0xC0000005）；降级 0.6.1.1+Py3.12（正式 wheel）能加载 Haru.moc3 全套但崩在 `userdata3.json`（GitHub「crash in native」issue open）→ **Live2D 内嵌路线暂不可用，等库修复或走 Web**
+- **3D 工具链就绪（重大）**：本机已有 `blender-5.2.1-windows-x64` + MMD Tools v4.5.14 + VRM-Addon v4.7.1 + opencc（Blender 自带 Python 3.13 内）——**PMX→VRM 转换环境完整**
+  - 转换脚本 `tools/pmx_to_vrm/convert_pmx_to_vrm.py`（子代理产出，已审）：导入 PMX→清场景→骨骼重命名→自动 Humanoid 分配→MMD 表情映射→SpringBone 物理映射→材质转 MToon→导出 VRM 0.x，带逐步日志
+  - 用法：`& "...\blender.exe" --background --python convert_pmx_to_vrm.py -- <输入.pmx> [输出.vrm]`
+- **落地路径（最稳）**：模之屋下星绘/米雪儿 PMX → 本脚本转 VRM → Mate-Engine 导入
+- 验证：脚本 py_compile ✅；Blender/插件/依赖路径实测存在 ✅
+- 涉及：`tools/pmx_to_vrm/convert_pmx_to_vrm.py`（新，入库）、`_worldbook_drafts/live2d_3d_research.md`、`live2d_py_guide.md`（更正结论）
+- git：本提交
+
 ### 2026-09-09（Live2D/3D 形象深度调研 + 实测环境验证 + 接入指南）
 - **需求（用户）**：去研究 live2d 和 3D 形象（把桌宠从静态图升级为动态形象）
 - **3D 路线（深度调研，4 subagent + 实测）**：
