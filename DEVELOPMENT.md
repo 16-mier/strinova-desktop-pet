@@ -96,6 +96,15 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（修复聊天窗展开按钮无效：clicked 参数污染 + 去掉查看上下文按钮）
+- **问题（用户）**：「点聊天窗并没有弹出来」；随后要求去掉「📖 查看上下文」按钮
+- **根因（真实 GUI 复现脚本 `_voice_probe/repro_chat.py` 定位）**：`QPushButton.clicked` 信号发射时**自带 `checked=False` 参数**；`btn_expand.clicked.connect(self.toggle_expand)` 把该参数传给 `toggle_expand(expanded=False)` → **每次点击都被当成「强制收起」** → 聊天窗永远弹不出来。直接调用 `toggle_expand()`（无参）正常，因此离屏冒烟未发现
+- **修复**：`ai_chat.py` 按钮连接改 `lambda _checked=False: self.toggle_expand()`（丢弃 checked）；并排查全工程 clicked 连接——其余目标方法均为无参（PyQt 自动丢弃多余参数），无同类隐患
+- **去掉「📖 查看上下文」按钮**：完整聊天窗已能滚动翻历史，该按钮多余（历史窗 ChatHistoryWindow 保留，兼容其它入口）
+- **验证**：repro 复现脚本修复前后对比——点击后 height 48/False → **560/True/browser 可见** ✅；smoke_chatwindow 11/11 ✅；全量回归（panel_smoke3/nav 10/profile 5/gui/history 23/session 16）全绿 ✅
+- 涉及：`ai_chat.py`、`_voice_probe/repro_chat.py`（新，可复用）
+- git：本提交
+
 ### 2026-09-09（完整聊天窗 + 语音方案多套切换）
 - **需求（用户）**：选做两个新功能——①AI 对话升级为可滚动翻历史的完整聊天窗；②一个角色多套语音方案一键切换
 - **完整聊天窗**（`ai_chat.py` ChatWindow 升级）：

@@ -1500,17 +1500,10 @@ class ChatWindow(QWidget):
             "QPushButton{background:#2f3a57; border:1px solid #5a6ea8; border-radius:8px;"
             " color:#cfe0ff; font-size:12px; font-weight:bold; padding:2px 4px;}"
             "QPushButton:hover{background:#3d4d75;}")
-        self.btn_expand.clicked.connect(self.toggle_expand)
+        # ⚠ clicked 信号带 checked 参数（False），直接连 toggle_expand 会把
+        # expanded 强制设成 False → 永远收起。必须用 lambda 丢弃参数。
+        self.btn_expand.clicked.connect(lambda _checked=False: self.toggle_expand())
         row.addWidget(self.btn_expand)
-        self.btn_view_ctx = QPushButton("📖 查看上下文", self)
-        self.btn_view_ctx.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_view_ctx.setFixedWidth(118)
-        self.btn_view_ctx.setStyleSheet(
-            "QPushButton{background:#2f3a57; border:1px solid #5a6ea8; border-radius:8px;"
-            " color:#cfe0ff; font-size:12px; font-weight:bold; padding:2px 6px;}"
-            "QPushButton:hover{background:#3d4d75;}")
-        self.btn_view_ctx.clicked.connect(self._open_history)
-        row.addWidget(self.btn_view_ctx)
         # 🧹 清理上下文（输入框旁快捷入口）：清空当前角色上下文
         self.btn_clear_input = QPushButton("🧹", self)
         self.btn_clear_input.setCursor(Qt.CursorShape.PointingHandCursor)
