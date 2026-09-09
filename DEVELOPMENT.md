@@ -96,6 +96,41 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（3D 桌宠落地：米雪儿 VRM 转换成功 + Mate-Engine 部署运行 + 深度耦合方案定型）
+- **需求（用户）**：确认走 3D 路线（Mate-Engine）；用户下到模型 zip；要求「深度耦合」而非轻联动；随后要求先写开发日志（压缩上下文）
+- **模型落地**（用户提供 `C:\Users\mier\Downloads\【卡拉彼丘】米雪儿-喵萌元气_by_hfmc_*.zip`）：
+  - 解压到 `mate-engine\michelle_model\`：`米雪儿私服1.pmx`(1.5MB) + 全套贴图（Body/Face/Hair + 法线/遮罩），条款：允许自用/优化骨骼/UV/服饰微调，禁商用/二次配布 ✅ 个人桌宠合规
+  - **PMX→VRM 转换成功**：修了 `tools/pmx_to_vrm/convert_pmx_to_vrm.py` 两个 bug ①`types={"MODEL"}` 非法 → 改 `{"MESH","ARMATURE"}`（MMD Tools 4.x 合法值，原报错 "could not be found" 是误导包装）②`clear_scene()` 移到 `enable_addons()` 之前（read_factory_settings 会重置插件注册？实际为顺序敏感）；enable_addons 简化为直 enable+hasattr 校验
+  - 产物：`michelle.vrm`（6.9MB，glTF magic 验证 ✅）；转换尾部有已知警告（VRM 插件 assign secondary animation operator 找不到——头发/裙子 SpringBone 物理未映射，不影响显示；Mesh not valid 警告为 MMD 常见，待实测）
+- **Mate-Engine 部署**（3D 桌宠壳）：
+  - 下载 `Public.Release.X3.3.0-HOTFIX-1.zip`（830MB）→ 解压 `mate-engine\unpacked\`（MateEngineX.exe，Unity Mono 构建）
+  - 实测启动稳定 ✅；**桌面快捷方式已建**：`C:\Users\mier\Desktop\卡丘3D桌宠.lnk`
+  - 用户数据目录：`C:\Users\AppData\LocalLow\Shinymoon\MateEngineX\`（avatars.json / settings.json / Mods / Sync / Player.log）
+  - **米雪儿已注册并选中**（avatars.json 含 michelle.vrm 34868 多边形 owner=true；settings.json selectedModelPath=michelle.vrm、isTopmost=true、selectedLocaleCode=zh）
+- **深度耦合调研（重要实测结论）**：
+  - Mate-Engine = **Mono 构建**（有 Assembly-CSharp.dll 595KB → **BepInEx 可注入**）
+  - 官方 Mod 系统只有 **3 种资源型 Mod**：MEObject / Unity3D / MEDance（MEModLoader/MEModHandler/ModEntry 类）——**无代码/API Mod，无对外脚本接口**
+  - 无内置 HTTP/socket/OSC/命名管道/文件总线（Sync/avatar_dance_play_bus.json 为空占位；OSC 字符串为 Win32 常量误报）
+  - **全部操控逻辑在公开 Unity 组件**（dnfile 反编译 487 类型确认）：
+    - `AvatarDanceHandler`：PlayByStableId/PlayNext/PlayPrev/OnPlayClicked（切歌/跳舞）
+    - `AvatarFoodController`：PlayRandom/PlayInteract/ResetPose/EnableFeature（喂食互动）
+    - `AvatarSleepController.SetSleeping`、`AvatarScaleController.SyncWithSlider`、`AvatarHideHandler.SetHide/SetTopMost`（尺寸/隐藏/置顶）
+    - `BlendshapeManager.ResetAllBlendshapes`、`PetVoiceReactionHandler.PlayRandomVoice/TriggerAnim`（表情/声音反应）
+    - `AvatarClothesHandler`（换装）、`AvatarAnimatorReceiver.SetAnimator`（动画）
+  - Live2D 路线实测否决（见下条记录）：live2d-py Windows 崩（0.7.0.4 无真 cp314 win wheel / 0.6.1.1 崩 userdata）
+- **深度耦合方案（已向用户确认方向，待批准开工）**：BepInEx 桥接插件
+  ```
+  PyQt6桌宠 ◄──HTTP/WS localhost:8765 JSON──► Mate-Engine + BepInEx桥插件
+  指令: play_motion / set_expression / speak(→口型+TTS音频) /
+        switch_avatar / 心情→换装喂食睡觉跳舞 / 同步置顶位置
+  回调: Mate状态/事件 → PyQt
+  ```
+  工作量：BepInEx 插件 C# ~500 行 + PyQt 客户端 ~300 行 + 口型联动；预计 2-3 小时
+  工具：dnfile 已装（解析 .NET 程序集用）；Assembly-CSharp 关键类/方法签名已挖出（见上）
+- 涉及：`tools/pmx_to_vrm/convert_pmx_to_vrm.py`（修 bug）、`mate-engine/`（外部部署，不入库）、`_voice_probe/`（探针脚本，可清理）、`DEVELOPMENT.md`
+- git：本记录未提交（上条 704d847 已含报告；本次 pmx 脚本修复未提交 → **待提交**）
+- **待办（下一步）**：①提交 pmx 脚本修复；②用户确认后开工 BepInEx 深度集成（关 Mate→装 BepInEx→写桥插件→PyQt 客户端→实测）
+
 ### 2026-09-09（Live2D 实测否决 + 3D 工具链就绪：Blender+MMD Tools+VRM 脚本）
 - **需求（用户）**：继续研究 Live2D/3D 形象落地
 - **Live2D 实测结论（重要更正）**：live2d-py Windows 实际渲染崩——0.7.0.4 无正式 cp314-win wheel（pip 装到 0.7.0 的 cp314 产物，`_v3cpp.LoadModelJson` 即 0xC0000005）；降级 0.6.1.1+Py3.12（正式 wheel）能加载 Haru.moc3 全套但崩在 `userdata3.json`（GitHub「crash in native」issue open）→ **Live2D 内嵌路线暂不可用，等库修复或走 Web**

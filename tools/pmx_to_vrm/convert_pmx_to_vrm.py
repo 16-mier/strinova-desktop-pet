@@ -29,10 +29,19 @@ import addon_utils
 
 
 def enable_addons():
-    """确保两个插件处于启用状态"""
+    """确保两个插件处于启用状态（Blender 5.2 extension 以 user 身份安装）"""
+    import bpy
     for name in ("bl_ext.user_default.mmd_tools", "bl_ext.user_default.vrm"):
-        if not addon_utils.enable(name, default_set=True, persistent=True):
-            raise RuntimeError(f"无法启用插件: {name}")
+        try:
+            mod = addon_utils.enable(name, default_set=True, persistent=True)
+            print(f"[{'OK' if mod else 'WARN'}] enable {name}")
+        except Exception as e:
+            print(f"[WARN] enable {name}: {e}")
+    # operator 真实注册检查（import_model 为 MMD Tools 4.x 命名空间 operator）
+    if not hasattr(bpy.ops.mmd_tools, "import_model"):
+        raise RuntimeError("MMD Tools 未注册 import_model —— 请检查插件安装")
+    if not hasattr(bpy.ops.export_scene, "vrm"):
+        raise RuntimeError("VRM 插件未注册 export_scene.vrm —— 请检查插件安装")
 
 
 def parse_args(argv):
@@ -57,7 +66,7 @@ def import_pmx(path):
     """用 MMD Tools 导入 PMX"""
     result = bpy.ops.mmd_tools.import_model(
         filepath=path,
-        types={"MODEL"},
+        types={"MESH", "ARMATURE"},   # MMD Tools 4.x 合法值：MESH/ARMATURE/PHYSICS/DISPLAY/MORPHS
         scale=0.08,          # MMD 模型默认单位，缩放到 1.6m 人形
         clean_model=True,
         remove_doubles=True,
@@ -148,8 +157,8 @@ def main():
     print(f"输出 VRM: {dst}")
     print("=" * 60)
 
-    enable_addons()
     clear_scene()
+    enable_addons()
     import_pmx(src)
     setup_vrm()
     convert_materials()
