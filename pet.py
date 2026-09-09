@@ -2580,6 +2580,14 @@ class PetWindow(QWidget):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.open_settings_panel()
 
+    def _open_chat_app(self):
+        """主窗菜单「💬 聊天」：打开模型网站式完整聊天窗口"""
+        try:
+            if self.ai is not None and hasattr(self.ai, 'open_chat_app'):
+                self.ai.open_chat_app()
+        except Exception:
+            pass
+
     def _fill_roles_menu(self, m):
         """把全部可用角色填进子菜单，按阵营分组（阵营标题不可点，勾选当前角色）。
         role 含 '/' → 阵营/角色 分组；纯角色名（历史平铺）→ 直接列出。
@@ -2640,6 +2648,11 @@ class PetWindow(QWidget):
         act_settings = QAction("⚙ 打开设置…", menu)
         act_settings.triggered.connect(lambda: self.open_settings_panel())
         menu.addAction(act_settings)
+        # ①-聊天：打开模型网站式完整聊天窗口（角色列表 + 消息流 + 多行输入）
+        act_chat = QAction("💬 聊天", menu)
+        act_chat.setToolTip("打开完整聊天窗口（像模型网站：左侧角色列表 + 消息流 + 多行输入）")
+        act_chat.triggered.connect(lambda: self._open_chat_app())
+        menu.addAction(act_chat)
         menu.addSeparator()
 
         # ② 切换角色：点击后 _open_switch_submenu 在其右侧弹出角色子菜单

@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, QRect, QPoint, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, QRect, QPoint, QEvent, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QFontMetrics
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
@@ -32,6 +32,9 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPlainTextEdit,
     QPushButton,
     QTextBrowser,
     QVBoxLayout,
@@ -1448,22 +1451,239 @@ class ChatHistoryWindow(QWidget):
         super().hideEvent(ev)
 
 
+class ChatAppWindow(QWidget):
+    """模型网站式完整聊天窗口（DeepSeek/ChatGPT 风格）：
+    - 独立常规窗口（可拖动/缩放/最大化），不跟随桌宠
+    - 左侧：角色列表（阵营分组，点击切换角色 + 会话）
+    - 中部：消息流（用户右对齐青绿气泡 / AI 左对齐深灰气泡，带时间戳，可滚动）
+    - 底部：多行输入框（Enter 发送，Shift+Enter 换行）+ 发送按钮"""
+
+    sendRequested = pyqtSignal(str)
+    clearRequested = pyqtSignal()
+    roleSwitchRequested = pyqtSignal(str)
+
+    _BG = "#171a23"
+    _PANEL = "#1c1f28"
+    _ACCENT = "#3d6ef7"
+    _TITLE = "#e7eaf4"
+    _SUB = "#8a93b0"
+
+    def __init__(self, pet):
+        super().__init__()
+        self._pet = pet
+        self.setWindowTitle("卡丘简易桌宠 · 对话")
+        self.setMinimumSize(840, 580)
+        self.resize(960, 700)
+        self.setStyleSheet(
+            "ChatAppWindow{background:%s;}" % self._BG
+            + "QPushButton{border-radius:8px;}"
+            + "QListWidget{background:%s; border:1px solid #2a2e3d; border-radius:10px;"
+            " color:%s; font-size:13px; padding:4px;}"
+            "QListWidget::item{padding:8px 10px; border-radius:6px;}"
+            "QListWidget::item:hover{background:rgba(255,255,255,16);}"
+            "QListWidget::item:selected{background:%s; color:#fff; font-weight:bold;}"
+            % (self._PANEL, self._SUB, self._ACCENT))
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
+
+        # ── 左侧：角色列表 ──
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        lbl_roles = QLabel("角色")
+        lbl_roles.setStyleSheet("color:%s; font-size:13px; font-weight:bold; padding-left:4px;" % self._SUB)
+        left.addWidget(lbl_roles)
+        self.role_list = QListWidget()
+        self.role_list.setMinimumWidth(180)
+        self.role_list.setMaximumWidth(230)
+        self.role_list.itemClicked.connect(self._on_role_clicked)
+        left.addWidget(self.role_list, 1)
+        root.addLayout(left)
+
+        # ── 右侧：标题 / 消息流 / 输入区 ──
+        right = QVBoxLayout()
+        right.setSpacing(8)
+
+        head = QHBoxLayout()
+        self.lbl_title = QLabel("—")
+        self.lbl_title.setStyleSheet("color:%s; font-size:15px; font-weight:bold;" % self._TITLE)
+        head.addWidget(self.lbl_title)
+        self.lbl_state = QLabel("")
+        self.lbl_state.setStyleSheet("color:%s; font-size:11px;" % self._SUB)
+        head.addWidget(self.lbl_state)
+        head.addStretch(1)
+        btn_clear = QPushButton("🧹 清理上下文")
+        btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_clear.setStyleSheet(
+            "QPushButton{background:#4a3238; border:1px solid #8a4a55; color:#ffd9d9;"
+            " font-size:12px; padding:5px 12px;}"
+            "QPushButton:hover{background:#6a4248;}")
+        btn_clear.clicked.connect(lambda _c=False: self.clearRequested.emit())
+        head.addWidget(btn_clear)
+        right.addLayout(head)
+
+        self.browser = QTextBrowser()
+        self.browser.setOpenExternalLinks(False)
+        self.browser.setStyleSheet(
+            "QTextBrowser{background:%s; border:1px solid #262b3a; border-radius:10px;"
+            " color:%s; font-size:13px;}" % (self._PANEL, self._TITLE))
+        right.addWidget(self.browser, 1)
+
+        # 输入区
+        input_box = QWidget()
+        input_box.setStyleSheet(
+            "QWidget{background:%s; border:1px solid #2e3448; border-radius:10px;}" % self._PANEL)
+        il = QVBoxLayout(input_box)
+        il.setContentsMargins(10, 8, 10, 8)
+        il.setSpacing(6)
+        self.input = QPlainTextEdit()
+        self.input.setPlaceholderText("和角色聊聊…（Enter 发送，Shift+Enter 换行）")
+        self.input.setMaximumHeight(96)
+        self.input.setStyleSheet(
+            "QPlainTextEdit{background:transparent; border:none; color:%s; font-size:14px;}"
+            % self._TITLE)
+        self.input.installEventFilter(self)   # Enter 发送 / Shift+Enter 换行
+        il.addWidget(self.input)
+        row = QHBoxLayout()
+        lbl_hint = QLabel("Enter 发送 · Shift+Enter 换行")
+        lbl_hint.setStyleSheet("color:%s; font-size:10px;" % self._SUB)
+        row.addWidget(lbl_hint)
+        row.addStretch(1)
+        self.btn_send = QPushButton("发送")
+        self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_send.setStyleSheet(
+            "QPushButton{background:%s; border:none; color:#fff; font-size:13px;"
+            " font-weight:bold; padding:7px 22px;}"
+            "QPushButton:hover{background:#5480ff;}"
+            "QPushButton:disabled{background:#3a3f52;}" % self._ACCENT)
+        self.btn_send.clicked.connect(lambda _c=False: self._send())
+        row.addWidget(self.btn_send)
+        il.addLayout(row)
+        right.addWidget(input_box)
+        root.addLayout(right)
+
+    # ---------- 交互 ----------
+    def eventFilter(self, obj, e):
+        """输入框内 Enter 发送 / Shift+Enter 换行（焦点在输入框时窗口级
+        keyPressEvent 收不到，须用事件过滤器拦截）"""
+        if obj is self.input and e.type() == QEvent.Type.KeyPress:
+            if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                    self._send()
+                    return True
+        return super().eventFilter(obj, e)
+
+    def _send(self):
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        self.input.clear()
+        self.sendRequested.emit(text)
+
+    def _on_role_clicked(self, item):
+        role = item.data(Qt.ItemDataRole.UserRole)
+        if role:
+            self.roleSwitchRequested.emit(role)
+
+    # ---------- 外部同步 ----------
+    def set_role_list(self, roles, current):
+        """刷新左侧角色列表：阵营分组标题 + 角色（当前高亮）"""
+        try:
+            import pet as _pet_mod
+        except Exception:
+            return
+        self.role_list.blockSignals(True)
+        self.role_list.clear()
+
+        def fac(r):
+            try:
+                return _pet_mod.role_faction(r)
+            except Exception:
+                return ''
+
+        def disp(r):
+            try:
+                return _pet_mod.role_display(r)
+            except Exception:
+                return r
+
+        def add_title(text):
+            it = QListWidgetItem("— %s —" % text)
+            it.setFlags(Qt.ItemFlag.NoItemFlags)
+            it.setForeground(QColor('#8fa3c8'))
+            f = it.font()
+            f.setBold(True)
+            it.setFont(f)
+            self.role_list.addItem(it)
+
+        def add_role(r):
+            it = QListWidgetItem(disp(r))
+            it.setData(Qt.ItemDataRole.UserRole, r)
+            if r == current:
+                it.setText(disp(r) + "  ←")
+                it.setForeground(QColor('#ffd76e'))
+            self.role_list.addItem(it)
+
+        flats = [r for r in roles if not fac(r)]
+        for r in flats:
+            add_role(r)
+        by_fac = {}
+        for r in roles:
+            f = fac(r)
+            if f:
+                by_fac.setdefault(f, []).append(r)
+        for f in sorted(by_fac):
+            add_title(f)
+            for r in sorted(by_fac[f], key=disp):
+                add_role(r)
+        self.role_list.blockSignals(False)
+
+    def set_content(self, messages, system_prompt='', ai_name='AI'):
+        try:
+            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet))
+            sb = self.browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:
+            pass
+
+    def append_line(self, text):
+        """新回复/提示直接追加到消息流末尾"""
+        try:
+            esc = html.escape
+            self.browser.append(
+                '<div style="color:%s; margin:4px 0;">%s</div>'
+                % (self._SUB, esc(str(text)).replace('\n', '<br>')))
+            sb = self.browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:
+            pass
+
+    def set_busy(self, busy):
+        self.input.setEnabled(not busy)
+        self.btn_send.setEnabled(not busy)
+        self.btn_send.setText("…" if busy else "发送")
+        self.lbl_state.setText("思考中…" if busy else "")
+
+
 class ChatWindow(QWidget):
-    """轻量输入条窗口：只含一行「会话切换 + 新建/删除 + 输入 + 发送」的横线输入条。
+    """轻量输入条窗口：只含一行「聊天窗 + 清理 + 输入 + 发送」的横线输入条。
     紧贴在桌宠正下方、随桌宠移动。回车发送后输入条自动消失——AI 回复以
     无背景大字气泡显示在桌宠正右方，显示完整后 5 秒自动消失。
-    完整对话通过右键菜单「📜 完整对话记录」回看（会话仍各自保留历史）。"""
+    完整对话通过「💬 聊天」打开独立的模型网站式聊天窗口（ChatAppWindow）。"""
     sendRequested = pyqtSignal(str)
     clearRequested = pyqtSignal()
     historyRequested = pyqtSignal()
-    sessionSwitchRequested = pyqtSignal(str)   # 切换会话（传会话名）
-    sessionNewRequested = pyqtSignal()          # 新建会话
-    sessionDeleteRequested = pyqtSignal(str)    # 删除会话（传会话名）
+    chatAppRequested = pyqtSignal()              # 打开完整聊天窗口
+    sessionSwitchRequested = pyqtSignal(str)     # 切换会话（传会话名）
+    sessionNewRequested = pyqtSignal()           # 新建会话
+    sessionDeleteRequested = pyqtSignal(str)     # 删除会话（传会话名）
 
-    # 窗口尺寸常量：单行横条；展开后变完整聊天窗
+    # 窗口尺寸常量：单行横条
     W_USAGE = 640          # 输入条宽度
     H_USAGE = 48           # 条高
-    H_EXPANDED = 560       # 展开（完整聊天窗）高度
     H_NO_USAGE = 48
     _H_BASE = 48
 
@@ -1488,22 +1708,21 @@ class ChatWindow(QWidget):
         root.setContentsMargins(10, 6, 8, 6)
         root.setSpacing(0)
 
-        # 单行：查看上下文 | 输入框 + 发送
+        # 单行：💬聊天窗 | 🧹 | 输入框 + 发送
         row = QHBoxLayout()
         row.setSpacing(6)
-        # ↕ 展开/收起完整聊天窗（滚动历史 + 输入，像聊天软件；收起=单行快速提问条）
-        self.btn_expand = QPushButton("↕ 聊窗", self)
-        self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_expand.setFixedWidth(56)
-        self.btn_expand.setToolTip("展开/收起完整聊天窗（可滚动翻历史）")
-        self.btn_expand.setStyleSheet(
+        # 💬 打开模型网站式完整聊天窗口（独立窗口：角色列表 + 消息流 + 多行输入）
+        self.btn_chat_app = QPushButton("💬 聊天", self)
+        self.btn_chat_app.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_chat_app.setFixedWidth(64)
+        self.btn_chat_app.setToolTip("打开完整聊天窗口（像模型网站：角色列表 + 消息流 + 多行输入）")
+        self.btn_chat_app.setStyleSheet(
             "QPushButton{background:#2f3a57; border:1px solid #5a6ea8; border-radius:8px;"
             " color:#cfe0ff; font-size:12px; font-weight:bold; padding:2px 4px;}"
             "QPushButton:hover{background:#3d4d75;}")
-        # ⚠ clicked 信号带 checked 参数（False），直接连 toggle_expand 会把
-        # expanded 强制设成 False → 永远收起。必须用 lambda 丢弃参数。
-        self.btn_expand.clicked.connect(lambda _checked=False: self.toggle_expand())
-        row.addWidget(self.btn_expand)
+        # ⚠ clicked 信号带 checked 参数（False），用 lambda 丢弃
+        self.btn_chat_app.clicked.connect(lambda _c=False: self.chatAppRequested.emit())
+        row.addWidget(self.btn_chat_app)
         # 🧹 清理上下文（输入框旁快捷入口）：清空当前角色上下文
         self.btn_clear_input = QPushButton("🧹", self)
         self.btn_clear_input.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1545,65 +1764,13 @@ class ChatWindow(QWidget):
         row.addWidget(self.btn_send)
         root.addLayout(row)
 
-        # 完整聊天历史区（默认隐藏；点「↕ 聊窗」展开）
-        self.browser = QTextBrowser(self)
-        self.browser.setOpenExternalLinks(False)
-        self.browser.setStyleSheet(
-            "QTextBrowser{background:rgba(18,20,28,220); border:1px solid rgba(255,255,255,26);"
-            " border-radius:8px; color:#e7eaf4; font-size:13px;}")
-        self.browser.setVisible(False)
-        root.addWidget(self.browser, 1)
-
-        # 兼容保留字段（历史由 browser 承担）
+        # 兼容保留字段（消息流由 ChatAppWindow 承担）
         self.btn_clear = None
         self.btn_history = None
         self.lbl_usage = None
 
-        self._expanded = False
         self.setFixedWidth(self.W_USAGE)
         self.setFixedHeight(self.H_USAGE)
-
-    # ---- 完整聊天窗（展开/收起） ----
-    def toggle_expand(self, expanded=None):
-        """展开/收起完整聊天窗；展开时刷新历史并重新定位（高度变了）"""
-        if expanded is None:
-            self._expanded = not self._expanded
-        else:
-            self._expanded = bool(expanded)
-        if self._expanded:
-            try:
-                self.browser.setHtml(_msg_html(self._pet.ai._messages, '', self._pet))
-                sb = self.browser.verticalScrollBar()
-                sb.setValue(sb.maximum())
-            except Exception:
-                pass
-            self.browser.show()
-            self.btn_expand.setText("↕ 收起")
-        else:
-            self.browser.hide()
-            self.btn_expand.setText("↕ 聊窗")
-        self.setFixedHeight(self.H_EXPANDED if self._expanded else self.H_USAGE)
-        try:
-            self.show_near(self._pet.frameGeometry())
-        except Exception:
-            pass
-
-    def is_expanded(self):
-        return bool(self._expanded)
-
-    def append_line(self, text):
-        """展开态时追加一条消息行（AI 回复/系统提示；不进气泡不蹦字）"""
-        try:
-            if not self._expanded:
-                return
-            esc = html.escape
-            self.browser.append(
-                '<div style="color:#b9c8f0; margin:3px 0;">%s</div>'
-                % esc(str(text)).replace('\n', '<br>'))
-            sb = self.browser.verticalScrollBar()
-            sb.setValue(sb.maximum())
-        except Exception:
-            pass
 
     # ---- 会话下拉 ----
     def set_sessions(self, names, current):
@@ -1632,15 +1799,10 @@ class ChatWindow(QWidget):
         if name:
             self.sessionDeleteRequested.emit(name)
 
-    # ---- 消息流展示 ----
+    # ---- 消息流展示（消息流由 ChatAppWindow 承担，输入条保持轻量）----
     def set_content(self, messages, system_prompt='', ai_name='AI'):
-        """刷新完整聊天窗历史（展开态可见；收起态静默更新）"""
-        try:
-            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet))
-            sb = self.browser.verticalScrollBar()
-            sb.setValue(sb.maximum())
-        except Exception:
-            pass
+        """保留方法供外部调用：输入条不展示消息流，空操作。"""
+        return
 
     # 窗口拖动（按住空白/输入框外区域）——拖动后取消自动跟随
     def mousePressEvent(self, e):
@@ -1695,8 +1857,6 @@ class ChatWindow(QWidget):
             return
         self.input.clear()
         self.sendRequested.emit(text)
-        if self._expanded:
-            return   # 展开模式：窗口保持打开，等待回复进聊天窗
         # 极简交互：发送后横线输入条自动收起，等右侧气泡回复即可
         self.hide()
 
@@ -1760,6 +1920,7 @@ class AiChatManager(QObject):
         super().__init__()
         self._pet = pet
         self._chat = None
+        self._app = None           # 模型网站式完整聊天窗口（ChatAppWindow）
         self._history = None
         self._bubble = None
         self._delay_widget = None    # 桌宠正下方：价格/LLM/TTS 延迟两行小字
@@ -2167,12 +2328,16 @@ class AiChatManager(QObject):
         return True, '已清空角色会话：%s' % name
 
     def _sync_ui_to_current(self):
-        """把当前会话刷到聊天窗与历史窗（若开着）"""
+        """把当前会话刷到聊天窗/聊天窗口/历史窗（若开着）"""
         try:
             if self._chat is not None:
                 self._chat.set_sessions(self.session_names(), self._session_cur)
                 self._chat.set_content(self._messages, self.system_prompt())
                 self._chat.set_usage('')
+        except Exception:
+            pass
+        try:
+            self._sync_app()
         except Exception:
             pass
         try:
@@ -2199,6 +2364,11 @@ class AiChatManager(QObject):
                 self._chat.set_content([], self.system_prompt())
             except Exception:
                 pass
+        # 完整聊天窗口同步（清空后立即变空）
+        try:
+            self._sync_app()
+        except Exception:
+            pass
         # 历史窗实时刷新（清空后同步为空）
         try:
             self._refresh_history_if_open()
@@ -2717,6 +2887,7 @@ class AiChatManager(QObject):
             self._chat.sendRequested.connect(self._on_send)
             self._chat.clearRequested.connect(self.clear_context)
             self._chat.historyRequested.connect(self.show_history)
+            self._chat.chatAppRequested.connect(self.open_chat_app)
             self._chat.sessionSwitchRequested.connect(self.switch_session)
             self._chat.sessionNewRequested.connect(self._new_session_from_ui)
             self._chat.sessionDeleteRequested.connect(self._delete_session_from_ui)
@@ -2747,6 +2918,54 @@ class AiChatManager(QObject):
                 self._chat.input.setFocus()
             except Exception:
                 pass
+
+    def open_chat_app(self):
+        """打开模型网站式完整聊天窗口（独立窗口：左侧角色列表 + 消息流 + 多行输入）"""
+        if self._app is None:
+            self._app = ChatAppWindow(self._pet)
+            self._app.sendRequested.connect(self._on_send)
+            self._app.clearRequested.connect(self.clear_context)
+            self._app.roleSwitchRequested.connect(self._on_app_role_switch)
+        self._sync_app()
+        self._app.show()
+        self._app.raise_()
+        try:
+            self._app.activateWindow()
+            self._app.input.setFocus()
+        except Exception:
+            pass
+
+    def _chat_app_active(self):
+        """完整聊天窗口是否打开（打开时 AI 回复直接进聊天窗，不弹气泡/蹦字）"""
+        return self._app is not None and self._app.isVisible()
+
+    def _on_app_role_switch(self, role):
+        """聊天窗口左侧点角色：切换桌宠角色（会同步切会话 + 刷新）"""
+        pet = self._pet
+        if pet is not None and hasattr(pet, 'switch_role'):
+            try:
+                pet.switch_role(role)
+            except Exception:
+                pass
+        self._sync_app()
+
+    def _sync_app(self):
+        """把当前角色列表 / 会话消息 / 标题同步到聊天窗口（已创建才刷新）"""
+        if self._app is None:
+            return
+        try:
+            roles = list(getattr(self._pet, 'roles', []) or [])
+            cur = getattr(self._pet, 'role', None)
+            self._app.set_role_list(roles, cur)
+            self._app.set_content(self._messages, self.system_prompt())
+            try:
+                import pet as _pm
+                disp = _pm.role_display(cur) if cur else 'AI'
+            except Exception:
+                disp = cur or 'AI'
+            self._app.lbl_title.setText("💬 与 %s 对话" % disp)
+        except Exception:
+            pass
 
     def _new_session_from_ui(self):
         """聊天窗「＋新建」按钮 → 新建会话并切换"""
@@ -2959,6 +3178,8 @@ class AiChatManager(QObject):
             self._chat.set_busy(True)
             # 发送时清掉上一次用量显示（新请求的用量回来前保持干净）
             self._chat.set_usage('')
+        if self._app is not None:
+            self._app.set_busy(True)
         self._last_usage = {}
         # 记录本次 API 请求起点（用于结束时的延迟显示）
         self._api_t0 = time.monotonic()
@@ -3024,9 +3245,9 @@ class AiChatManager(QObject):
         return self._bubble
 
     def _bubble_msg(self, text):
-        """错误/提示信息：聊天窗展开时进聊天窗；否则整段显示在透明气泡（不走逐字）"""
-        if self._chat is not None and self._chat.is_expanded():
-            self._chat.append_line(text or '')
+        """错误/提示信息：完整聊天窗打开时进聊天窗；否则整段显示在透明气泡（不走逐字）"""
+        if self._chat_app_active():
+            self._app.append_line(text or '')
             return
         b = self._get_bubble()
         b._stop_type()
@@ -3042,24 +3263,26 @@ class AiChatManager(QObject):
         b._lift_life()
 
     def _show_thinking(self):
-        if self._chat is not None and self._chat.is_expanded():
+        if self._chat_app_active():
             return   # 完整聊天窗模式：不弹思考气泡，等回复直接进聊天窗
         self._get_bubble().show_thinking()
-
     def _hide_thinking(self):
         if self._bubble is not None:
             self._bubble._stop_thinking()
 
     def _show_bubble(self, text):
-        """AI 回复：聊天窗展开时直接进完整聊天窗；否则逐字蹦字显示在桌宠旁"""
-        if self._chat is not None and self._chat.is_expanded():
-            self._chat.append_line(text or '')
+        """AI 回复：完整聊天窗打开时直接进聊天窗；否则逐字蹦字显示在桌宠旁"""
+        if self._chat_app_active():
+            self._app.append_line(text or '')
             return
         self._get_bubble().show_text(text)
 
     def _on_ai_done(self, reply, err, usage=None):
         if self._chat is not None:
             self._chat.set_busy(False)
+        if self._app is not None:
+            self._app.set_busy(False)
+            self._sync_app()   # 回复进聊天窗 + 消息流刷新
         self._ai_worker = None
         # 防止串台：发送后若会话被切走（切角色/切会话），本次回复丢弃
         # （回到原会话时自然看不到这条回复，符合"每条回复属于它发出时的会话"）
@@ -3302,7 +3525,7 @@ class AiChatManager(QObject):
                 pass
         # 蹦字：播放启动后等"实际出声点"再蹦（首静音跳过；QSoundEffect 起播快，
         # start_ms 已含首静音，再加 100ms 保险；聊天窗展开时文本已直接进聊天窗，不再蹦）
-        chat_expanded = self._chat is not None and self._chat.is_expanded()
+        chat_expanded = self._chat_app_active()
         if pending_text and not chat_expanded:
             def _reveal():
                 if seq != getattr(self, '_pending_tts_seq', 0):

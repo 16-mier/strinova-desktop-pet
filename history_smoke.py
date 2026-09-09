@@ -58,7 +58,7 @@ cw = mgr._chat
 ck("chat window created", cw is not None)
 ck("input bar visible", cw.isVisible())
 ck("has input", hasattr(cw, 'input'))
-ck("完整聊天窗 browser 存在", cw.browser is not None)
+ck("聊天按钮存在（打开完整聊天窗入口）", hasattr(cw, 'btn_chat_app'))
 
 # 2. seed history messages with ts
 mgr._messages = [

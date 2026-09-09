@@ -96,6 +96,24 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（模型网站式聊天窗口 ChatAppWindow：独立大窗 + 角色列表 + 消息流 + 多行输入）
+- **需求（用户）**：「我需要那种和模型网站一样的聊天的UI窗口」（DeepSeek/ChatGPT 官网风格）；随后授权继续优化 UI（用户离场）
+- **新窗口 `ChatAppWindow`**（`ai_chat.py` 新类）：
+  - 独立常规窗口（可拖动/缩放/最大化，不跟随桌宠），默认 960×700
+  - **左侧**：角色列表（阵营分组标题 + 角色，当前角色金色「←」高亮；点击 → 切换桌宠角色 + 会话）
+  - **中部**：QTextBrowser 消息流（复用 `_msg_html` bubble 样式：用户右对齐青绿气泡 / AI 左对齐深灰气泡 + 时间戳，可滚动）
+  - **底部**：多行输入框（Enter 发送 / Shift+Enter 换行——用 eventFilter 拦截，QPlainTextEdit 会吞窗口级 keyPressEvent）+ 发送按钮 + 提示；busy 时输入禁用
+  - 顶部：标题「💬 与 XX 对话」+「🧹 清理上下文」
+- **集成**（`ai_chat.py` AiChatManager）：
+  - 新增 `open_chat_app()`/`_chat_app_active()`/`_sync_app()`/`_on_app_role_switch()`
+  - 改道判断全面切换：`_show_bubble`/`_bubble_msg`/`_show_thinking`/`_on_tts_done` 由「输入条展开」改为「聊天窗口打开」——窗口开着时 AI 回复/错误提示直接进聊天窗，不弹气泡不蹦字（TTS 照常）
+  - 消息变化同步：`_on_ai_done`/`_sync_ui_to_current`/`clear_context`/`open_chat_app` 均调 `_sync_app()`
+  - 入口：输入条按钮改为「💬 聊天」（发 `chatAppRequested` 信号）；**主窗菜单新增「💬 聊天」**（`pet.py` `_open_chat_app`，不用先弹输入条）
+- **输入条 ChatWindow 瘦身**：移除展开逻辑（toggle_expand/browser/append_line/is_expanded/H_EXPANDED 全删），恢复纯快速提问条；set_content 空操作
+- **验证**：新冒烟 `_voice_probe/smoke_chatapp.py` 11/11（角色列表/消息流/追加/发送/Enter/busy）✅、端到端 `smoke_chatapp_e2e.py`（真实配置：窗口可见/标题/真实角色列表 7 项/回复进聊天窗/气泡未用）✅；更新 `smoke_chatwindow.py` 6/6（聊天按钮信号/发送/清理）、`history_smoke.py` 断言更新 23/23；全量回归 9 项全绿 ✅
+- 涉及：`ai_chat.py`、`pet.py`（菜单入口）、`history_smoke.py`、`_voice_probe/smoke_chatapp.py`+`smoke_chatapp_e2e.py`（新）
+- git：本提交
+
 ### 2026-09-09（修复聊天窗展开按钮无效：clicked 参数污染 + 去掉查看上下文按钮）
 - **问题（用户）**：「点聊天窗并没有弹出来」；随后要求去掉「📖 查看上下文」按钮
 - **根因（真实 GUI 复现脚本 `_voice_probe/repro_chat.py` 定位）**：`QPushButton.clicked` 信号发射时**自带 `checked=False` 参数**；`btn_expand.clicked.connect(self.toggle_expand)` 把该参数传给 `toggle_expand(expanded=False)` → **每次点击都被当成「强制收起」** → 聊天窗永远弹不出来。直接调用 `toggle_expand()`（无参）正常，因此离屏冒烟未发现
