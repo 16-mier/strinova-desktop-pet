@@ -65,12 +65,13 @@ panel.show()
 app.processEvents()
 ok = []
 
-# 1) 导航 6 项
-ok.append(('导航6项', panel.nav.count() == 6))
+# 1) 导航 7 项
+ok.append(('导航7项', panel.nav.count() == 7))
 
 # 2) 每页控件存在
 pages = [
-    ('🤖 AI 对话', ['chk_ai_enabled', 'ed_ai_base', 'cmb_ai_model', 'api_tts_box', 'sld_tts_volume']),
+    ('🤖 AI 对话', ['chk_ai_enabled', 'ed_ai_base', 'cmb_ai_model']),
+    ('🗣 语音朗读', ['chk_ai_tts', 'cmb_tts_engine', 'sld_tts_volume', 'ed_tts_local_base']),
     ('👤 形象角色', ['role_list', 'lbl_cur_role', 'sld_size', 'chk_auto_facing']),
     ('🎵 语音音频', ['audio_list', 'cmb_voice_src', 'btn_bind']),
     ('🎧 播放设备', ['cmb_bind', 'cmb_self']),
@@ -85,18 +86,43 @@ for title, ctrls in pages:
     vis = all(getattr(panel, c).isVisible() for c in ctrls)
     ok.append(('%s 页控件可见' % title, vis and panel.stack.currentIndex() == idx))
 
-# 3) 切页互斥：只有当前页可见
-panel.nav.setCurrentRow(1)
+# 3) 切页互斥：切到角色页后 AI 页/朗读页不叠显
+ai_page_idx = next(i for i in range(panel.nav.count())
+                   if panel.nav.item(i).text() == "🤖 AI 对话")
+tts_page_idx = next(i for i in range(panel.nav.count())
+                    if panel.nav.item(i).text() == "🗣 语音朗读")
+panel.nav.setCurrentRow(tts_page_idx)
 app.processEvents()
-ok.append(('切页后AI控件隐藏', not panel.api_tts_box.isVisible()))
+ok.append(('切到朗读页 TTS 控件可见', panel.chk_ai_tts.isVisible()))
+panel.nav.setCurrentRow(ai_page_idx)
+app.processEvents()
+ok.append(('切回AI页后朗读控件隐藏', not panel.chk_ai_tts.isVisible()))
 
 # 4) 旧折叠方法兼容（跳页）
 panel._toggle_ai_page()
 app.processEvents()
-ok.append(('_toggle_ai_page 跳页', panel.stack.currentIndex() == 0 and panel.api_tts_box.isVisible()))
+ok.append(('_toggle_ai_page 跳AI页', panel.stack.currentIndex() == ai_page_idx
+           and panel.chk_ai_enabled.isVisible()))
 panel._toggle_game_page()
 app.processEvents()
-ok.append(('_toggle_game_page 跳页', panel.stack.currentIndex() == 5))
+game_idx = next(i for i in range(panel.nav.count())
+                if panel.nav.item(i).text() == "🎮 游戏设置")
+ok.append(('_toggle_game_page 跳游戏页', panel.stack.currentIndex() == game_idx))
+
+# 5) 云端引擎区：切「云端」→ 预设下拉 + API 表单可见；切「本地」隐藏
+tts_idx = next(i for i in range(panel.nav.count())
+               if panel.nav.item(i).text() == "🗣 语音朗读")
+panel.nav.setCurrentRow(tts_idx)
+panel.cmb_tts_engine.setCurrentIndex(1)   # cloud
+panel._ai_apply_tts_engine(1)
+app.processEvents()
+ok.append(('云端引擎 → 预设/API可见', panel.cmb_tts_preset.isVisible()
+           and panel.api_tts_box.isVisible() and panel.local_tts_box.isVisible() is False))
+panel.cmb_tts_engine.setCurrentIndex(0)   # local
+panel._ai_apply_tts_engine(0)
+app.processEvents()
+ok.append(('本地引擎 → 云端区隐藏', not panel.api_tts_box.isVisible()
+           and panel.local_tts_box.isVisible()))
 
 for name, cond in ok:
     print(('  PASS ' if cond else '  FAIL ') + name)

@@ -85,23 +85,31 @@ ok.append(('克隆三件套存在', all(hasattr(panel, n) for n in
 ok.append(('模型版本下拉存在', hasattr(panel, 'cmb_tts_model_kind')))
 ok.append(('滑块是 NoWheelSlider', isinstance(panel.sld_size, settings_panel.NoWheelSlider)))
 
-# 2. 展开 AI 配置区后 api_tts_box 可见（AI 区默认折叠，展开是预期交互）
-panel._toggle_ai_page()
+# 2. 切到「语音朗读」页，选「云端」引擎 → api_tts_box 可见
+#    AI/TTS 配置已分离（2026-09-09）：TTS 在独立页，默认本地引擎（云端表单隐藏）
+tts_idx = next(i for i in range(panel.nav.count())
+               if panel.nav.item(i).text() == "🗣 语音朗读")
+panel.nav.setCurrentRow(tts_idx)
+# 本地引擎时云端表单隐藏（引擎切换生效）
 app.processEvents()
-ok.append(('展开AI后 api_tts_box 可见', panel.api_tts_box.isVisible()))
+panel.cmb_tts_engine.setCurrentIndex(1)   # cloud
+panel._ai_apply_tts_engine(1)
+app.processEvents()
+ok.append(('选云端引擎后 api_tts_box 可见', panel.api_tts_box.isVisible()))
 
-# 3. 填 API 字段并保存 → 配置持久化
+# 3. 填 API 字段并保存 → 配置持久化（存 tts 段）
 panel.ed_tts_api_base.setText('https://tts.example.com/v1')
 panel.ed_tts_api_key.setText('sk-tts-test')
 panel.ed_tts_api_model.setText('tts-1')
 panel.ed_tts_api_voice.setText('alloy')
 panel._ai_apply_tts_api()
 app.processEvents()
-c = p.ai.cfg()
-ok.append(('API TTS 配置保存', c.get('tts_api_base') == 'https://tts.example.com/v1'
-           and c.get('tts_api_key') == 'sk-tts-test'
-           and c.get('tts_api_model') == 'tts-1'
-           and c.get('tts_api_voice') == 'alloy'))
+import ai_chat as _ai
+tc = _ai._tts_cfg()
+ok.append(('API TTS 配置保存(tts段)', tc.get('api_base') == 'https://tts.example.com/v1'
+           and tc.get('api_key') == 'sk-tts-test'
+           and tc.get('model') == 'tts-1'
+           and tc.get('voice') == 'alloy'))
 
 # 4. 缺字段测试 → 提示不崩
 panel.ed_tts_api_base.setText('')

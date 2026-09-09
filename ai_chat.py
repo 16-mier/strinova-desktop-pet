@@ -102,6 +102,59 @@ TTS_MODE_CLOUD = 'cloud'   # edge-tts 云端（默认）
 TTS_MODE_LOCAL = 'local'   # Windows 自带 SAPI（离线）
 TTS_MODE_API = 'api'       # 自定义 OpenAI 兼容 /audio/speech 服务（如 OpenAI/硅基流动等）
 
+# TTS 引擎类型（2026-09-09 起）：
+TTS_ENGINE_LOCAL = 'local'   # 本地 audio.cpp 跑 Breeze-TTS-2（克隆音色，离线免费）
+TTS_ENGINE_CLOUD = 'cloud'   # 云端 OpenAI 兼容 TTS API（在线，需密钥）
+
+# 云端 TTS 预设模板（2026-09-09 基于多服务商官方文档/社区调研校准）：
+#   { 'name': 预设显示名, 'base': base_url, 'model': 模型名, 'voice': 音色,
+#     'note': 备注, 'clone': 是否支持克隆 }
+TTS_CLOUD_PRESETS = [
+    {
+        'name': '硅基流动 CosyVoice2（推荐）',
+        'base': 'https://api.siliconflow.cn/v1',
+        'model': 'FunAudioLLM/CosyVoice2-0.5B',
+        'voice': 'FunAudioLLM/CosyVoice2-0.5B:anna',
+        'note': '国内直连、OpenAI 兼容零改动。中文自然度极好，有免费额度。'
+                '音色在模型名后加 :alex/:anna/:bella/:david 等；克隆：voice 传空 + 先上传参考音频。',
+        'clone': True,
+    },
+    {
+        'name': 'MiniMax 语音',
+        'base': 'https://api.minimaxi.com/v1',
+        'model': 'speech-02-hd',
+        'voice': 'male-qn-qingse',
+        'note': '国产情绪/拟人最强、中文好、支持克隆。模型 speech-02-turbo(低延迟)/speech-02-hd(高音质)。',
+        'clone': True,
+    },
+    {
+        'name': '阿里云 DashScope CosyVoice',
+        'base': 'https://dashscope.aliyuncs.com/api/v1',
+        'model': 'cosyvoice-v2',
+        'voice': 'longxiaochun',
+        'note': '阿里云百炼 compatible-mode，中文极佳、稳定、支持情绪；与本地 CosyVoice 同源。'
+                'cosyvoice-v3-plus 支持情绪、v3-flash 更低延迟。',
+        'clone': True,
+    },
+    {
+        'name': 'OpenAI 官方 TTS',
+        'base': 'https://api.openai.com/v1',
+        'model': 'gpt-4o-mini-tts',
+        'voice': 'alloy',
+        'note': '最拟人、13 音色、支持 instructions 语气；需海外网络与结算。'
+                '模型 tts-1/tts-1-hd 更便宜但音色仅 6 个。',
+        'clone': False,
+    },
+    {
+        'name': '智谱 GLM-TTS',
+        'base': 'https://open.bigmodel.cn/api/paas/v4',
+        'model': 'glm-tts',
+        'voice': 'tongtong',
+        'note': '中文最佳、支持方言，OpenAI 兼容 audio/speech。音色：tongtong/chuichui/xiaochen/jam/kazi。',
+        'clone': True,
+    },
+]
+
 CHAT_QSS = """
 QWidget#chatRoot { background: #1a1c24; }
 QLabel { color: #e6e8f0; }
@@ -123,7 +176,10 @@ QPushButton:disabled { color: #666b80; background: #22252f; }
 
 
 # ============================================================================
-# 配置读写（pet_config.json 里 "ai" 段）
+# 配置读写（pet_config.json）
+# - "ai" 段：AI 对话配置（服务/模型/密钥/提示词/单价…）
+# - "tts" 段：语音朗读配置（独立，2026-09-09 起与 AI 配置分开存储）
+#   读取兼容：tts 段缺失时回退 ai.tts_*（旧版配置），保证升级不丢设置
 # ============================================================================
 def _ai_cfg():
     if pet_mod is not None:
@@ -142,6 +198,52 @@ def _save_ai_cfg(**kw):
         ai = {}
     ai.update(kw)
     cfg['ai'] = ai
+    pet_mod.save_config(cfg)
+
+
+# TTS 旧字段名（ai 段）→ 新字段名（tts 段）映射（读取兼容用）
+_TTS_LEGACY_MAP = {
+    'api_base': 'tts_api_base', 'api_key': 'tts_api_key',
+    'model': 'tts_api_model', 'voice': 'tts_api_voice',
+    'ref': 'tts_api_ref', 'ref_text': 'tts_api_ref_text',
+    'instruction': 'tts_api_instruction', 'model_kind': 'tts_model_kind',
+    'volume': 'tts_volume', 'enabled': 'tts_enabled',
+    'engine': 'tts_engine', 'preset': 'tts_preset',
+    'prompt': 'tts_prompt',
+}
+
+
+def _tts_cfg():
+    """读 tts 段（权威）；tts 段缺失的键回退 ai.tts_* 旧字段"""
+    if pet_mod is None:
+        return {}
+    try:
+        cfg = pet_mod.load_config()
+    except Exception:
+        return {}
+    tts = cfg.get('tts') or {}
+    if not isinstance(tts, dict):
+        tts = {}
+    ai = cfg.get('ai') or {}
+    if not isinstance(ai, dict):
+        ai = {}
+    out = dict(tts)
+    for new_k, legacy_k in _TTS_LEGACY_MAP.items():
+        if new_k not in out and ai.get(legacy_k) is not None:
+            out[new_k] = ai[legacy_k]
+    return out
+
+
+def _save_tts_cfg(**kw):
+    """写 tts 段（2026-09-09 起 TTS 配置独立存储）"""
+    if pet_mod is None:
+        return
+    cfg = pet_mod.load_config()
+    tts = cfg.get('tts') or {}
+    if not isinstance(tts, dict):
+        tts = {}
+    tts.update(kw)
+    cfg['tts'] = tts
     pet_mod.save_config(cfg)
 
 
@@ -228,8 +330,8 @@ _SERVICE_LOCK = threading.Lock()
 
 def tts_service_url():
     """从配置解析服务健康检查地址（默认 http://127.0.0.1:8080）"""
-    ai = _ai_cfg()
-    base = (ai.get('tts_api_base') or '').strip() or 'http://127.0.0.1:8080/v1'
+    tc = _tts_cfg()
+    base = (tc.get('api_base') or '').strip() or 'http://127.0.0.1:8080/v1'
     base = _norm_base_url(base)
     # health 端点在根（无 /v1），剥掉可能的 /v1 前缀
     for tail in ('/v1', '/api', '/'):
@@ -358,7 +460,7 @@ def tts_service_start():
     # 按用户选择的量化版本加载：bf16 高音质 / q8 省显存（读 ai.tts_model_kind）
     try:
         ai_cfg = _ai_cfg()
-        kind = (ai_cfg.get('tts_model_kind') or 'auto').strip().lower()
+        kind = (_tts_cfg().get('model_kind') or 'auto').strip().lower()
     except Exception:
         kind = 'auto'
     if kind not in ('bf16', 'q8'):
@@ -720,17 +822,26 @@ class TTSWorker(QThread):
         if not base:
             self._last_err = '没有可写的临时目录'
             return None
-        cfg = _ai_cfg()
-        api_base = (cfg.get('tts_api_base') or '').strip()
-        api_key = (cfg.get('tts_api_key') or '').strip()
-        api_model = (cfg.get('tts_api_model') or '').strip()
-        if not api_base or not api_key or not api_model:
-            self._last_err = '朗读服务未配置：请到 设置 → AI → 朗读服务 里填 地址/密钥/模型'
-            return None
+        tc = _tts_cfg()
+        engine = (tc.get('engine') or TTS_ENGINE_LOCAL).strip().lower()
+        if engine == TTS_ENGINE_CLOUD:
+            # ── 云端 TTS：需填 地址/密钥/模型 ──
+            api_base = (tc.get('api_base') or '').strip()
+            api_key = (tc.get('api_key') or '').strip()
+            api_model = (tc.get('model') or '').strip()
+            if not api_base or not api_key or not api_model:
+                self._last_err = ('云端朗读未配置：请到 设置 → 语音朗读 → 云端 TTS '
+                                  '选择预设并填 API 密钥')
+                return None
+        else:
+            # ── 本地 TTS（audio.cpp Breeze-TTS-2）：默认本地地址，免密钥 ──
+            api_base = (tc.get('api_base') or '').strip() or 'http://127.0.0.1:8080/v1'
+            api_key = (tc.get('api_key') or '').strip()
+            api_model = (tc.get('model') or '').strip() or 'breeze-tts-clone'
         # 克隆音色：参考音频 + 参考转录（配置里填了才启用克隆）
-        ref = (cfg.get('tts_api_ref') or '').strip()
-        ref_text = (cfg.get('tts_api_ref_text') or '').strip()
-        instruction = self._instruction or (cfg.get('tts_api_instruction') or '').strip()
+        ref = (tc.get('ref') or '').strip()
+        ref_text = (tc.get('ref_text') or '').strip()
+        instruction = self._instruction or (tc.get('instruction') or '').strip()
         try:
             path = os.path.join(base, 'tts_%d_%d.wav' % (self._seq, int(time.time() * 1000)))
             _api_speech_synth(api_base, api_key, api_model, self._text,
@@ -2387,16 +2498,16 @@ class AiChatManager(QObject):
         return bool(self.cfg().get('enabled', False))
 
     def tts_enabled(self):
-        return bool(self.cfg().get('tts_enabled', True))
+        return bool(_tts_cfg().get('enabled', True))
 
     def set_enabled(self, on):
         _save_ai_cfg(enabled=bool(on))
 
     def set_tts_enabled(self, on):
-        _save_ai_cfg(tts_enabled=bool(on))
+        _save_tts_cfg(enabled=bool(on))
 
     def set_tts_mode(self, mode):
-        _save_ai_cfg(tts_mode=mode)
+        _save_tts_cfg(mode=mode)
 
     def set_server(self, base_url, api_key, model):
         _save_ai_cfg(base_url=base_url, api_key=api_key, model=model)
@@ -2408,12 +2519,12 @@ class AiChatManager(QObject):
         """设置朗读音量 0-300。<=100 用 QAudioOutput(0~1)；
         >100 用数字增益放大 wav（播放前对 PCM 乘系数）"""
         vol = max(0, min(300, int(vol)))
-        _save_ai_cfg(tts_volume=vol)
+        _save_tts_cfg(volume=vol)
         self._apply_tts_volume()
 
     def tts_volume(self):
         try:
-            return max(0, min(300, int(self.cfg().get('tts_volume', 100) or 100)))
+            return max(0, min(300, int(_tts_cfg().get('volume', 100) or 100)))
         except Exception:
             return 100
 
@@ -2732,10 +2843,10 @@ class AiChatManager(QObject):
                     instruction=''):
         """配置自定义 TTS API 服务（OpenAI 兼容 /audio/speech）。
         ref/ref_text 用于克隆音色（可选）；instruction 为默认情绪/人设（可选）。"""
-        _save_ai_cfg(tts_api_base=base_url, tts_api_key=api_key,
-                     tts_api_model=model, tts_api_voice=voice,
-                     tts_api_ref=ref, tts_api_ref_text=ref_text,
-                     tts_api_instruction=instruction)
+        _save_tts_cfg(api_base=base_url, api_key=api_key,
+                      model=model, voice=voice,
+                      ref=ref, ref_text=ref_text,
+                      instruction=instruction)
 
     # 口语化规则（无论用户自定义什么系统提示词都会强制追加，
     # 目的是让模型输出适合直接语音朗读的口语，少书面拟声词）
@@ -2818,11 +2929,11 @@ class AiChatManager(QObject):
             '朗读：<改写后的朗读稿>')
 
     def tts_prompt(self):
-        return (self.cfg().get('tts_prompt') or '').strip() \
+        return (_tts_cfg().get('prompt') or '').strip() \
             or self.default_tts_prompt()
 
     def set_tts_prompt(self, text):
-        _save_ai_cfg(tts_prompt=text.strip())
+        _save_tts_cfg(prompt=text.strip())
 
     def fetch_models(self, base_url, api_key, on_done):
         """后台拉取模型列表。完成后发 models_fetched 信号（跨线程安全），
@@ -3460,8 +3571,7 @@ class AiChatManager(QObject):
             return
         if seq != getattr(self, '_pending_tts_seq', 0):
             return
-        cfg = self.cfg()
-        voice = (cfg.get('tts_api_voice') or cfg.get('tts_voice') or 'alloy')
+        voice = (_tts_cfg().get('voice') or 'alloy')
         # 记录将朗读的文本 → 音频就绪时按音频时长同步蹦字
         self._synced_text = text
         # 记录 TTS 合成起点（结束算延迟）

@@ -34,6 +34,15 @@ _RESIZE_MARGIN = 6  # 边缘热区像素（拖此区缩放）
 
 # 与 pet.py 共享的常量与工具（从 pet import 会造成循环时再调整）
 # 通过模块级注入方式避免循环导入：
+# 云端 TTS 预设列表（从 ai_chat 导入，懒加载避免循环 import）
+try:
+    from ai_chat import TTS_CLOUD_PRESETS, TTS_ENGINE_LOCAL, TTS_ENGINE_CLOUD
+except Exception:
+    TTS_CLOUD_PRESETS = []
+    TTS_ENGINE_LOCAL = 'local'
+    TTS_ENGINE_CLOUD = 'cloud'
+
+
 pet_mod = None
 
 
@@ -638,6 +647,7 @@ class SettingsPanel(QWidget):
             "QListWidget::item:selected{background:#3d4f85; color:#ffffff; font-weight:bold;}")
         self._nav_items = [
             "🤖 AI 对话",
+            "🗣 语音朗读",
             "👤 形象角色",
             "🎵 语音音频",
             "🎧 播放设备",
@@ -783,10 +793,57 @@ class SettingsPanel(QWidget):
         self.lbl_peak_state = QLabel("")
         self.lbl_peak_state.setStyleSheet("color:#6f7899; font-size:10px;")
         ail.addWidget(self.lbl_peak_state)
-        # TTS（朗读，依附 AI：AI 对话开启才能开启朗读）
+        # TTS 依赖提示（AI 页说明：语音朗读依赖 AI 功能）
+        self.lbl_ai_tts_dep = QLabel(
+            "🗣 语音朗读（TTS）：朗读 AI 回复，需先启用「AI 对话」才能开启。\n"
+            "      → 详细配置请到左侧「🗣 语音朗读」页（本地 audio.cpp / 云端 API / 预设）。")
+        self.lbl_ai_tts_dep.setWordWrap(True)
+        self.lbl_ai_tts_dep.setStyleSheet(
+            "background:#2a2e3d; color:#9fb0d9; border:1px solid #3a4057;"
+            " border-radius:8px; padding:6px 8px; font-size:11px;")
+        ail.addWidget(self.lbl_ai_tts_dep)
+        page_ai.addWidget(self.ai_box)
+
+        # ============================================================
+        # 模块 TTS：语音朗读（独立页面，2026-09-09 起与 AI 配置分开）
+        # ============================================================
+        page_tts = make_page()
+        self.tts_box = QGroupBox("🗣 语音朗读")
+        self.tts_box.setStyleSheet(
+            "QGroupBox{background:#22252f; border:1px solid #33374a; border-radius:10px;"
+            " margin-top:16px; padding-top:4px; font-weight:bold; color:#cfe0ff;}"
+            "QGroupBox::title{subcontrol-origin:margin; left:12px; top:6px;}")
+        ttl = QVBoxLayout(self.tts_box)
+        ttl.setContentsMargins(12, 10, 12, 10)
+        ttl.setSpacing(8)
+        # 依赖提示
+        self.lbl_tts_dep = QLabel(
+            "⚠ TTS（语音朗读）依赖「AI 对话」：请先在「🤖 AI 对话」页启用 AI。\n"
+            "  下方可切换「本地」或「云端」朗读引擎。")
+        self.lbl_tts_dep.setWordWrap(True)
+        self.lbl_tts_dep.setStyleSheet(
+            "background:#3a3350; color:#e0d0ff; border:1px solid #5a4a80;"
+            " border-radius:8px; padding:6px 8px; font-size:11px;")
+        ttl.addWidget(self.lbl_tts_dep)
+        # 朗读开关（依赖 AI，AI 关则置灰不可开）
         self.chk_ai_tts = QCheckBox("朗读 AI 回复（TTS）")
         self.chk_ai_tts.toggled.connect(self._ai_apply_tts)
-        ail.addWidget(self.chk_ai_tts)
+        ttl.addWidget(self.chk_ai_tts)
+        # 朗读引擎：本地 audio.cpp / 云端 API
+        eng_row = QHBoxLayout()
+        eng_row.addWidget(QLabel("朗读引擎："))
+        self.cmb_tts_engine = QComboBox()
+        self.cmb_tts_engine.addItem("本地（audio.cpp Breeze-TTS-2，免密钥）", 'local')
+        self.cmb_tts_engine.addItem("云端（OpenAI 兼容 API，需密钥）", 'cloud')
+        self.cmb_tts_engine.setFixedWidth(220)
+        self.cmb_tts_engine.currentIndexChanged.connect(self._ai_apply_tts_engine)
+        eng_row.addWidget(self.cmb_tts_engine, 1)
+        ttl.addLayout(eng_row)
+        # ── 本地引擎控件 ──
+        self.local_tts_box = QWidget()
+        ll = QVBoxLayout(self.local_tts_box)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(6)
         # 本地 TTS 服务控制（启动/停止 + 状态灯）
         svc_row = QHBoxLayout()
         self.lbl_tts_svc_state = QLabel("本地 TTS 服务：检测中…")
@@ -808,11 +865,48 @@ class SettingsPanel(QWidget):
             "QPushButton:hover{background:#754a35;}")
         self.btn_tts_svc_stop.clicked.connect(self._ai_tts_svc_stop)
         svc_row.addWidget(self.btn_tts_svc_stop)
-        ail.addLayout(svc_row)
-        lbl_tts_api = QLabel("朗读服务（填语音 API 地址；本地 TTS 用 http://127.0.0.1:8080/v1）：")
-        lbl_tts_api.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:2px;")
-        ail.addWidget(lbl_tts_api)
-        # 自定义 TTS API 服务（OpenAI 兼容 /audio/speech）——唯一朗读引擎
+        ll.addLayout(svc_row)
+        # 本地地址（默认到 audio.cpp）
+        r_ll = QHBoxLayout()
+        r_ll.addWidget(QLabel("本地地址："))
+        self.ed_tts_local_base = QLineEdit()
+        self.ed_tts_local_base.setPlaceholderText("http://127.0.0.1:8080/v1")
+        self.ed_tts_local_base.setText("http://127.0.0.1:8080/v1")
+        self.ed_tts_local_base.editingFinished.connect(self._ai_apply_tts_local)
+        r_ll.addWidget(self.ed_tts_local_base, 1)
+        ll.addLayout(r_ll)
+        # 本地量化版本
+        r_lk = QHBoxLayout()
+        r_lk.addWidget(QLabel("模型版本："))
+        self.cmb_tts_model_kind = QComboBox()
+        self.cmb_tts_model_kind.addItem("自动（有bf16用bf16）", 'auto')
+        self.cmb_tts_model_kind.addItem("高音质 bf16", 'bf16')
+        self.cmb_tts_model_kind.addItem("量化 q8（省显存）", 'q8')
+        self.cmb_tts_model_kind.currentIndexChanged.connect(self._ai_apply_tts_kind)
+        r_lk.addWidget(self.cmb_tts_model_kind, 1)
+        ll.addLayout(r_lk)
+        ttl.addWidget(self.local_tts_box)
+        # ── 云端引擎控件 ──
+        self.cloud_tts_box = QWidget()
+        cl = QVBoxLayout(self.cloud_tts_box)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+        lbl_cloud = QLabel("云端 TTS 预设（选一个自动填充地址/模型/音色）：")
+        lbl_cloud.setStyleSheet("color:#9fb0d9; font-size:12px;")
+        cl.addWidget(lbl_cloud)
+        r_preset = QHBoxLayout()
+        self.cmb_tts_preset = QComboBox()
+        for pre in TTS_CLOUD_PRESETS:
+            self.cmb_tts_preset.addItem(pre['name'], pre)
+        self.cmb_tts_preset.currentIndexChanged.connect(self._ai_apply_tts_preset)
+        r_preset.addWidget(self.cmb_tts_preset, 1)
+        cl.addLayout(r_preset)
+        _first_pre = TTS_CLOUD_PRESETS[0] if TTS_CLOUD_PRESETS else {}
+        self.lbl_tts_preset_desc = QLabel(_first_pre.get('note', _first_pre.get('desc', '')))
+        self.lbl_tts_preset_desc.setWordWrap(True)
+        self.lbl_tts_preset_desc.setStyleSheet("color:#7a8099; font-size:11px;")
+        cl.addWidget(self.lbl_tts_preset_desc)
+        # 云端 API 表单（OpenAI 兼容 /audio/speech）
         self.api_tts_box = QWidget()
         atl = QVBoxLayout(self.api_tts_box)
         atl.setContentsMargins(0, 0, 0, 0)
@@ -835,20 +929,10 @@ class SettingsPanel(QWidget):
         r_api_model = QHBoxLayout()
         r_api_model.addWidget(QLabel("语音模型："))
         self.ed_tts_api_model = QLineEdit()
-        self.ed_tts_api_model.setPlaceholderText("如 tts-1 / FunAudioLLM/CosyVoice2-0.5B 等，按服务商填")
+        self.ed_tts_api_model.setPlaceholderText("如 gpt-4o-mini-tts / FunAudioLLM/CosyVoice2-0.5B 等，按服务商填")
         self.ed_tts_api_model.editingFinished.connect(self._ai_apply_tts_api)
         r_api_model.addWidget(self.ed_tts_api_model, 1)
         atl.addLayout(r_api_model)
-        r_api_kind = QHBoxLayout()
-        r_api_kind.addWidget(QLabel("模型版本："))
-        self.cmb_tts_model_kind = QComboBox()
-        self.cmb_tts_model_kind.addItem("自动（有bf16用bf16）", 'auto')
-        self.cmb_tts_model_kind.addItem("高音质 bf16", 'bf16')
-        self.cmb_tts_model_kind.addItem("量化 q8（省显存）", 'q8')
-        self.cmb_tts_model_kind.setFixedWidth(190)
-        self.cmb_tts_model_kind.currentIndexChanged.connect(self._ai_apply_tts_kind)
-        r_api_kind.addWidget(self.cmb_tts_model_kind, 1)
-        atl.addLayout(r_api_kind)
         r_api_voice = QHBoxLayout()
         r_api_voice.addWidget(QLabel("音色："))
         self.ed_tts_api_voice = QLineEdit()
@@ -859,11 +943,11 @@ class SettingsPanel(QWidget):
         btn_tts_api_test.clicked.connect(self._ai_test_tts_api)
         r_api_voice.addWidget(btn_tts_api_test)
         atl.addLayout(r_api_voice)
-        # 克隆音色三件套（本地 TTS 引擎如 audio.cpp/BreezeTTS 2 支持声音克隆）
+        # 克隆音色（云端部分服务支持）
         r_api_ref = QHBoxLayout()
         r_api_ref.addWidget(QLabel("参考音频："))
         self.ed_tts_api_ref = QLineEdit()
-        self.ed_tts_api_ref.setPlaceholderText("克隆用参考音频的完整路径（如 D:\\audio-cpp\\refs\\星绘.wav）；留空=不克隆")
+        self.ed_tts_api_ref.setPlaceholderText("克隆用参考音频的完整路径（如 D:\\refs\\星绘.wav）；留空=不克隆")
         self.ed_tts_api_ref.setToolTip("声音克隆：提供一段参考音频 + 它的转录，让模型学这个音色说话。填了才启用克隆。")
         self.ed_tts_api_ref.editingFinished.connect(self._ai_apply_tts_api)
         r_api_ref.addWidget(self.ed_tts_api_ref, 1)
@@ -889,8 +973,9 @@ class SettingsPanel(QWidget):
         self.lbl_tts_api_status = QLabel("")
         self.lbl_tts_api_status.setStyleSheet("color:#7a8099; font-size:11px;")
         atl.addWidget(self.lbl_tts_api_status)
-        ail.addWidget(self.api_tts_box)   # 常驻显示（唯一朗读引擎=填地址）
-        # 朗读音量滑块（实时生效 + 可填数字；0-300%，>100 数字增益）
+        cl.addWidget(self.api_tts_box)
+        ttl.addWidget(self.cloud_tts_box)
+        # 朗读音量滑块
         vol_row = QHBoxLayout()
         vol_row.addWidget(QLabel("朗读音量："))
         self.sld_tts_volume = NoWheelSlider(Qt.Orientation.Horizontal)
@@ -904,11 +989,11 @@ class SettingsPanel(QWidget):
         self.spn_tts_volume.setSuffix(" %")
         self.spn_tts_volume.valueChanged.connect(self._ai_apply_tts_volume)
         vol_row.addWidget(self.spn_tts_volume)
-        ail.addLayout(vol_row)
-        # TTS 提示词：朗读前让 AI 改写（依附 AI，AI 关则朗读也关）
+        ttl.addLayout(vol_row)
+        # TTS 提示词
         lbl_ttp = QLabel("TTS 提示词（朗读前让 AI 把回答改写成朗读稿并判断语气）：")
         lbl_ttp.setStyleSheet("color:#9fb0d9; font-weight:bold; font-size:12px; margin-top:4px;")
-        ail.addWidget(lbl_ttp)
+        ttl.addWidget(lbl_ttp)
         ttp_row = QHBoxLayout()
         btn_ttp_edit = QPushButton("✏️ 编辑提示词…")
         btn_ttp_edit.clicked.connect(self._open_tts_prompt_dialog)
@@ -917,15 +1002,15 @@ class SettingsPanel(QWidget):
         btn_ttp_reset.clicked.connect(self._reset_tts_prompt)
         ttp_row.addWidget(btn_ttp_reset)
         ttp_row.addStretch(1)
-        ail.addLayout(ttp_row)
+        ttl.addLayout(ttp_row)
         self.lbl_ttp_summary = QLabel("（使用默认提示词）")
         self.lbl_ttp_summary.setStyleSheet("color:#7a8099; font-size:11px;")
         self.lbl_ttp_summary.setWordWrap(True)
-        ail.addWidget(self.lbl_ttp_summary)
+        ttl.addWidget(self.lbl_ttp_summary)
         tip5 = QLabel("朗读的文本会先由 AI 按 TTS 提示词改写（支持 [笑][叹气] 等情绪标记），再交给上方语音服务合成；「情绪」行会作为语音服务的语气指令。")
         tip5.setStyleSheet("color:#7a8099; font-size:11px;")
-        ail.addWidget(tip5)
-        page_ai.addWidget(self.ai_box)
+        ttl.addWidget(tip5)
+        page_tts.addWidget(self.tts_box)
 
         # ---- 模块1：当前角色 + 角色管理 ----
         page_role = make_page()
@@ -1412,10 +1497,6 @@ class SettingsPanel(QWidget):
         self.chk_ai_enabled.setChecked(bool(ai.get('enabled', False)))
         self.chk_ai_enabled.blockSignals(False)
         ai_on = bool(ai.get('enabled', False))
-        self.chk_ai_tts.blockSignals(True)
-        self.chk_ai_tts.setChecked(ai_on and bool(ai.get('tts_enabled', True)))
-        self.chk_ai_tts.setEnabled(ai_on)   # AI 关 → TTS 置灰不可开
-        self.chk_ai_tts.blockSignals(False)
         # 世界书开关回填（默认 True）
         self.chk_ai_worldbook.blockSignals(True)
         self.chk_ai_worldbook.setChecked(bool(ai.get('world_book_enabled', True)))
@@ -1433,18 +1514,43 @@ class SettingsPanel(QWidget):
             self.cmb_ai_model.blockSignals(True)
             self.cmb_ai_model.setCurrentText(cur_model if cur_model else "")
             self.cmb_ai_model.blockSignals(False)
-        # 朗读服务（唯一引擎=填地址的自定义语音 API）
+        # 朗读服务（tts 段权威；ai.tts_* 旧键由 _tts_cfg 兼容回退）
+        import ai_chat as _ai_m
+        tc = _ai_m._tts_cfg()
         self.ed_tts_api_base.blockSignals(True)
-        self.ed_tts_api_base.setText(ai.get('tts_api_base', ''))
+        self.ed_tts_api_base.setText(tc.get('api_base', ''))
         self.ed_tts_api_base.blockSignals(False)
         self.ed_tts_api_key.blockSignals(True)
-        self.ed_tts_api_key.setText(ai.get('tts_api_key', ''))
+        self.ed_tts_api_key.setText(tc.get('api_key', ''))
         self.ed_tts_api_key.blockSignals(False)
         self.ed_tts_api_model.blockSignals(True)
-        self.ed_tts_api_model.setText(ai.get('tts_api_model', ''))
+        self.ed_tts_api_model.setText(tc.get('model', ''))
         self.ed_tts_api_model.blockSignals(False)
+        # 本地引擎地址（默认本地 8080）
+        self.ed_tts_local_base.blockSignals(True)
+        self.ed_tts_local_base.setText(tc.get('api_base', '') or 'http://127.0.0.1:8080/v1')
+        self.ed_tts_local_base.blockSignals(False)
+        # 朗读引擎（local/cloud）
+        eng = (tc.get('engine') or 'local')
+        self.cmb_tts_engine.blockSignals(True)
+        ei = self.cmb_tts_engine.findData(eng)
+        self.cmb_tts_engine.setCurrentIndex(ei if ei >= 0 else 0)
+        self.cmb_tts_engine.blockSignals(False)
+        # 云端预设下拉同步（按当前 model/voice 匹配预设）
+        cur_model = tc.get('model', '')
+        cur_voice = tc.get('voice', '')
+        pre_i = 0
+        for i in range(self.cmb_tts_preset.count()):
+            pd = self.cmb_tts_preset.itemData(i) or {}
+            if pd.get('model') == cur_model and pd.get('voice') == cur_voice:
+                pre_i = i
+                break
+        self.cmb_tts_preset.blockSignals(True)
+        self.cmb_tts_preset.setCurrentIndex(pre_i)
+        self.cmb_tts_preset.blockSignals(False)
+        self._tts_engine_ui_state()
         # 模型版本回填（auto/bf16/q8）
-        kind = (ai.get('tts_model_kind') or 'auto').strip().lower()
+        kind = (tc.get('model_kind') or 'auto').strip().lower()
         if kind not in ('bf16', 'q8'):
             kind = 'auto'
         self.cmb_tts_model_kind.blockSignals(True)
@@ -1452,17 +1558,23 @@ class SettingsPanel(QWidget):
         self.cmb_tts_model_kind.setCurrentIndex(idx if idx >= 0 else 0)
         self.cmb_tts_model_kind.blockSignals(False)
         self.ed_tts_api_voice.blockSignals(True)
-        self.ed_tts_api_voice.setText(ai.get('tts_api_voice', ''))
+        self.ed_tts_api_voice.setText(tc.get('voice', ''))
         self.ed_tts_api_voice.blockSignals(False)
         self.ed_tts_api_ref.blockSignals(True)
-        self.ed_tts_api_ref.setText(ai.get('tts_api_ref', ''))
+        self.ed_tts_api_ref.setText(tc.get('ref', ''))
         self.ed_tts_api_ref.blockSignals(False)
         self.ed_tts_api_ref_text.blockSignals(True)
-        self.ed_tts_api_ref_text.setText(ai.get('tts_api_ref_text', ''))
+        self.ed_tts_api_ref_text.setText(tc.get('ref_text', ''))
         self.ed_tts_api_ref_text.blockSignals(False)
         self.ed_tts_api_instr.blockSignals(True)
-        self.ed_tts_api_instr.setText(ai.get('tts_api_instruction', ''))
+        self.ed_tts_api_instr.setText(tc.get('instruction', ''))
         self.ed_tts_api_instr.blockSignals(False)
+        # TTS 朗读开关回填（读 tts 段 enabled，但受 AI enabled 约束）
+        tts_on = bool(tc.get('enabled', True))
+        self.chk_ai_tts.blockSignals(True)
+        self.chk_ai_tts.setChecked(ai_on and tts_on)
+        self.chk_ai_tts.setEnabled(ai_on)   # AI 关 → TTS 置灰不可开
+        self.chk_ai_tts.blockSignals(False)
         # 系统提示词 / TTS 提示词
         sp = ai.get('system_prompt', '')
         sp_def = ai_mgr.default_system_prompt() if ai_mgr is not None else ''
@@ -1490,12 +1602,11 @@ class SettingsPanel(QWidget):
             self._refresh_peak_state()
         except Exception:
             pass
-        tp = ai.get('tts_prompt', '')
-        self._refresh_ttp_summary()
-        _ = tp
-        # 朗读音量
+        self._refresh_ttp_summary()   # 摘要内部读 tts.prompt
+        # 朗读音量（tts 段；ai.tts_volume 由 _tts_cfg 兼容回退）
         try:
-            vol = max(0, min(300, int(ai.get('tts_volume', 100) or 100)))
+            import ai_chat as _ai_v
+            vol = max(0, min(300, int(_ai_v._tts_cfg().get('volume', 100) or 100)))
         except Exception:
             vol = 100
         self.sld_tts_volume.blockSignals(True)
@@ -2354,6 +2465,66 @@ class SettingsPanel(QWidget):
         self.lbl_ai_status.setText(msg if msg else "💡 填好服务器地址与密钥后会自动检测可用模型，选一个即可。")
         self.lbl_ai_status.setStyleSheet("color:%s; font-size:11px;" % color)
 
+    # ---------------- 语音朗读（独立页） ----------------
+    def _ai_apply_tts_engine(self, idx):
+        """朗读引擎切换：本地 audio.cpp / 云端 API"""
+        pet = self._current_pet()
+        eng = self.cmb_tts_engine.itemData(idx) or TTS_ENGINE_LOCAL
+        try:
+            from ai_chat import _save_tts_cfg
+            _save_tts_cfg(engine=eng)
+        except Exception:
+            pass
+        # 本地 / 云端 表单切换显示
+        is_local = eng == TTS_ENGINE_LOCAL
+        self.local_tts_box.setVisible(is_local)
+        self.cloud_tts_box.setVisible(not is_local)
+        self._tts_engine_ui_state()
+
+    def _tts_engine_ui_state(self):
+        """根据当前引擎刷新可见区 + 测试按钮可用"""
+        try:
+            from ai_chat import _tts_cfg, TTS_ENGINE_LOCAL
+        except Exception:
+            return
+        eng = (_tts_cfg().get('engine') or TTS_ENGINE_LOCAL)
+        is_local = eng == TTS_ENGINE_LOCAL
+        self.local_tts_box.setVisible(is_local)
+        self.cloud_tts_box.setVisible(not is_local)
+
+    def _ai_apply_tts_preset(self, idx):
+        """云端 TTS 预设选中 → 填充 地址/模型/音色 到表单并保存"""
+        try:
+            from ai_chat import _save_tts_cfg
+        except Exception:
+            return
+        pre = self.cmb_tts_preset.itemData(idx)
+        if not pre:
+            return
+        self.lbl_tts_preset_desc.setText(pre.get('note', pre.get('desc', '')))
+        # 填充表单（不触发重复保存）
+        for w, k in ((self.ed_tts_api_base, 'base'), (self.ed_tts_api_model, 'model'),
+                     (self.ed_tts_api_voice, 'voice')):
+            try:
+                w.blockSignals(True)
+                w.setText(pre.get(k, ''))
+                w.blockSignals(False)
+            except Exception:
+                pass
+        try:
+            _save_tts_cfg(api_base=pre.get('base', ''), model=pre.get('model', ''),
+                          voice=pre.get('voice', ''), preset=pre.get('name', ''))
+        except Exception:
+            pass
+
+    def _ai_apply_tts_local(self):
+        """本地引擎地址保存"""
+        try:
+            from ai_chat import _save_tts_cfg
+            _save_tts_cfg(api_base=self.ed_tts_local_base.text().strip() or 'http://127.0.0.1:8080/v1')
+        except Exception:
+            pass
+
     def _toggle_ai_page(self):
         """（兼容旧调用）跳转到 AI 对话页并刷新"""
         idx = self._nav_items.index("🤖 AI 对话")
@@ -2442,12 +2613,21 @@ class SettingsPanel(QWidget):
             self.chk_ai_tts.blockSignals(True)
             self.chk_ai_tts.setChecked(False)
             self.chk_ai_tts.blockSignals(False)
-            self._ai_status("请先开启「启用 AI 对话」，才能开启朗读", "#e06c75")
+            # 提示落到 TTS 页自身（用户可能在 TTS 页操作）
+            try:
+                self.lbl_tts_api_status.setText("⚠ 请先到「🤖 AI 对话」页开启「启用 AI 对话」")
+                self.lbl_tts_api_status.setStyleSheet("color:#e06c75; font-size:11px;")
+            except Exception:
+                pass
             return
         if pet is not None and hasattr(pet, 'ai'):
             pet.ai.set_tts_enabled(bool(on))
-        self._ai_status("朗读 AI 回复已" + ("开启" if on else "关闭"),
-                        "#7ae0a3" if on else "#7a8099")
+        try:
+            self.lbl_tts_api_status.setText("朗读 AI 回复已" + ("开启" if on else "关闭"))
+            self.lbl_tts_api_status.setStyleSheet(
+                "color:#7ae0a3; font-size:11px;" if on else "color:#7a8099; font-size:11px;")
+        except Exception:
+            pass
 
     def _ai_apply_tts_api(self):
         """保存自定义 TTS API 服务配置（含克隆三件套）"""
@@ -2469,8 +2649,8 @@ class SettingsPanel(QWidget):
         if pet is None or not hasattr(pet, 'ai'):
             return
         try:
-            from ai_chat import _save_ai_cfg
-            _save_ai_cfg(tts_model_kind=self.cmb_tts_model_kind.currentData() or 'auto')
+            from ai_chat import _save_tts_cfg
+            _save_tts_cfg(model_kind=self.cmb_tts_model_kind.currentData() or 'auto')
             self._ai_status("模型版本已保存（启动服务时按此加载）", "#8fa3c8")
         except Exception as e:
             print('apply tts kind fail:', e)

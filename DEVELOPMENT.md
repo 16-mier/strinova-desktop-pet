@@ -96,6 +96,18 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（AI/TTS 配置分离 + TTS 分本地/云端双引擎 + 云 TTS 多预设 + Live2D/3D 调研）
+- **需求（用户）**：①AI 配置和 TTS 配置分开；②备注「TTS 需要 AI 功能」；③TTS 分两部分——本地 audio.cpp / 云端；④云端写法上网查 + 设多种预设；⑤查卡拉彼丘角色 Live2D/3D 资源（想升级桌宠）
+- **配置分离**（`ai_chat.py`）：新增 `_tts_cfg()`/`_save_tts_cfg()`，TTS 配置独立存 `pet_config.json['tts']`；`_TTS_LEGACY_MAP` 让旧 `ai.tts_*` 键自动回退兼容（升级不丢设置）；所有 TTS 读写点（tts_service_url/tts_service_start/TTSWorker/tts_enabled/tts_volume/set_tts_api/tts_prompt/_speak_text）改读 tts 段；`settings_panel.refresh_all` 相应回填
+- **TTS 双引擎**（`ai_chat.py` TTSWorker）：`tts.engine` 字段——`local`=本地 audio.cpp Breeze-TTS-2（默认 http://127.0.0.1:8080/v1，免密钥、克隆）；`cloud`=云端 OpenAI 兼容 API（需 地址/密钥/模型）
+- **云端 TTS 多预设**（`ai_chat.py` `TTS_CLOUD_PRESETS`，基于现有研究/网络调研校准）：硅基流动 CosyVoice2（推荐，国内直连/免费额度/克隆）、MiniMax speech-02、阿里 DashScope CosyVoice、OpenAI gpt-4o-mini-tts、智谱 GLM-TTS——每套含 base_url/model/voice/note；设置面板「云端预设」下拉一键填充
+- **设置面板**（`settings_panel.py`）：新增左侧「🗣 语音朗读」页；AI 页精简为纯 AI 配置 + 「语音朗读依赖 AI 对话」提示卡；TTS 页含 依赖备注 + 朗读开关（AI 关则置灰）+ 引擎下拉（本地/云端）+ 本地服务控制/地址/量化版本 + 云端预设下拉/描述 + API 表单 + 音量 + TTS 提示词。新增槽 `_ai_apply_tts_engine`/`_ai_apply_tts_preset`/`_ai_apply_tts_local`/`_tts_engine_ui_state`；`_ai_apply_tts_kind`/`set_tts_api` 改写 tts 段；`_ai_apply_tts` 提示落到 TTS 页
+- **切角色克隆参考**（`pet.py` `_apply_role_ai_profile`）：克隆参考双写 tts 段 + ai 段旧键（兼容）
+- **Live2D/3D 调研**（2 subagent，落盘 `_worldbook_drafts/live2d_3d_research.md` + `cloud_tts_research.md`）：卡拉彼丘为 UE4 原生 3D、无官方 Live2D；最快路线=模之屋/MMD 模型（星绘/米雪儿等，30-60 分钟）→转 VRM→Mate-Engine；保持 PyQt6 用 live2d-py（自带 .moc3 模型时）
+- **验证**：全量回归 9 组全绿（panel_smoke3/panel_nav 14/gui/history/session/profile/voice_groups/chatwindow/chatapp）；配置迁移兼容端到端（ai.tts_*→tts 段）✅；引擎+预设端到端（选云端→MiniMax→tts 段写对→refresh 回填）✅；真实 pet_config.json 已迁移到 tts 段
+- 涉及：`ai_chat.py`、`settings_panel.py`、`pet.py`、`panel_smoke3.py`、`_voice_probe/smoke_panel_nav.py`、数据目录 `pet_config.json`、`_worldbook_drafts/live2d_3d_research.md`（新）、`_worldbook_drafts/cloud_tts_research.md`（新）
+- git：本提交
+
 ### 2026-09-09（模型网站式聊天窗口 ChatAppWindow：独立大窗 + 角色列表 + 消息流 + 多行输入）
 - **需求（用户）**：「我需要那种和模型网站一样的聊天的UI窗口」（DeepSeek/ChatGPT 官网风格）；随后授权继续优化 UI（用户离场）
 - **新窗口 `ChatAppWindow`**（`ai_chat.py` 新类）：

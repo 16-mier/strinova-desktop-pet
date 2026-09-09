@@ -3067,6 +3067,13 @@ class PetWindow(QWidget):
                     text = f.read().strip()
                 ai['tts_api_ref'] = ref_wav
                 ai['tts_api_ref_text'] = text
+                # 新 tts 段（2026-09-09 起 TTS 配置独立存储；ai 段旧键保留兼容）
+                tts = cfg.get('tts') or {}
+                if not isinstance(tts, dict):
+                    tts = {}
+                tts['ref'] = ref_wav
+                tts['ref_text'] = text
+                cfg['tts'] = tts
                 changed = True
             # 2) 系统提示词：丰富人格提示词（assets/persona/<角色名>.txt）优先，
             #    无则用模板（assets/tts_refs/<角色名>/system_prompt.txt）
