@@ -96,6 +96,17 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（智能合成接入 AI 优化：大白话自动改朗读稿+补情绪指令）
+- **需求（用户）**：智能合成有没有走 LLM 优化？用户平常不会按官方格式写台词
+- **回答/改动**：原先没有（原文直出）；现已接入桌宠对话朗读同一套 AI 改写链路
+- **改动**（`ai_chat.py` + `settings_panel.py`）：
+  - `AiChatManager` 新增公共方法 `rewrite_for_tts_async(text, on_done)`——复用 `tts_prompt()`（默认 TTS 改写提示词）+ `AIWorker` + `parse_tts_output`，回调 `on_done(speak, emo, err)` 在主线程；无 key/失败时 speak=原文兜底
+  - 智能合成对话框新增「✨ 先用 AI 优化台词（推荐）」勾选框（默认勾选）：勾选→先 AI 改写（状态提示「AI 优化台词中…」→「✅ AI 优化完成，开始合成…」）→ 朗读稿送 TTS、情绪行作为指令（用户手填语气指令优先）；不勾选→原文直出（原行为）
+  - 文件名仍用用户输入原文（语音名语义），AI 改写稿只用于朗读
+- **验证**：py_compile ✅；端到端实测（真实 deepseek 配置）——原文「门快开了 赶紧走 别磨蹭」→ 朗读稿「门快开了……赶紧走，别磨蹭！」+ 情绪「焦急催促」✅；panel_smoke3 9 项 ✅；gui_smoke ✅
+- 涉及：`ai_chat.py`（rewrite_for_tts_async）、`settings_panel.py`（勾选框+流程）、`_voice_probe/smoke_rewrite.py`（新，端到端测试）
+- git：本提交
+
 ### 2026-09-09（音频列表文件夹分组 + ✏️智能合成 + 删除批量语音 + 项目改名）
 - **需求（用户）**：①音频列表按文件夹（如「晶源追击」）分组、智能激活；②新增智能选项——输入文字→合成音频→丢进所选文件夹；③删除之前批量生成的 144 条语音；④项目目录名改为与 GitHub 一致
 - **删除批量语音**：24 角色 × 6 条克隆语音全部删除（数据目录+源码 assets），`pet_config.json` 对应 144 条 Num 绑定清理（146→2，保留 common 2 条）——改为按需用智能合成生成

@@ -3091,6 +3091,41 @@ class AiChatManager(QObject):
             return speak, emo
         return speak, ''
 
+    def rewrite_for_tts_async(self, text, on_done):
+        """公共接口：异步用 TTS 改写提示词把任意文字优化成朗读稿（供智能合成等调用）。
+        on_done(speak, emo, err) 在主线程回调；改写失败/无 key 时 speak=原文、emo=''。"""
+        def _cb(txt, err, u):
+            speak, emo = self.parse_tts_output(txt) if txt and txt.strip() and not err else ('', '')
+            if not speak:
+                speak = text
+            try:
+                on_done(speak, emo, err)
+            except Exception:
+                pass
+        if not text:
+            try:
+                on_done('', '', '没有输入内容')
+            except Exception:
+                pass
+            return
+        cfg = self.cfg()
+        base_url = cfg.get('base_url') or DEFAULT_BASE_URL
+        api_key = cfg.get('api_key') or ''
+        model = cfg.get('model') or DEFAULT_MODEL
+        if not api_key:
+            try:
+                on_done(text, '', '')
+            except Exception:
+                pass
+            return
+        msgs = [{'role': 'system', 'content': self.tts_prompt()},
+                {'role': 'user', 'content': text}]
+        w = AIWorker(base_url, api_key, model, msgs, self)
+        w.done.connect(lambda txt, e, u: _cb(txt, e, u))
+        w.finished.connect(w.deleteLater)
+        self._keep_worker(w)
+        w.start()
+
     def _rewrite_for_tts(self, reply, seq):
         """用 TTS 系统提示词让 AI 把回答改写成朗读稿并判断情绪。"""
         cfg = self.cfg()

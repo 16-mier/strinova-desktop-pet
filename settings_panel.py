@@ -1596,6 +1596,12 @@ class SettingsPanel(QWidget):
         ed.setMaximumHeight(78)
         lay.addWidget(ed)
 
+        # AI 优化开关
+        chk_ai = QCheckBox("✨ 先用 AI 优化台词（推荐：自动补语气/改顺口/数字注音，不用按官方格式写）")
+        chk_ai.setChecked(True)
+        chk_ai.setToolTip("用桌宠的 TTS 改写提示词把文字优化成朗读稿+情绪指令再合成；不勾选则原文直出")
+        lay.addWidget(chk_ai)
+
         # 目标文件夹
         lay.addWidget(QLabel("存入文件夹："))
         cmb_dir = QComboBox()
@@ -1655,18 +1661,14 @@ class SettingsPanel(QWidget):
         def _finish(ok, msg, path=None):
             QTimer.singleShot(0, lambda: _finish_ui(ok, msg, path))
 
-        def _synth():
+        def _synth(speak, instr):
+            """后台合成：speak=最终朗读文本，instr=最终语气指令"""
             text = ed.toPlainText().strip()
-            if not text:
+            if not speak:
                 _finish(False, "请输入台词文字")
                 return
             target_dir = cmb_dir.currentData()
-            instr = ed_instr.text().strip()
-            if not instr:
-                instr = (cfg.get('tts_api_instruction') or '').strip()
-            if not instr:
-                instr = getattr(pet.ai, '_instruction', '') or ''
-            # 文件名 = 台词（清理非法字符 + 截断 25 字；重名自动加序号）
+            # 文件名 = 用户输入原文（语音名语义；AI 改写稿只用于朗读）
             fname = _re.sub(r'[\\/:*?"<>|\r\n]+', ' ', text).strip()[:25] or '语音'
             mp3 = os.path.join(target_dir, fname + '.mp3')
             n = 2
@@ -1676,7 +1678,7 @@ class SettingsPanel(QWidget):
             try:
                 os.makedirs(target_dir, exist_ok=True)
                 wav_tmp = mp3[:-4] + '.tmp.wav'
-                ai_mod._api_speech_synth(base, key, model, text, '', wav_tmp,
+                ai_mod._api_speech_synth(base, key, model, speak, '', wav_tmp,
                                          timeout=120, ref_audio=ref,
                                          ref_text=ref_text, instruction=instr)
                 _sp.run(['ffmpeg', '-y', '-i', wav_tmp, '-ac', '1', '-ar', '24000',
@@ -1698,11 +1700,10 @@ class SettingsPanel(QWidget):
             except Exception:
                 return False
 
-        def _run():
-            btn_ok.setEnabled(False)
-            btn_cancel.setEnabled(False)
+        def _go(speak, instr):
+            """服务就绪后开始合成；未就绪自动拉起本地服务"""
             if _service_online():
-                threading.Thread(target=_synth, daemon=True).start()
+                threading.Thread(target=lambda: _synth(speak, instr), daemon=True).start()
                 return
             # 服务未启动：本地地址自动拉起，远程地址提示
             is_local = '127.0.0.1' in base or 'localhost' in base
@@ -1722,10 +1723,45 @@ class SettingsPanel(QWidget):
                     if _service_online():
                         QTimer.singleShot(0, lambda: (
                             lbl_status.setText("服务已就绪，开始合成…"),
-                            threading.Thread(target=_synth, daemon=True).start()))
+                            threading.Thread(target=lambda: _synth(speak, instr), daemon=True).start()))
                         return
                 QTimer.singleShot(0, lambda: _finish(False, "TTS 服务启动超时，请稍后重试"))
             threading.Thread(target=_start, daemon=True).start()
+
+        def _default_instr():
+            return ((cfg.get('tts_api_instruction') or '').strip()
+                    or getattr(pet.ai, '_instruction', '') or '')
+
+        def _run():
+            btn_ok.setEnabled(False)
+            btn_cancel.setEnabled(False)
+            text = ed.toPlainText().strip()
+            if not text:
+                _finish(False, "请输入台词文字")
+                return
+            manual_instr = ed_instr.text().strip()
+            if chk_ai.isChecked():
+                # ✨ AI 优化：改朗读稿 + 自动补情绪指令（回调在主线程）
+                lbl_status.setText("✨ AI 优化台词中…（用桌宠 AI 改写，约几秒）")
+
+                def _on_rewrite(speak, emo, err):
+                    if not speak:
+                        lbl_status.setText("⚠ AI 优化无输出，改用原文合成")
+                        _go(text, manual_instr or _default_instr())
+                        return
+                    if err:
+                        lbl_status.setText("⚠ AI 优化失败（%s），改用原文合成" % err)
+                        _go(text, manual_instr or _default_instr())
+                        return
+                    instr = manual_instr or emo or _default_instr()
+                    if speak != text:
+                        lbl_status.setText("✅ AI 优化完成，开始合成…")
+                    else:
+                        lbl_status.setText("✅ 已补情绪，开始合成…")
+                    _go(speak, instr)
+                pet.ai.rewrite_for_tts_async(text, _on_rewrite)
+            else:
+                _go(text, manual_instr or _default_instr())
 
         btn_ok.clicked.connect(_run)
         btn_cancel.clicked.connect(dlg.reject)
