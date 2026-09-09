@@ -1,4 +1,4 @@
-# dsh-desktop-pet 开发日志（DESKTOP PET DEVELOPMENT LOG）
+# strinova-desktop-pet 开发日志（DESKTOP PET DEVELOPMENT LOG）
 
 > 桌宠：**独立 Win11 桌面桌宠**（透明置顶浮窗，点按播音，角色可扩展）
 > 工程：`<repo-root>`
@@ -40,7 +40,7 @@
 ## 3. 目录结构
 
 ```
-dsh-desktop-pet/
+strinova-desktop-pet/
 ├── pet.py                   ← 主程序（PetWindow：桌宠窗口/动画/按键钩子/游戏联动/切角色）
 ├── ai_chat.py               ← AiChatManager：AI 对话 + TTS 朗读（对话条/气泡/多会话/用量/世界书/延迟显示）
 ├── settings_panel.py        ← 设置面板窗口（角色列表/模型/TTS/世界书编辑器）
@@ -95,6 +95,22 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 - **菜单按钮（2026-09-05 起）**：自绘于 `paintEvent`（与角色动画通过 `painter.save/restore` 解耦，按钮恒固定右上角）；仅 `_hovering` 时显示；点按钮不触发按压/播音（`_menu_press` 状态区分）；菜单统一 `_build_role_menu()` 构建（深色 QSS `MENU_QSS` + 角色单选勾选 + 退出）
 
 ## 6. 变更记录
+
+### 2026-09-09（音频列表文件夹分组 + ✏️智能合成 + 删除批量语音 + 项目改名）
+- **需求（用户）**：①音频列表按文件夹（如「晶源追击」）分组、智能激活；②新增智能选项——输入文字→合成音频→丢进所选文件夹；③删除之前批量生成的 144 条语音；④项目目录名改为与 GitHub 一致
+- **删除批量语音**：24 角色 × 6 条克隆语音全部删除（数据目录+源码 assets），`pet_config.json` 对应 144 条 Num 绑定清理（146→2，保留 common 2 条）——改为按需用智能合成生成
+- **音频列表文件夹分组**（`pet.py`）：
+  - 新增 `QUICK_VOICE_DIR='晶源追击'`；新增 `list_role_audio_grouped(role)`——按角色目录子文件夹分组（只扫一层子目录+顶层），组顺序=晶源追击最前、其余按名、顶层最后，**空文件夹保留占位**（提示「暂无语音，可用智能合成生成」）；`list_role_audio` 改为拍平（内部复用，返回结构不变）
+  - `_audio_key` 改为基于 role_root 的相对路径（含子文件夹：`乌尔比诺/星绘/晶源追击/xx.mp3`）；`_hotkey_slot_audio` 前缀匹配 `rsplit` 改 `startswith(prefix + '/')`（支持子目录绑定）；`_custom_hotkey_audio` 双候选兜底（role_dir→role_root，多形象兼容）
+  - `settings_panel._refresh_audio_list` 分组渲染：文件夹标题灰色加粗不可点（同阵营标题样式），空组显示占位提示
+- **✏️ 智能合成**（`settings_panel.py` 新按钮 + `_open_synth_dialog`）：
+  - 按钮在「语音音频」区：输入台词文字（文件名=文字，自动清理非法字符/截断25字/重名加序号）→ 目标文件夹下拉（当前角色 / 当前角色·晶源追击 / 通用语音）→ 可选语气指令 → 用当前角色克隆参考（ai 配置 tts_api_ref/ref_text）合成 → wav 转 24k mp3 → 存入所选文件夹 → 自动刷新列表 + 试听
+  - 智能：服务未启动自动检测；本地地址自动拉起 `tts_service_start`（轮询 /models 就绪，最多 90 秒）后自动继续合成；远程地址失败直接提示
+  - 后台线程合成 + QTimer 回主线程更新 UI（防 Qt 跨线程崩溃）；对话框关闭后回调安全忽略
+- **项目改名**：目录 `dsh-desktop-pet` → `strinova-desktop-pet`（对齐 GitHub origin）；DEVELOPMENT.md 标题/目录树、`_voice_probe/gen_quick_voices.py` 的 SRC_CHARS 同步更新；git remote 不变
+- **验证**：py_compile ✅；panel_smoke3 9 项 ✅；gui_smoke ✅；新冒烟 `_voice_probe/smoke_voice_groups.py` 7/7（分组顺序/空组保留/音频键含子目录/前缀匹配/播放路径解析）✅
+- 涉及：`pet.py`、`settings_panel.py`、`assets/characters/`（删除 144）、数据目录 `pet_config.json`、`_voice_probe/smoke_voice_groups.py`（新）、`DEVELOPMENT.md`
+- git：本提交
 
 ### 2026-09-09（晶源追击快捷语音：24 角色克隆语音 + 小键盘 1-6 绑定）
 - **需求（用户）**：用语音克隆（BreezeTTS）生成「晶源追击」模式战术语音，女角色情绪多一点、男角色（白墨/令/信）严肃点；语音移到每个角色的快捷语音并绑定快捷键 123456

@@ -451,6 +451,9 @@ AUDIO_EXTS = (
 # 支持的角色形象图扩展名（QMovie/QPixmap 可显示的；动图用 .gif/.webp）
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.avif')
 
+# 快捷语音文件夹名（晶源追击战术语音；音频列表按文件夹分组时排最前）
+QUICK_VOICE_DIR = '晶源追击'
+
 # 音频文件名 → 友好显示名
 AUDIO_LABEL = {
     'morning': '早上好',
@@ -516,23 +519,68 @@ def pick_click_voice(d, role=None):
     return os.path.join(d, best) if best else None
 
 
-def list_role_audio(role):
-    """列出角色语音（角色根目录下所有音频）→ [(显示名, 绝对路径)]。
-    多形象时语音共用角色根（形象目录只放图）。"""
-    # 先找角色根（去掉形象段）；若角色根不存在（平铺单角色）则回退 role_dir
+def list_role_audio_grouped(role):
+    """列出角色语音，按子文件夹分组（只扫一层子目录 + 角色根顶层）：
+    返回 [{'group': 文件夹名或'', 'items': [(显示名, 绝对路径)]}]
+    组顺序：快捷语音文件夹「晶源追击」最前，其余子文件夹按名，顶层最后；
+    空文件夹也保留（占位显示，供智能合成落位）。"""
     candidates = [role_root(role), role_dir(role)]
+    dirs = []
     seen = set()
-    out = []
     for d in candidates:
         if d in seen:
             continue
         seen.add(d)
         if os.path.isdir(d):
+            dirs.append(d)
+
+    groups = {}   # group 名(''=顶层) -> items
+    order = []    # 组出现顺序（顶层最后）
+
+    def scan_dir(d, group):
+        items = groups.setdefault(group, [])
+        if os.path.isdir(d):
             for f in sorted(os.listdir(d)):
                 full = os.path.join(d, f)
                 if os.path.isfile(full) and f.lower().endswith(AUDIO_EXTS):
                     name = os.path.splitext(f)[0]
-                    out.append((friendly_audio_name(name), full))
+                    items.append((friendly_audio_name(name), full))
+
+    for d in dirs:
+        # 子文件夹（一层）
+        subs = []
+        try:
+            subs = [s for s in sorted(os.listdir(d))
+                    if os.path.isdir(os.path.join(d, s))]
+        except Exception:
+            pass
+        for s in subs:
+            if s not in order:
+                order.append(s)
+            scan_dir(os.path.join(d, s), s)
+        # 顶层放最后
+        if '' not in order:
+            order.append('')
+        scan_dir(d, '')
+
+    # 快捷语音文件夹最前，其余按名，顶层最后
+    def _gkey(g):
+        if g == QUICK_VOICE_DIR:
+            return (0, g)
+        if g == '':
+            return (2, '')
+        return (1, g)
+
+    order.sort(key=_gkey)
+    return [{'group': g, 'items': groups[g]} for g in order]
+
+
+def list_role_audio(role):
+    """列出角色语音（平铺）→ [(显示名, 绝对路径)]。
+    多形象时语音共用角色根（形象目录只放图）。"""
+    out = []
+    for grp in list_role_audio_grouped(role):
+        out.extend(grp['items'])
     return out
 
 
@@ -1855,7 +1903,7 @@ class PetWindow(QWidget):
         else:
             prefix = self.role
         for k, v in self._audio_hotkeys.items():
-            if v == key_name and k.rsplit('/', 1)[0] == prefix:
+            if v == key_name and k.startswith(prefix + '/'):
                 audio_key = k
                 break
         if audio_key:
@@ -1880,6 +1928,11 @@ class PetWindow(QWidget):
             path = os.path.join(common_voice_dir(), fname)
         else:
             path = os.path.join(role_dir(role_name), fname)
+            # 多形象角色：语音统一放角色根，形象目录没有 → 回退角色根再拼
+            if not os.path.exists(path):
+                alt = os.path.join(role_root(role_name), fname)
+                if os.path.exists(alt):
+                    path = alt
         if os.path.exists(path):
             # 若当前角色不符且该角色存在 → 临时切角色播放? 用户期望的是"当前角色"的按键
             # 简化为：直接播放该文件（跨角色也可）
@@ -2611,9 +2664,15 @@ class PetWindow(QWidget):
         return menu
 
     def _audio_key(self, role, path):
-        """音频唯一 key：角色名/文件名（跨角色稳定）"""
-        fname = os.path.basename(path)
-        return "%s/%s" % (role, fname)
+        """音频唯一 key：角色名/相对角色根的路径（含子文件夹，跨角色稳定）"""
+        base = role_root(role)
+        try:
+            rel = os.path.relpath(path, base)
+            if not rel.startswith('..') and not os.path.isabs(rel):
+                return "%s/%s" % (role, rel.replace('\\', '/'))
+        except Exception:
+            pass
+        return "%s/%s" % (role, os.path.basename(path))
 
     def _audio_key_for_path(self, path):
         """按路径自动生成音频 key：通用语音目录内 → __common__/文件名；

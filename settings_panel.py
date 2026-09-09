@@ -992,6 +992,10 @@ class SettingsPanel(QWidget):
         btn_play = QPushButton("▶ 试听")
         btn_play.clicked.connect(self._preview_selected_audio)
         arow.addWidget(btn_play)
+        btn_synth = QPushButton("✏️ 智能合成…")
+        btn_synth.setToolTip("输入台词文字 → 用当前角色音色合成语音 → 自动存进所选文件夹")
+        btn_synth.clicked.connect(self._open_synth_dialog)
+        arow.addWidget(btn_synth)
         # 绑定快捷键模式按钮（点它才进入录制，避免误绑）
         self.btn_bind = QPushButton("🔑 绑定/修改快捷键")
         self.btn_bind.setCheckable(True)
@@ -1490,14 +1494,9 @@ class SettingsPanel(QWidget):
             self.cmb_voice_src.blockSignals(False)
         self.audio_list.blockSignals(True)
         self.audio_list.clear()
-        audios = []
-        # 跟随语音来源：通用 or 角色
-        if hasattr(pet, 'current_audio_list'):
-            audios = pet.current_audio_list() or []
-        elif mod is not None and hasattr(mod, 'list_role_audio'):
-            audios = mod.list_role_audio(pet.role) or []
         hotkeys = getattr(pet, '_audio_hotkeys', {}) or {}
-        for label, path in audios:
+
+        def add_item(label, path):
             akey = pet._audio_key_for_path(path) if hasattr(pet, '_audio_key_for_path') \
                 else pet._audio_key(pet.role, path)
             bound = hotkeys.get(akey, '')
@@ -1516,7 +1515,222 @@ class SettingsPanel(QWidget):
             if bound:
                 item.setForeground(QColor('#ffd76e'))
             self.audio_list.addItem(item)
+
+        def add_title(text):
+            """文件夹分组标题：灰色、不可交互（同角色阵营标题样式）"""
+            it = QListWidgetItem(text)
+            it.setFlags(Qt.ItemFlag.NoItemFlags)          # 不可选不可点
+            it.setForeground(QColor('#8fa3c8'))
+            f = it.font(); f.setBold(True); f.setPointSize(f.pointSize() + 1)
+            it.setFont(f)
+            it.setData(Qt.ItemDataRole.UserRole, None)     # 非音频项
+            self.audio_list.addItem(it)
+
+        if cur_src == 'role' and mod is not None and hasattr(mod, 'list_role_audio_grouped'):
+            # 角色语音：按文件夹分组显示（「晶源追击」等）
+            for grp in mod.list_role_audio_grouped(pet.role):
+                gname = grp.get('group') or ''
+                items = grp.get('items') or []
+                if gname:
+                    add_title('— %s —' % gname)
+                if not items:
+                    it = QListWidgetItem("（暂无语音，可用「✏️ 智能合成」生成）")
+                    it.setFlags(Qt.ItemFlag.NoItemFlags)
+                    it.setForeground(QColor('#7a8099'))
+                    self.audio_list.addItem(it)
+                    continue
+                for label, path in items:
+                    add_item(label, path)
+        else:
+            # 通用语音：平铺
+            audios = []
+            if hasattr(pet, 'current_audio_list'):
+                audios = pet.current_audio_list() or []
+            elif mod is not None and hasattr(mod, 'list_role_audio'):
+                audios = mod.list_role_audio(pet.role) or []
+            for label, path in audios:
+                add_item(label, path)
         self.audio_list.blockSignals(False)
+
+    def _open_synth_dialog(self):
+        """✏️ 智能合成：输入台词文字 → 用当前角色音色克隆合成 → 存入选定文件夹"""
+        import re as _re
+        import subprocess as _sp
+        import urllib.request as _urlreq
+        from urllib.error import HTTPError as _HTTPError
+        pet = self._current_pet()
+        if pet is None or not hasattr(pet, 'ai'):
+            return
+        ai_mod = sys.modules.get('ai_chat')
+        if ai_mod is None:
+            return
+        cfg = pet.ai.cfg() or {}
+        base = (cfg.get('tts_api_base') or '').strip() or 'http://127.0.0.1:8080/v1'
+        model = (cfg.get('tts_api_model') or '').strip() or 'breeze-tts-clone'
+        key = (cfg.get('tts_api_key') or '').strip()
+        ref = (cfg.get('tts_api_ref') or '').strip()
+        ref_text = (cfg.get('tts_api_ref_text') or '').strip()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("✏️ 智能合成语音")
+        dlg.setMinimumWidth(430)
+        lay = QVBoxLayout(dlg)
+
+        # 音色提示
+        try:
+            cur_role = pet_mod.role_display(pet.role)
+        except Exception:
+            cur_role = pet.role
+        if ref:
+            tip = QLabel("音色：当前角色「%s」克隆参考\n%s" % (cur_role, os.path.basename(ref)))
+        else:
+            tip = QLabel("⚠ 当前角色没有克隆参考音色，将使用服务默认音色")
+            tip.setStyleSheet("color:#e0a35c;")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+
+        # 台词输入
+        lay.addWidget(QLabel("台词文字（合成后文件名 = 这段文字）："))
+        ed = QPlainTextEdit()
+        ed.setPlaceholderText("例如：门快开了，赶紧走")
+        ed.setMaximumHeight(78)
+        lay.addWidget(ed)
+
+        # 目标文件夹
+        lay.addWidget(QLabel("存入文件夹："))
+        cmb_dir = QComboBox()
+        try:
+            rroot = pet_mod.role_root(pet.role)
+        except Exception:
+            rroot = os.path.join(pet.base_dir(), 'assets', 'characters',
+                                pet.role.replace('/', os.sep))
+        quick_dir = os.path.join(rroot, getattr(pet_mod, 'QUICK_VOICE_DIR', '晶源追击'))
+        try:
+            common_dir = pet_mod.common_voice_dir()
+        except Exception:
+            common_dir = os.path.join(pet.base_dir(), 'assets', 'common_voice')
+        cmb_dir.addItem("当前角色", rroot)
+        cmb_dir.addItem("当前角色 · 晶源追击（快捷语音）", quick_dir)
+        cmb_dir.addItem("通用语音（所有角色共用）", common_dir)
+        lay.addWidget(cmb_dir)
+
+        # 语气指令（可选）
+        lay.addWidget(QLabel("语气指令（可选，如：像指挥官下达命令，冷静果断）："))
+        ed_instr = QLineEdit()
+        ed_instr.setPlaceholderText("留空用当前默认指令")
+        lay.addWidget(ed_instr)
+
+        lbl_status = QLabel("")
+        lbl_status.setStyleSheet("color:#8fa3c8; font-size:11px;")
+        lbl_status.setWordWrap(True)
+        lay.addWidget(lbl_status)
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton("合成并存入")
+        btn_cancel = QPushButton("取消")
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        lay.addLayout(btn_row)
+
+        closed = {'done': False}
+
+        def _finish_ui(ok, msg, path=None):
+            if closed['done'] or not dlg.isVisible():
+                return
+            btn_ok.setEnabled(True)
+            btn_cancel.setEnabled(True)
+            if ok and path:
+                lbl_status.setText("✅ 已生成并存入：%s（正在试听）" % os.path.basename(path))
+                lbl_status.setStyleSheet("color:#98c379; font-size:11px;")
+                try:
+                    pet.ai.play_audio_file(path)
+                except Exception:
+                    pass
+                self._refresh_audio_list()
+            else:
+                lbl_status.setText("❌ %s" % msg)
+                lbl_status.setStyleSheet("color:#e06c75; font-size:11px;")
+
+        def _finish(ok, msg, path=None):
+            QTimer.singleShot(0, lambda: _finish_ui(ok, msg, path))
+
+        def _synth():
+            text = ed.toPlainText().strip()
+            if not text:
+                _finish(False, "请输入台词文字")
+                return
+            target_dir = cmb_dir.currentData()
+            instr = ed_instr.text().strip()
+            if not instr:
+                instr = (cfg.get('tts_api_instruction') or '').strip()
+            if not instr:
+                instr = getattr(pet.ai, '_instruction', '') or ''
+            # 文件名 = 台词（清理非法字符 + 截断 25 字；重名自动加序号）
+            fname = _re.sub(r'[\\/:*?"<>|\r\n]+', ' ', text).strip()[:25] or '语音'
+            mp3 = os.path.join(target_dir, fname + '.mp3')
+            n = 2
+            while os.path.exists(mp3):
+                mp3 = os.path.join(target_dir, '%s(%d).mp3' % (fname, n))
+                n += 1
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+                wav_tmp = mp3[:-4] + '.tmp.wav'
+                ai_mod._api_speech_synth(base, key, model, text, '', wav_tmp,
+                                         timeout=120, ref_audio=ref,
+                                         ref_text=ref_text, instruction=instr)
+                _sp.run(['ffmpeg', '-y', '-i', wav_tmp, '-ac', '1', '-ar', '24000',
+                         '-b:a', '96k', mp3], capture_output=True, timeout=60, check=True)
+                try:
+                    os.remove(wav_tmp)
+                except Exception:
+                    pass
+                _finish(True, '', mp3)
+            except Exception as e:
+                _finish(False, '%s' % e)
+
+        def _service_online():
+            try:
+                with _urlreq.urlopen(base.rstrip('/') + '/models', timeout=4) as r:
+                    return True
+            except _HTTPError:
+                return True   # 有响应（401/404 等）→ 服务在线
+            except Exception:
+                return False
+
+        def _run():
+            btn_ok.setEnabled(False)
+            btn_cancel.setEnabled(False)
+            if _service_online():
+                threading.Thread(target=_synth, daemon=True).start()
+                return
+            # 服务未启动：本地地址自动拉起，远程地址提示
+            is_local = '127.0.0.1' in base or 'localhost' in base
+            if not is_local:
+                _finish(False, "语音服务连不上（%s），请先确认服务地址正确并已启动" % base)
+                return
+            lbl_status.setText("本地 TTS 服务未启动，正在自动启动（模型加载约 20-60 秒）…")
+
+            def _start():
+                try:
+                    ai_mod.tts_service_start()
+                except Exception:
+                    pass
+                for _ in range(90):
+                    import time
+                    time.sleep(2)
+                    if _service_online():
+                        QTimer.singleShot(0, lambda: (
+                            lbl_status.setText("服务已就绪，开始合成…"),
+                            threading.Thread(target=_synth, daemon=True).start()))
+                        return
+                QTimer.singleShot(0, lambda: _finish(False, "TTS 服务启动超时，请稍后重试"))
+            threading.Thread(target=_start, daemon=True).start()
+
+        btn_ok.clicked.connect(_run)
+        btn_cancel.clicked.connect(dlg.reject)
+        dlg.finished.connect(lambda *a: closed.__setitem__('done', True))
+        dlg.exec()
 
     def _on_voice_src_changed(self, idx):
         """切换语音来源（角色专属 ↔ 通用语音）"""

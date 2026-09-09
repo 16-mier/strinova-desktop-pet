@@ -16,7 +16,7 @@ MODEL = 'breeze-tts-clone'
 REFS_DIR = r'C:\Users\mier\Desktop\deepseek work\breeze-tts-local\audio-cpp\references\refs_en'
 
 DATA_CHARS = r'C:\Users\mier\Desktop\卡丘简易桌宠数据\assets\characters'
-SRC_CHARS = r'C:\Users\mier\Desktop\deepseek work\dsh-desktop-pet\assets\characters'
+SRC_CHARS = r'C:\Users\mier\Desktop\deepseek work\strinova-desktop-pet\assets\characters'
 
 # 角色中文名 → 参考音频英文名（与 pet.py ROLE_EN_NAMES 一致）
 ROLE_EN = {
