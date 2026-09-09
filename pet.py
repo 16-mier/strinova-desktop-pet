@@ -2567,7 +2567,13 @@ class PetWindow(QWidget):
         menu = QMenu(parent)
         menu.setStyleSheet(MENU_QSS)
 
-        # ① 切换角色：点击后 _open_switch_submenu 在其右侧弹出角色子菜单
+        # ① 打开设置（导航式设置面板，最高频入口）
+        act_settings = QAction("⚙ 打开设置…", menu)
+        act_settings.triggered.connect(lambda: self.open_settings_panel())
+        menu.addAction(act_settings)
+        menu.addSeparator()
+
+        # ② 切换角色：点击后 _open_switch_submenu 在其右侧弹出角色子菜单
         #   （PyQt6/Qt6 无 QAction.setPopupMode；且模态 exec 内不能再 exec，
         #    故角色列表用非模态 popup 方式"向右展开"，行为=点一下右扩）
         self._switch_submenu = QMenu(menu)   # 存引用防 GC
@@ -2577,7 +2583,7 @@ class PetWindow(QWidget):
         act_switch.setMenu(self._switch_submenu)   # 关联子菜单 → 原生"指向即开"
         menu.addAction(act_switch)
 
-        # ①-AI 用量子菜单（仅展示累计用量/详情；对话条已改悬停自动弹出）
+        # ③ AI 用量子菜单（仅展示累计用量/详情；对话条已改悬停自动弹出）
         act_ai = QAction("AI 用量", menu)
         act_ai.setMenu(self._build_ai_menu(menu))
         menu.addAction(act_ai)
@@ -2636,20 +2642,39 @@ class PetWindow(QWidget):
         act_voice_src.setMenu(self._build_voice_source_submenu())
         menu.addAction(act_voice_src)
 
-        # ② 当前语音来源全部音频（点一下=绑定快捷键；右侧显示已绑键；♫=试听）
-        audios = self.current_audio_list()
-        if audios:
-            for label, path in audios:
-                akey = self._audio_key_for_path(path)
-                bound = self._audio_hotkeys.get(akey, '')
-                txt = "♪ " + label
-                if bound:
-                    txt += "   [" + bound + "]"
-                act = QAction(txt, menu)
-                act.setToolTip("点击设置快捷键（再按任意键）；Esc 取消")
-                act.triggered.connect(
-                    lambda checked, ak=akey: self._on_audio_item_click(ak))
-                menu.addAction(act)
+        # ② 当前语音来源全部音频（点一下=绑定快捷键；右侧显示已绑键；♪=试听）
+        #    角色来源按文件夹分组显示（晶源追击排最前，与设置面板一致）
+        groups = []
+        if self._voice_source == 'common':
+            audios = list_common_audio()
+            if audios:
+                groups = [{'group': '', 'items': audios}]
+        else:
+            groups = list_role_audio_grouped(self.role)
+        if groups:
+            for grp in groups:
+                gname = grp.get('group') or ''
+                items = grp.get('items') or []
+                if gname:
+                    t = QAction("— %s —" % gname, menu)
+                    t.setEnabled(False)
+                    menu.addAction(t)
+                if not items:
+                    na = QAction("（暂无语音）", menu)
+                    na.setEnabled(False)
+                    menu.addAction(na)
+                    continue
+                for label, path in items:
+                    akey = self._audio_key_for_path(path)
+                    bound = self._audio_hotkeys.get(akey, '')
+                    txt = "♪ " + label
+                    if bound:
+                        txt += "   [" + bound + "]"
+                    act = QAction(txt, menu)
+                    act.setToolTip("点击设置快捷键（再按任意键）；Esc 取消")
+                    act.triggered.connect(
+                        lambda checked, ak=akey: self._on_audio_item_click(ak))
+                    menu.addAction(act)
         else:
             na = QAction("（无音频）", menu)
             na.setEnabled(False)

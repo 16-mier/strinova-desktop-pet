@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QGroupBox, QScrollArea, QFrame, QCheckBox,
     QComboBox, QLineEdit, QSizePolicy, QSlider, QSpinBox, QPlainTextEdit,
-    QDialog,
+    QDialog, QStackedWidget,
 )
 
 # 无边框窗口缩放：WM_NCHITTEST 命中测试常量（仅 Windows 生效）
@@ -510,14 +510,14 @@ class SettingsPanel(QWidget):
             | Qt.WindowType.FramelessWindowHint
         )
         self.setWindowTitle("卡丘简易桌宠 · 设置")
-        self.setMinimumSize(520, 560)
+        self.setMinimumSize(700, 560)
         # 默认开大些：不超过屏幕可用区（留 60px 边距），之后可拖边缘继续放大
         scr = QApplication.primaryScreen().availableGeometry() if QApplication.primaryScreen() else None
         if scr is not None:
-            w = max(520, min(720, scr.width() - 60))
-            h = max(560, min(860, scr.height() - 60))
+            w = max(700, min(820, scr.width() - 60))
+            h = max(620, min(820, scr.height() - 60))
         else:
-            w, h = 720, 860
+            w, h = 820, 820
         self.resize(w, h)
         self.setMouseTracking(True)  # 边缘悬停 → 更新缩放光标
         self.setAcceptDrops(True)    # 支持把音频/图片/文件夹拖入面板导入
@@ -626,32 +626,53 @@ class SettingsPanel(QWidget):
         title_row.addWidget(btn_close)
         root.addLayout(title_row)
 
-        # 滚动区容纳各模块
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        body = QWidget()
-        body.setStyleSheet("background:transparent;")
-        bl = QVBoxLayout(body)
-        bl.setContentsMargins(2, 2, 6, 2)
-        bl.setSpacing(10)
-        scroll.setWidget(body)
-        root.addWidget(scroll, 1)
+        # 中部：左侧导航 + 右侧页面
+        mid = QHBoxLayout()
+        mid.setSpacing(10)
+        self.nav = NoWheelList()
+        self.nav.setFixedWidth(168)
+        self.nav.setStyleSheet(
+            "QListWidget{background:#1c1f28; border:1px solid #33374a; border-radius:10px; padding:6px;}"
+            "QListWidget::item{color:#aab4d4; padding:10px 12px; border-radius:8px; font-size:14px;}"
+            "QListWidget::item:hover{background:rgba(255,255,255,20);}"
+            "QListWidget::item:selected{background:#3d4f85; color:#ffffff; font-weight:bold;}")
+        self._nav_items = [
+            "🤖 AI 对话",
+            "👤 形象角色",
+            "🎵 语音音频",
+            "🎧 播放设备",
+            "⌨ 快捷键 / 开麦",
+            "🎮 游戏设置",
+        ]
+        for it in self._nav_items:
+            self.nav.addItem(it)
+        self.stack = QStackedWidget()
+        mid.addWidget(self.nav)
+        mid.addWidget(self.stack, 1)
+        root.addLayout(mid, 1)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
 
-        # ---- 模块0：AI（置顶入口，点开为 AI 配置页）----
-        self.ai_expanded = False      # AI 配置区是否展开
-        self.btn_ai_head = QPushButton("🤖 AI")
-        self.btn_ai_head.setCheckable(True)
-        self.btn_ai_head.setStyleSheet(
-            "QPushButton{background:#2f3b66; border:1px solid #4a5a96; border-radius:10px;"
-            " padding:10px 14px; font-size:15px; font-weight:bold; color:#cfe0ff; text-align:left;}"
-            "QPushButton:hover{background:#3a4a7a;}"
-            "QPushButton:checked{background:#3d4f85; border-color:#6b7fd0;}")
-        self.btn_ai_head.clicked.connect(self._toggle_ai_page)
-        bl.addWidget(self.btn_ai_head)
+        def make_page():
+            """每页一个独立滚动区（内容超高时页内滚动，不再整窗长滚）"""
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            sc.setStyleSheet("QScrollArea{background:transparent; border:none;}")
+            w = QWidget()
+            w.setStyleSheet("background:transparent;")
+            l = QVBoxLayout(w)
+            l.setContentsMargins(2, 2, 6, 2)
+            l.setSpacing(10)
+            sc.setWidget(w)
+            self.stack.addWidget(sc)
+            return l
 
-        # AI 配置容器（默认收起；点「AI」展开）
-        self.ai_box = QWidget()
-        self.ai_box.setStyleSheet("background:#22252f; border:1px solid #33374a; border-radius:10px;")
+        # ---- 模块0：AI（独立页面，常驻显示）----
+        page_ai = make_page()
+        self.ai_box = QGroupBox("🤖 AI 对话")
+        self.ai_box.setStyleSheet(
+            "QGroupBox{background:#22252f; border:1px solid #33374a; border-radius:10px;"
+            " margin-top:16px; padding-top:4px; font-weight:bold; color:#cfe0ff;}"
+            "QGroupBox::title{subcontrol-origin:margin; left:12px; top:6px;}")
         ail = QVBoxLayout(self.ai_box)
         ail.setContentsMargins(12, 10, 12, 10)
         ail.setSpacing(8)
@@ -904,11 +925,10 @@ class SettingsPanel(QWidget):
         tip5 = QLabel("朗读的文本会先由 AI 按 TTS 提示词改写（支持 [笑][叹气] 等情绪标记），再交给上方语音服务合成；「情绪」行会作为语音服务的语气指令。")
         tip5.setStyleSheet("color:#7a8099; font-size:11px;")
         ail.addWidget(tip5)
-        bl.addWidget(self.ai_box)
-        self.ai_box.setVisible(False)
-        # 在布局中把 AI 区块保持在最前（已最先 addWidget）
+        page_ai.addWidget(self.ai_box)
 
         # ---- 模块1：当前角色 + 角色管理 ----
+        page_role = make_page()
         gb_role = QGroupBox("形象角色")
         rl = QVBoxLayout(gb_role)
         cur_row = QHBoxLayout()
@@ -963,9 +983,10 @@ class SettingsPanel(QWidget):
         tip = QLabel("💡 直接把 图片/角色文件夹 拖进本窗口即可添加角色，或点「导入新形象」选择图片")
         tip.setStyleSheet("color:#7a8099; font-size:11px;")
         rl.addWidget(tip)
-        bl.addWidget(gb_role)
+        page_role.addWidget(gb_role)
 
         # ---- 模块2：音频管理 ----
+        page_audio = make_page()
         gb_audio = QGroupBox("语音音频")
         al = QVBoxLayout(gb_audio)
         # 语音来源：当前角色（专属）/ 通用语音（任何角色共用）
@@ -1006,9 +1027,10 @@ class SettingsPanel(QWidget):
         self.lbl_bind_tip = QLabel("💡 选中语音后可试听/绑定快捷键（可绑 F1…或小键盘数字1-9）；每个语音来源可各绑一套，互不干扰")
         self.lbl_bind_tip.setStyleSheet("color:#7a8099; font-size:11px;")
         al.addWidget(self.lbl_bind_tip)
-        bl.addWidget(gb_audio)
+        page_audio.addWidget(gb_audio)
 
         # ---- 模块3：播放设备 ----
+        page_dev = make_page()
         gb_dev = QGroupBox("播放设备 / 队友麦克风")
         dl = QVBoxLayout(gb_dev)
         # 绑定麦克风（队友听）
@@ -1025,9 +1047,10 @@ class SettingsPanel(QWidget):
         self.cmb_self.currentIndexChanged.connect(self._on_self_changed)
         r2.addWidget(self.cmb_self, 1)
         dl.addLayout(r2)
-        bl.addWidget(gb_dev)
+        page_dev.addWidget(gb_dev)
 
         # ---- 模块4：热键 / PTT ----
+        page_hk = make_page()
         gb_hk = QGroupBox("快捷键 / 开麦")
         hl = QVBoxLayout(gb_hk)
         self.chk_hotkeys = QCheckBox("启用自定义语音快捷键（F1 等绑定键）")
@@ -1051,22 +1074,15 @@ class SettingsPanel(QWidget):
         tip3 = QLabel("小键盘1-9 默认播放当前语音来源的第1-9条音频；点音频列表可自定义按键")
         tip3.setStyleSheet("color:#7a8099; font-size:11px;")
         hl.addWidget(tip3)
-        bl.addWidget(gb_hk)
+        page_hk.addWidget(gb_hk)
 
-        # ---- 模块5：卡丘游戏设置（折叠头）----
-        self.game_expanded = True      # 卡丘游戏设置默认展开
-        self.btn_game_head = QPushButton("🎮 卡丘游戏设置")
-        self.btn_game_head.setCheckable(True)
-        self.btn_game_head.setStyleSheet(
-            "QPushButton{background:#3a3350; border:1px solid #5a4a80; border-radius:10px;"
-            " padding:10px 14px; font-size:15px; font-weight:bold; color:#e0d0ff; text-align:left;}"
-            "QPushButton:hover{background:#4a3f68;}"
-            "QPushButton:checked{background:#51437c; border-color:#7a66b8;}")
-        self.btn_game_head.clicked.connect(self._toggle_game_page)
-        bl.addWidget(self.btn_game_head)
-
-        self.game_box = QWidget()
-        self.game_box.setStyleSheet("background:#22252f; border:1px solid #33374a; border-radius:10px;")
+        # ---- 模块5：卡丘游戏设置（独立页面）----
+        page_game = make_page()
+        self.game_box = QGroupBox("🎮 卡丘游戏设置")
+        self.game_box.setStyleSheet(
+            "QGroupBox{background:#22252f; border:1px solid #33374a; border-radius:10px;"
+            " margin-top:16px; padding-top:4px; font-weight:bold; color:#e0d0ff;}"
+            "QGroupBox::title{subcontrol-origin:margin; left:12px; top:6px;}")
         gl = QVBoxLayout(self.game_box)
         gl.setContentsMargins(12, 10, 12, 10)
         gl.setSpacing(8)
@@ -1086,11 +1102,9 @@ class SettingsPanel(QWidget):
         tip_game.setWordWrap(True)
         tip_game.setStyleSheet("color:#7a8099; font-size:11px;")
         gl.addWidget(tip_game)
-        bl.addWidget(self.game_box)
-        self.game_box.setVisible(True)
-        self.btn_game_head.setChecked(True)
+        page_game.addWidget(self.game_box)
 
-        # 底部按钮
+        # 底部按钮（固定，不进滚动）
         bottom = QHBoxLayout()
         btn_refresh = QPushButton("↻ 刷新")
         btn_refresh.clicked.connect(self.refresh_all)
@@ -1107,6 +1121,8 @@ class SettingsPanel(QWidget):
         btn_quit.clicked.connect(self._quit_app)
         bottom.addWidget(btn_quit)
         root.addLayout(bottom)
+        # 默认选中第一页（AI 对话）
+        self.nav.setCurrentRow(0)
 
     # ---------------- 无边框窗口拖动（按住标题行拖）----------------
     def nativeEvent(self, eventType, message):
@@ -2281,21 +2297,17 @@ class SettingsPanel(QWidget):
         self.lbl_ai_status.setStyleSheet("color:%s; font-size:11px;" % color)
 
     def _toggle_ai_page(self):
-        """点「AI」折叠头：展开/收起 AI 配置区"""
-        self.ai_expanded = not self.ai_expanded
-        self.ai_box.setVisible(self.ai_expanded)
-        self.btn_ai_head.setChecked(self.ai_expanded)
-        if self.ai_expanded:
-            # 展开后刷新并尝试自动检测
-            self.refresh_all()
-            QTimer.singleShot(150, self._ai_auto_fetch)
+        """（兼容旧调用）跳转到 AI 对话页并刷新"""
+        idx = self._nav_items.index("🤖 AI 对话")
+        self.nav.setCurrentRow(idx)
+        self.refresh_all()
+        QTimer.singleShot(150, self._ai_auto_fetch)
 
     # ---------------- 卡丘游戏设置 ----------------
     def _toggle_game_page(self):
-        """点「卡丘游戏设置」折叠头：展开/收起"""
-        self.game_expanded = not self.game_expanded
-        self.game_box.setVisible(self.game_expanded)
-        self.btn_game_head.setChecked(self.game_expanded)
+        """（兼容旧调用）跳转到游戏设置页"""
+        idx = self._nav_items.index("🎮 游戏设置")
+        self.nav.setCurrentRow(idx)
 
     def _on_meow_toggled(self, on):
         """「回车自动补词」开关"""

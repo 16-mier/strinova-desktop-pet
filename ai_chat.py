@@ -1354,7 +1354,7 @@ class ChatHistoryWindow(QWidget):
         self.browser.setStyleSheet(
             "QTextBrowser{background:%s; border:none; color:%s;"
             " font-size:13px;}" % (self._PANEL, self._TITLE))
-        self.browser.setFixedSize(520, 440)
+        self.browser.setFixedSize(660, 520)
         root.addWidget(self.browser, 1)
 
         # 底部状态栏

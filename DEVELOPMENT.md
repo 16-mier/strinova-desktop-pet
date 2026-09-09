@@ -96,6 +96,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（UI 整体重构：设置面板导航化 + 主窗菜单分组 + 窗口统一）
+- **需求（用户）**：整个项目 UI 用着不舒服，重构（用户确认方向：设置面板导航化 + 主窗菜单简化 + 聊天/历史窗统一风格）
+- **设置面板导航化**（`settings_panel.py` `_build_ui` 重写）：
+  - 原「一个超长滚动面板」→ **左侧导航 + 右侧页**：导航 6 项（🤖 AI 对话 / 👤 形象角色 / 🎵 语音音频 / 🎧 播放设备 / ⌨ 快捷键·开麦 / 🎮 游戏设置），QStackedWidget 切页，每页独立滚动区
+  - 原 AI 区/游戏区折叠头（btn_ai_head/btn_game_head/ai_expanded/game_expanded）删除；`self.ai_box`/`self.game_box` 改为 QGroupBox（带标题）常驻各自页面
+  - `_toggle_ai_page`/`_toggle_game_page` 保留为兼容跳页（panel_smoke3 依赖）
+  - 所有控件 ID 与信号连接不变（refresh_all/_on_xxx 零改动）；窗口最小 700×560、默认 820 内
+- **主窗菜单**（`pet.py` `_build_role_menu`）：顶部新增「⚙ 打开设置…」入口；音频列表改为按文件夹分组显示（晶源追击组标题置灰 + 组内音频，与设置面板一致，common 平铺）
+- **历史窗**（`ai_chat.py`）：内容区 520×440 → 660×520（更舒适；history_smoke 无尺寸依赖）
+- **验证**：全量回归——panel_smoke3 9/9 ✅、新导航冒烟 `_voice_probe/smoke_panel_nav.py` 10/10 ✅、分组冒烟 7/7 ✅、gui_smoke ✅、history_smoke 23/23 ✅、session_smoke 16/16 ✅
+- 涉及：`settings_panel.py`（_build_ui 重写）、`pet.py`（菜单）、`ai_chat.py`（历史窗尺寸）、`_voice_probe/smoke_panel_nav.py`（新）
+- git：本提交
+
 ### 2026-09-09（智能合成接入 AI 优化：大白话自动改朗读稿+补情绪指令）
 - **需求（用户）**：智能合成有没有走 LLM 优化？用户平常不会按官方格式写台词
 - **回答/改动**：原先没有（原文直出）；现已接入桌宠对话朗读同一套 AI 改写链路
