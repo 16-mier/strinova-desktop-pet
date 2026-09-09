@@ -1,24 +1,26 @@
 # 卡拉彼丘 Live2D / 3D 桌宠调研报告（2026-09-09 · 深度版）
 
-> 目标：把卡丘桌宠从「静态 PNG/GIF」升级为 Live2D 或 3D 模型。**核心结论已实测：live2d-py 0.7.0 有 Python 3.14 的官方 wheel（`cp314-cp314-win_amd64`），可直接 `pip install live2d-py`，无需降级 Python。**
+> 目标：把卡丘桌宠从「静态 PNG/GIF」升级为 Live2D 或 3D 模型。
+> **⚠ 关键实测更正：live2d-py 在 Windows 上装得上但实际渲染会崩（见 §0），Live2D 内嵌路线暂不可用；3D（Mate-Engine）是当前最稳路线。**
 
-## 0. 环境实测结论（本次新增）
-- Python 3.14.7 + Windows 11 x64
-- **live2d-py 0.7.0 提供 `cp314-cp314-win_amd64.whl`** → 可直接安装，当前环境无 Python 版本障碍
-- pygame 2.6.1 可装（备选）
+## 0. 环境实测结论（本次现场验证）
+- Python 3.14.7 + Windows 11 x64（另有 3.12.10）
+- `pip install live2d-py` 看似成功（0.7.0.4），但 **0.7.0.4 根本没有正式 cp314-win wheel**——PyPI 只有 0.7.0 有 cp314（后续修复版 .1–.4 只给到 cp313）。pip 把 0.7.0 的 cp314 wheel 装成 0.7.0.4，二进制错配。
+- 实测结果：
+  - **0.7.0.4 on Py3.14**：`LAppModel.LoadModelJson` 一调即 **0xC0000005 访问违例**（faulthandler 定位 C++ `_v3cpp`）
+  - **0.7.0.4 on Py3.12**（独立 venv，正式 cp312 wheel）：同样崩 → 非 3.14 ABI 问题
+  - **0.6.1.1 on Py3.12**：能真正加载 Haru.moc3 + 贴图 + 表情 + 物理（Cubism Core 05.01.0000 日志完整），但崩在 `userdata3.json` 解析 → 0.6.x 的确定性 bug
+- GitHub [EasyLive2D/live2d-py Issues](https://github.com/EasyLive2D/live2d-py/issues) 有「crash in native」Open issue 佐证
+- **结论：live2d-py 0.7.x/0.6.x 在 Windows 当前不可用于生产；要 Live2D 只能等库修复，或走 Web (Cubism Web SDK)/其它语言。3D Mate-Engine 是最稳落地路线。**
 
 ---
 
 ## 一、Live2D 路线
 
-### 1.1 live2d-py 集成（PyQt6）
-- `pip install live2d-py`（0.7.0，PyPI 有 cp314 wheel）
-- 渲染：在透明桌宠窗口内放一个 `QOpenGLWidget`，加载 `.moc3` 模型每帧 draw
-- 透明关键：widget 设 `WA_TranslucentBackground` + `glClearColor(0,0,0,0)` + `setFormat(带 Alpha 的 surface format)`
-- 交互：Live2D 支持点击参数 / 拉近拉远，能复用桌宠的悬停/按压事件
+### 1.1 live2d-py 集成（PyQt6）—— ⚠ 实测不可用，暂缓
+- `pip install live2d-py` 可装，但 Windows 二进制实际运行崩（见 §0）——**勿用于生产，等库修复**
+- 理论方案（若库修复后）：在透明桌宠窗口内放一个 `QOpenGLWidget`，加载 `.moc3` 每帧 draw；透明关键 `WA_TranslucentBackground` + `glClearColor(0,0,0,0)`
 - 模型来源：Live2D 官方示例模型（Nijima/Haru）、Booth 免费品、itch.io
-
-> ⚠ 需确认：PyQt6 的 QOpenGLWidget 与旧版 Qt 的兼容细节、透明合成（Windows 上有时需 `WA_TranslucentBackground` + 像素图透传）。子代理正补全最小代码骨架。
 
 ### 1.2 卡拉彼丘角色做 Live2D 的现实性
 - 官方无 Live2D 立绘（游戏为 3D，立绘是静态插画）→ 无现成官方 .moc3
@@ -58,14 +60,14 @@
 | 方案 | 成本 | 效果 | 推荐度 |
 |---|---|---|---|
 | **Mate-Engine + 模之屋 PMX→VRM** | 免费 + ~1 小时 | ★★★★★ 待机/触摸/跳舞全齐 | ⭐ 首选 |
-| live2d-py 嵌入 PyQt6 | 免费 + 需先有 .moc3 | ★★★★ 二次元立绘能呼吸 | 二选（需模型先行）|
+| live2d-py 嵌入 PyQt6 | 免费 + 需先有 .moc3 | ★★★（库当前会崩，等修复）| ✗ 暂缓 |
 | Desktop Mate + mod | 免费本体 + DLC ¥102/个 | ★★★ | ✗ 塞不进卡拉彼丘 |
 | VPet/BandoriPet | 免费 | ★★ 2D | ✗ |
 | PyQt6 自研 3D 渲染 | 人月级 | 可控 | 仅学习 |
 
 **最短落地（今天）**：下载 Mate-Engine → 免费初音 VRM 先跑通 → 模之屋下星绘/米雪儿 PMX → Blender 转 VRM → 导入 Mate-Engine。
 
-**保持 PyQt6 的长期路线**：live2d-py（需先找到/自建卡拉彼丘 .moc3）或 PyQt 壳 + 独立 Godot/Unity 渲染进程（IPC）。
+**保持 PyQt6 的长期路线**：等 live2d-py 修复（关注官方 Issue），或 PyQt 壳 + 独立 Godot/Unity 渲染进程（IPC）；当前先上 Mate-Engine。
 
 ## 版权
 - 官方模型允许：优化骨骼刚体/UV 重制/合理服饰微调；**禁止商用、二次配布**
