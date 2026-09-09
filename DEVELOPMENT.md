@@ -96,6 +96,22 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（完整聊天窗 + 语音方案多套切换）
+- **需求（用户）**：选做两个新功能——①AI 对话升级为可滚动翻历史的完整聊天窗；②一个角色多套语音方案一键切换
+- **完整聊天窗**（`ai_chat.py` ChatWindow 升级）：
+  - 输入条新增「↕ 聊窗」按钮：展开 → 高 560 完整聊天窗（中部 QTextBrowser 富文本历史 + 底部输入条），收起 → 原 48px 单行快速提问条
+  - 展开时历史用 `_msg_html(messages)` 渲染（带角色名/时间戳/气泡样式），可滚动翻历史；AI 回复**直接进聊天窗**（不再弹气泡/蹦字），TTS 照常朗读；错误/提示同样进聊天窗
+  - 展开态发送后窗口保持（不回缩）；收起态维持原「发送后自动收起」
+  - manager 侧：`_show_bubble`/`_bubble_msg`/`_show_thinking` 在聊天窗展开时改道 append_line；`_on_tts_done` 蹦字在展开态跳过
+- **语音方案多套切换**（`pet.py` + `settings_panel.py`）：
+  - 概念：角色目录子文件夹（晶源追击/日常/…）= 一套语音方案，每套可各绑一套小键盘/自定义键；切换方案 = 小键盘只播该方案的绑定
+  - `pet.py`：新增 `_voice_profile()`/`set_voice_profile(name)`/`_profile_audio_list()`；`_hotkey_slot_audio` 按方案匹配绑定（方案=文件夹→只认 `角色/方案/` 前缀；默认→只认角色根顶层）；无绑定回退播当前方案第 num 条；主菜单「语音方案」子菜单（默认 + 各含音频子文件夹，勾选当前）
+  - `settings_panel.py`：音频页新增「语音方案」下拉（随角色/来源刷新，通用语音隐藏）；智能合成对话框目标文件夹动态列出现有子文件夹（可合成进任意方案）
+  - 配置存取：`pet_config.json` → `voice_profile`
+- **验证**：新冒烟 `_voice_probe/smoke_profile.py` 5/5（方案匹配/回退）✅、`_voice_probe/smoke_chatwindow.py` 11/11（展开/收起/历史/追加/发送行为）✅；回归 panel_smoke3 ✅、nav 10/10 ✅、voice_groups 7/7 ✅、gui_smoke ✅、history_smoke 23/23 ✅（browser 断言随新设计更新）、session_smoke 16/16 ✅
+- 涉及：`ai_chat.py`（ChatWindow 展开/append/set_content + manager 改道）、`pet.py`（方案切换/菜单）、`settings_panel.py`（方案下拉/合成对话框）、`history_smoke.py`（断言更新）、`_voice_probe/smoke_profile.py`+`smoke_chatwindow.py`（新）
+- git：本提交
+
 ### 2026-09-09（UI 整体重构：设置面板导航化 + 主窗菜单分组 + 窗口统一）
 - **需求（用户）**：整个项目 UI 用着不舒服，重构（用户确认方向：设置面板导航化 + 主窗菜单简化 + 聊天/历史窗统一风格）
 - **设置面板导航化**（`settings_panel.py` `_build_ui` 重写）：

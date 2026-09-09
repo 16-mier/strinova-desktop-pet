@@ -1460,9 +1460,10 @@ class ChatWindow(QWidget):
     sessionNewRequested = pyqtSignal()          # 新建会话
     sessionDeleteRequested = pyqtSignal(str)    # 删除会话（传会话名）
 
-    # 窗口尺寸常量：单行横条
+    # 窗口尺寸常量：单行横条；展开后变完整聊天窗
     W_USAGE = 640          # 输入条宽度
     H_USAGE = 48           # 条高
+    H_EXPANDED = 560       # 展开（完整聊天窗）高度
     H_NO_USAGE = 48
     _H_BASE = 48
 
@@ -1490,6 +1491,17 @@ class ChatWindow(QWidget):
         # 单行：查看上下文 | 输入框 + 发送
         row = QHBoxLayout()
         row.setSpacing(6)
+        # ↕ 展开/收起完整聊天窗（滚动历史 + 输入，像聊天软件；收起=单行快速提问条）
+        self.btn_expand = QPushButton("↕ 聊窗", self)
+        self.btn_expand.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_expand.setFixedWidth(56)
+        self.btn_expand.setToolTip("展开/收起完整聊天窗（可滚动翻历史）")
+        self.btn_expand.setStyleSheet(
+            "QPushButton{background:#2f3a57; border:1px solid #5a6ea8; border-radius:8px;"
+            " color:#cfe0ff; font-size:12px; font-weight:bold; padding:2px 4px;}"
+            "QPushButton:hover{background:#3d4d75;}")
+        self.btn_expand.clicked.connect(self.toggle_expand)
+        row.addWidget(self.btn_expand)
         self.btn_view_ctx = QPushButton("📖 查看上下文", self)
         self.btn_view_ctx.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_view_ctx.setFixedWidth(118)
@@ -1540,14 +1552,65 @@ class ChatWindow(QWidget):
         row.addWidget(self.btn_send)
         root.addLayout(row)
 
-        # 兼容保留（无消息流）：单行条不展示历史
-        self.browser = None
+        # 完整聊天历史区（默认隐藏；点「↕ 聊窗」展开）
+        self.browser = QTextBrowser(self)
+        self.browser.setOpenExternalLinks(False)
+        self.browser.setStyleSheet(
+            "QTextBrowser{background:rgba(18,20,28,220); border:1px solid rgba(255,255,255,26);"
+            " border-radius:8px; color:#e7eaf4; font-size:13px;}")
+        self.browser.setVisible(False)
+        root.addWidget(self.browser, 1)
+
+        # 兼容保留字段（历史由 browser 承担）
         self.btn_clear = None
         self.btn_history = None
         self.lbl_usage = None
 
+        self._expanded = False
         self.setFixedWidth(self.W_USAGE)
         self.setFixedHeight(self.H_USAGE)
+
+    # ---- 完整聊天窗（展开/收起） ----
+    def toggle_expand(self, expanded=None):
+        """展开/收起完整聊天窗；展开时刷新历史并重新定位（高度变了）"""
+        if expanded is None:
+            self._expanded = not self._expanded
+        else:
+            self._expanded = bool(expanded)
+        if self._expanded:
+            try:
+                self.browser.setHtml(_msg_html(self._pet.ai._messages, '', self._pet))
+                sb = self.browser.verticalScrollBar()
+                sb.setValue(sb.maximum())
+            except Exception:
+                pass
+            self.browser.show()
+            self.btn_expand.setText("↕ 收起")
+        else:
+            self.browser.hide()
+            self.btn_expand.setText("↕ 聊窗")
+        self.setFixedHeight(self.H_EXPANDED if self._expanded else self.H_USAGE)
+        try:
+            self.show_near(self._pet.frameGeometry())
+        except Exception:
+            pass
+
+    def is_expanded(self):
+        return bool(self._expanded)
+
+    def append_line(self, text):
+        """展开态时追加一条消息行（AI 回复/系统提示；不进气泡不蹦字）"""
+        try:
+            if not self._expanded:
+                return
+            esc = html.escape
+            self.browser.append(
+                '<div style="color:#b9c8f0; margin:3px 0;">%s</div>'
+                % esc(str(text)).replace('\n', '<br>'))
+            sb = self.browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:
+            pass
 
     # ---- 会话下拉 ----
     def set_sessions(self, names, current):
@@ -1578,9 +1641,13 @@ class ChatWindow(QWidget):
 
     # ---- 消息流展示 ----
     def set_content(self, messages, system_prompt='', ai_name='AI'):
-        """输入条无历史流：历史一律通过「📜 完整对话记录」回看，这里留空。
-        保留方法供外部调用（_sync_ui_to_current 等），仅更新会话语义。"""
-        return
+        """刷新完整聊天窗历史（展开态可见；收起态静默更新）"""
+        try:
+            self.browser.setHtml(_msg_html(messages, system_prompt, self._pet))
+            sb = self.browser.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:
+            pass
 
     # 窗口拖动（按住空白/输入框外区域）——拖动后取消自动跟随
     def mousePressEvent(self, e):
@@ -1635,6 +1702,8 @@ class ChatWindow(QWidget):
             return
         self.input.clear()
         self.sendRequested.emit(text)
+        if self._expanded:
+            return   # 展开模式：窗口保持打开，等待回复进聊天窗
         # 极简交互：发送后横线输入条自动收起，等右侧气泡回复即可
         self.hide()
 
@@ -2962,7 +3031,10 @@ class AiChatManager(QObject):
         return self._bubble
 
     def _bubble_msg(self, text):
-        """错误/提示信息：整段直接显示在透明气泡（不走逐字）"""
+        """错误/提示信息：聊天窗展开时进聊天窗；否则整段显示在透明气泡（不走逐字）"""
+        if self._chat is not None and self._chat.is_expanded():
+            self._chat.append_line(text or '')
+            return
         b = self._get_bubble()
         b._stop_type()
         b._stop_thinking()
@@ -2977,6 +3049,8 @@ class AiChatManager(QObject):
         b._lift_life()
 
     def _show_thinking(self):
+        if self._chat is not None and self._chat.is_expanded():
+            return   # 完整聊天窗模式：不弹思考气泡，等回复直接进聊天窗
         self._get_bubble().show_thinking()
 
     def _hide_thinking(self):
@@ -2984,7 +3058,10 @@ class AiChatManager(QObject):
             self._bubble._stop_thinking()
 
     def _show_bubble(self, text):
-        """AI 回复 → 逐字蹦字显示在桌宠旁"""
+        """AI 回复：聊天窗展开时直接进完整聊天窗；否则逐字蹦字显示在桌宠旁"""
+        if self._chat is not None and self._chat.is_expanded():
+            self._chat.append_line(text or '')
+            return
         self._get_bubble().show_text(text)
 
     def _on_ai_done(self, reply, err, usage=None):
@@ -3231,8 +3308,9 @@ class AiChatManager(QObject):
             except Exception:
                 pass
         # 蹦字：播放启动后等"实际出声点"再蹦（首静音跳过；QSoundEffect 起播快，
-        # start_ms 已含首静音，再加 100ms 保险）
-        if pending_text:
+        # start_ms 已含首静音，再加 100ms 保险；聊天窗展开时文本已直接进聊天窗，不再蹦）
+        chat_expanded = self._chat is not None and self._chat.is_expanded()
+        if pending_text and not chat_expanded:
             def _reveal():
                 if seq != getattr(self, '_pending_tts_seq', 0):
                     return

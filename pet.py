@@ -1889,28 +1889,65 @@ class PetWindow(QWidget):
             return list_common_audio()
         return list_role_audio(self.role)
 
+    def _voice_profile(self):
+        """当前语音方案名：角色目录子文件夹名（如「晶源追击」）；空=默认（角色根顶层）"""
+        try:
+            return str(load_config().get('voice_profile', '') or '').strip()
+        except Exception:
+            return ''
+
+    def set_voice_profile(self, name):
+        """切换语音方案（子文件夹名或''=顶层默认）。持久化 + 刷新菜单/面板"""
+        name = str(name or '').strip()
+        cfg = load_config()
+        cfg['voice_profile'] = name
+        save_config(cfg)
+        self.refresh_tray_menu()
+        self._schedule_menu_refresh()
+        if getattr(self, '_settings_panel', None) is not None:
+            self._settings_panel.refresh_all()
+            self._settings_panel._watch_current_dir()
+        print('voice_profile ->', name or '(默认)')
+
+    def _profile_audio_list(self):
+        """当前语音方案的可播音频：方案=文件夹→该文件夹组；默认→顶层组"""
+        if self._voice_source == 'common':
+            return list_common_audio()
+        profile = self._voice_profile()
+        for g in list_role_audio_grouped(self.role):
+            if g['group'] == profile:
+                return g['items']
+        return []
+
     def _hotkey_slot_audio(self, num):
         """小键盘数字按下：
-        1) 先查当前语音来源里绑定到 Num<num> 的音频（绑定跟音频走、带来源，
-           每个语音来源可各绑一套数字键，互不干扰）
-        2) 无绑定 → 回退：播当前语音来源第 num 条音频（旧习惯兼容）
+        按当前语音方案匹配绑定——方案=子文件夹（如晶源追击）只认该文件夹里的绑定；
+        默认方案只认角色根顶层绑定；无绑定 → 回退播当前方案第 num 条音频。
         """
         key_name = 'Num%d' % num
         audio_key = None
+        profile = self._voice_profile()
         # 当前来源下查绑定（角色专属 vs 通用语音分开）
         if self._voice_source == 'common':
             prefix = '__common__'
         else:
             prefix = self.role
         for k, v in self._audio_hotkeys.items():
-            if v == key_name and k.startswith(prefix + '/'):
-                audio_key = k
-                break
+            if v != key_name:
+                continue
+            if profile:
+                if k.startswith(prefix + '/' + profile + '/'):
+                    audio_key = k
+                    break
+            else:
+                if k.rsplit('/', 1)[0] == prefix:
+                    audio_key = k
+                    break
         if audio_key:
             self._custom_hotkey_audio(audio_key)
             return
-        # 回退：按位置取当前来源第 num 条
-        audios = self.current_audio_list()
+        # 回退：按位置取当前方案第 num 条
+        audios = self._profile_audio_list()
         if not audios:
             return
         idx = num - 1
@@ -1937,6 +1974,38 @@ class PetWindow(QWidget):
             # 若当前角色不符且该角色存在 → 临时切角色播放? 用户期望的是"当前角色"的按键
             # 简化为：直接播放该文件（跨角色也可）
             self.play_audio(path)
+
+    def _build_voice_profile_submenu(self):
+        """语音方案子菜单：默认（角色根顶层）+ 角色目录各子文件夹（含音频的）"""
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_QSS)
+        grp = QActionGroup(menu)
+        grp.setExclusive(True)
+        cur = self._voice_profile()
+
+        def add(text, name):
+            act = QAction(text, menu)
+            act.setCheckable(True)
+            act.setChecked(name == cur)
+            act.triggered.connect(lambda c, n=name: self.set_voice_profile(n))
+            grp.addAction(act)
+            menu.addAction(act)
+
+        add("默认（角色根）", '')
+        d = role_root(self.role)
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                fp = os.path.join(d, f)
+                if not os.path.isdir(fp):
+                    continue
+                try:
+                    has_audio = any(os.path.isfile(os.path.join(fp, x))
+                                    and x.lower().endswith(AUDIO_EXTS) for x in os.listdir(fp))
+                except Exception:
+                    has_audio = False
+                if has_audio:
+                    add("📁 %s" % f, f)
+        return menu
 
     def nativeEvent(self, eventType, message):
         """捕获 WM_HOTKEY（数字键/自定义键 → 播放对应音频）
@@ -2641,6 +2710,13 @@ class PetWindow(QWidget):
             menu)
         act_voice_src.setMenu(self._build_voice_source_submenu())
         menu.addAction(act_voice_src)
+
+        # 语音方案切换（角色专属时可用：子文件夹=一套绑定/套装，如晶源追击/日常）
+        if self._voice_source != 'common':
+            prof = self._voice_profile()
+            act_profile = QAction("语音方案：%s" % (("📁 " + prof) if prof else "默认"), menu)
+            act_profile.setMenu(self._build_voice_profile_submenu())
+            menu.addAction(act_profile)
 
         # ② 当前语音来源全部音频（点一下=绑定快捷键；右侧显示已绑键；♪=试听）
         #    角色来源按文件夹分组显示（晶源追击排最前，与设置面板一致）

@@ -998,6 +998,16 @@ class SettingsPanel(QWidget):
         self.cmb_voice_src.currentIndexChanged.connect(self._on_voice_src_changed)
         src_row.addWidget(self.cmb_voice_src, 1)
         al.addLayout(src_row)
+        # 语音方案：角色目录子文件夹=一套绑定（默认=角色根顶层）；随角色切换自动更新
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("语音方案："))
+        self.cmb_voice_profile = NoWheelComboBox()
+        self.cmb_voice_profile.setToolTip(
+            "一套语音方案 = 角色目录下的一个子文件夹（如「晶源追击」）。\n"
+            "小键盘 1-9 只播放当前方案的绑定；每套方案可各绑一套键，互不干扰。")
+        self.cmb_voice_profile.currentIndexChanged.connect(self._on_voice_profile_changed)
+        prof_row.addWidget(self.cmb_voice_profile, 1)
+        al.addLayout(prof_row)
         self.audio_list = NoWheelList()
         self.audio_list.setMinimumHeight(110)
         self.audio_list.itemClicked.connect(self._on_audio_clicked)
@@ -1512,6 +1522,36 @@ class SettingsPanel(QWidget):
         self.audio_list.clear()
         hotkeys = getattr(pet, '_audio_hotkeys', {}) or {}
 
+        # 语音方案下拉同步（角色来源列出子文件夹；通用语音隐藏）
+        try:
+            cur_prof = pet._voice_profile() if hasattr(pet, '_voice_profile') else ''
+            self.cmb_voice_profile.blockSignals(True)
+            self.cmb_voice_profile.clear()
+            self.cmb_voice_profile.addItem("默认（角色根）", '')
+            if cur_src != 'common':
+                d = pet_mod.role_root(pet.role) if hasattr(pet_mod, 'role_root') else None
+                if d and os.path.isdir(d):
+                    for f in sorted(os.listdir(d)):
+                        fp = os.path.join(d, f)
+                        if os.path.isdir(fp):
+                            try:
+                                has_audio = any(
+                                    os.path.isfile(os.path.join(fp, x))
+                                    and x.lower().endswith(pet_mod.AUDIO_EXTS)
+                                    for x in os.listdir(fp))
+                            except Exception:
+                                has_audio = False
+                            if has_audio:
+                                self.cmb_voice_profile.addItem("📁 %s" % f, f)
+                self.cmb_voice_profile.setVisible(True)
+            else:
+                self.cmb_voice_profile.setVisible(False)
+            pi = self.cmb_voice_profile.findData(cur_prof)
+            self.cmb_voice_profile.setCurrentIndex(pi if pi >= 0 else 0)
+            self.cmb_voice_profile.blockSignals(False)
+        except Exception:
+            pass
+
         def add_item(label, path):
             akey = pet._audio_key_for_path(path) if hasattr(pet, '_audio_key_for_path') \
                 else pet._audio_key(pet.role, path)
@@ -1626,17 +1666,25 @@ class SettingsPanel(QWidget):
         except Exception:
             rroot = os.path.join(pet.base_dir(), 'assets', 'characters',
                                 pet.role.replace('/', os.sep))
+        cmb_dir.addItem("当前角色", rroot)
+        # 角色目录子文件夹（每套=一个语音方案，可存入任意一套）
+        try:
+            if os.path.isdir(rroot):
+                for f in sorted(os.listdir(rroot)):
+                    fp = os.path.join(rroot, f)
+                    if os.path.isdir(fp) and f != getattr(pet_mod, 'QUICK_VOICE_DIR', ''):
+                        cmb_dir.addItem("当前角色 · 📁 %s" % f, fp)
+        except Exception:
+            pass
         quick_dir = os.path.join(rroot, getattr(pet_mod, 'QUICK_VOICE_DIR', '晶源追击'))
+        if not os.path.isdir(quick_dir):
+            cmb_dir.addItem("当前角色 · 📁 晶源追击（快捷语音）", quick_dir)
         try:
             common_dir = pet_mod.common_voice_dir()
         except Exception:
             common_dir = os.path.join(pet.base_dir(), 'assets', 'common_voice')
-        cmb_dir.addItem("当前角色", rroot)
-        cmb_dir.addItem("当前角色 · 晶源追击（快捷语音）", quick_dir)
         cmb_dir.addItem("通用语音（所有角色共用）", common_dir)
         lay.addWidget(cmb_dir)
-
-        # 语气指令（可选）
         lay.addWidget(QLabel("语气指令（可选，如：像指挥官下达命令，冷静果断）："))
         ed_instr = QLineEdit()
         ed_instr.setPlaceholderText("留空用当前默认指令")
@@ -1783,6 +1831,16 @@ class SettingsPanel(QWidget):
         btn_cancel.clicked.connect(dlg.reject)
         dlg.finished.connect(lambda *a: closed.__setitem__('done', True))
         dlg.exec()
+
+    def _on_voice_profile_changed(self, idx):
+        """切换语音方案（子文件夹或默认）：小键盘绑定跟随方案"""
+        pet = self._current_pet()
+        if pet is None:
+            return
+        name = self.cmb_voice_profile.itemData(idx) or ''
+        if hasattr(pet, 'set_voice_profile'):
+            pet.set_voice_profile(name)
+        self._refresh_audio_list()
 
     def _on_voice_src_changed(self, idx):
         """切换语音来源（角色专属 ↔ 通用语音）"""
