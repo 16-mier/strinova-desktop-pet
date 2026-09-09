@@ -96,6 +96,19 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-09（Live2D/3D 形象深度调研 + 实测环境验证 + 接入指南）
+- **需求（用户）**：去研究 live2d 和 3D 形象（把桌宠从静态图升级为动态形象）
+- **3D 路线（深度调研，4 subagent + 实测）**：
+  - 首选 **Mate-Engine**（GitHub 免费开源、Releases 下 ZIP 双击即跑、只需 .VRM 模型）：待机/拖动/摸头/跳舞/置顶/迷你模式全齐，无需 .NET
+  - 获取卡拉彼丘模型：**模之屋官方**（星绘「逆影蔷薇」/米雪儿「绮星梦使」/诺诺/千代 PMX，注册免费）、Steam 工坊白墨官方 MMD；Sketchfab yabadiba 合集实测英文名全空不可用；kfsll/44mmd 需会员非首选
+  - PMX→VRM 转换：Blender + MMD Tools（导 PMX）+ VRM-Addon（导 VRM）；坑=骨骼名映射/MToon 材质/morph→blendshape/物理弹簧骨
+  - Desktop Mate 已移除 mod/自定义模型支持 + DLC 收费 → 不推荐；VPet/BandoriPet 是 2D → 不适合
+- **Live2D 路线（实测本机验证）**：`pip install live2d-py` 0.7.0.4 **成功装进 Python 3.14.7**（自带 cp314 wheel），C++ 后端 `[live2d.v3] Cubism Native, Python 3.14.5` 日志确认可直接用，**无需降级**；API 全（LoadModelJson/Update/Draw/StartMotion/SetExpression/HitTest/SetOffset/Drag）
+- 卡拉彼丘无现成 .moc3（官方无 Live2D 立绘）→ Live2D 需先解决素材（同人/自建）
+- **交付**：落盘 `_worldbook_drafts/live2d_3d_research.md`（深度版）、`_worldbook_drafts/live2d_py_guide.md`（集成指南+最小骨架）、`_worldbook_drafts/cloud_tts_research.md`
+- 结论：想「今天看到动态形象」→ 3D 走 Mate-Engine+模之屋模型（~1 小时）；想保持 PyQt6 内嵌 → live2d-py（需先有 .moc3）
+- git：本提交
+
 ### 2026-09-09（AI/TTS 配置分离 + TTS 分本地/云端双引擎 + 云 TTS 多预设 + Live2D/3D 调研）
 - **需求（用户）**：①AI 配置和 TTS 配置分开；②备注「TTS 需要 AI 功能」；③TTS 分两部分——本地 audio.cpp / 云端；④云端写法上网查 + 设多种预设；⑤查卡拉彼丘角色 Live2D/3D 资源（想升级桌宠）
 - **配置分离**（`ai_chat.py`）：新增 `_tts_cfg()`/`_save_tts_cfg()`，TTS 配置独立存 `pet_config.json['tts']`；`_TTS_LEGACY_MAP` 让旧 `ai.tts_*` 键自动回退兼容（升级不丢设置）；所有 TTS 读写点（tts_service_url/tts_service_start/TTSWorker/tts_enabled/tts_volume/set_tts_api/tts_prompt/_speak_text）改读 tts 段；`settings_panel.refresh_all` 相应回填
