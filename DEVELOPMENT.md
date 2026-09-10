@@ -96,6 +96,30 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-10（3D 一键切换：简易桌宠 ↔ 3D 米雪儿，原有功能全保留）
+- **需求（用户）**：「我需要直接在简易桌宠点 3D 桌宠直接切换过去并且保留原来的所有功能」
+- **实现（`pet.py`）**：主菜单新增顶级切换项（点击即切，不用进子菜单）
+  - 2D 模式显示：`✨ 切换到 3D 米雪儿`；3D 模式显示：`🖼 返回简易桌宠`（文案随状态变化）
+  - 原控制入口保留为独立项：`🎛 3D 控制`（表情/动作/尺寸/窗口/藏手）
+- **切换机制（核心：进程都不退出 → 功能全保留）**：
+  - 切到 3D：`self.hide()` 隐藏 2D 窗口 + 启动 Mate-Engine（若未运行）→ 等桥上线（最多 30s）→ `ShowWindow(hwnd, SW_SHOWNA)` 显示 3D 窗口 + `SetWindowPos(HWND_TOPMOST)` 置顶 + 桥 `topmost(true)`
+  - 切回 2D：`ShowWindow(hwnd, SW_HIDE)` 隐藏 3D 窗口（**不杀进程，桥保持在线**）+ `self.show()/raise_()/activateWindow()`
+  - 状态标记 `self._in3d`（`__init__` 初始化为 False）
+  - 托盘右键同样走 `_build_role_menu` → 3D 模式下可用托盘切回（重要：2D 窗口隐藏后唯一入口）
+  - `closeEvent` 增强：若在 3D 模式退出，先恢复显示 3D 窗口（避免桌面空无一物）
+- **踩坑与修复**：
+  - **窗口句柄查找 bug**：`_mate3d_hwnd()` 初版只找**可见**窗口，一旦隐藏就再也找不回来（切到 3D 失败 hwnd=0）→ 改为按标题 `MateEngineX` + 排除 IME 类窗口（`GetClassName`），不管可见性
+  - **隐藏窗口恢复**：`SW_SHOWNOACTIVATE(4)` 对已隐藏的 Unity 窗口不生效 → 改 `SW_SHOWNA(8)`，并先用 `IsIconic` 判断是否最小化再 `SW_RESTORE(9)`
+  - **PowerShell 启动路径含空格**：`Start-Process -ArgumentList "$p\pet.py"` 会按空格切分 → 需 `"` 包裹（`can't find '__main__' module in 'C:\Users\mier\Desktop\deepseek'`）
+- **验证（`mate3d_switch_test.py`，全部通过）**：
+  - 切到 3D：`_in3d=True`、2D 可见=False、3D 窗口 `visible=False→True`（从隐藏状态恢复）✅
+  - 切回 2D：`_in3d=False`、2D 可见=True、3D 窗口 visible=False、**桥仍在线（进程没退）**✅
+  - 反复切换（第二次切到 3D）✅
+  - 功能保留：托盘图标存在且可见 ✅、音频热键映射（Num1/2/3）仍在 ✅、AI 模块在 ✅、右键菜单 22 项 ✅
+  - 真实启动测试：`python pet.py` 窗口 `卡丘简易桌宠` 正常出现 ✅
+- 涉及：`strinova-desktop-pet\pet.py`、`mate3d_switch_test.py`（新增测试）、`mate3d_keepfunc_test.py`（新增测试）
+- 备注：切换不重启进程，故语音热键/托盘/聊天/设置面板/贴边等全部照常工作
+
 ### 2026-09-10（深度集成完成：Doorstop 桥接 MateBridge.dll + PyQt MateLink 客户端双向联动实测通过）
 - **需求（用户）**：'开始深度集成'（此前已确认走 BepInEx 桥接方案）；全程自动推进，用户睡觉，结论先行
 - **BepInEx 实测否决（重要）**：BepInEx 5.4.23.5 与 6.0.0-pre.2 / be.788 均无法在 Unity 6(6000.2.6f2 Mono) 加载——preloader 调用 `Module.GetPEKind` 而 Unity 6 的 mscorlib 已移除该 API（dnfile 确认 Module 类型无此方法）→ MissingMethodException

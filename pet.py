@@ -1686,6 +1686,7 @@ class PetWindow(QWidget):
         self._pet_size = int(_cfg.get('pet_size', BASE_SIZE)) or BASE_SIZE  # 桌宠尺寸（滑块可调，持久化）
         # 自动面向屏幕中央：跨到屏幕左右另一半时平滑翻转朝向（默认开，可在设置关闭）
         self._auto_facing = bool(_cfg.get('auto_facing', True))
+        self._in3d = False   # 当前是否处于 3D 米雪儿模式（切换用）
         self.setFixedSize(self._pet_size, self._pet_size)
 
         # 音频播放（QMediaPlayer 支持 mp3，不阻塞主线程；存 self 防 GC）
@@ -2049,6 +2050,14 @@ class PetWindow(QWidget):
 
     def closeEvent(self, e):
         """退出前注销热键、停止动图与钩子"""
+        # 若当前处于 3D 模式，退出时确保 3D 窗口可见（否则桌面会空无一物）
+        try:
+            if getattr(self, '_in3d', False):
+                hwnd = self._mate3d_hwnd()
+                if hwnd:
+                    self._win32_show(hwnd, True)
+        except Exception:
+            pass
         try:
             self._stop_movie()
         except Exception:
@@ -2776,12 +2785,22 @@ class PetWindow(QWidget):
             na.setEnabled(False)
             menu.addAction(na)
 
-        # ✨ 3D 联动（Mate-Engine 桥在线时显示）：3D 桌宠控制入口
+        # ✨ 3D 一键切换（3D 米雪儿 ↔ 2D 简易桌宠；切换不动进程→功能全保留）
         if _mate_link is not None:
             menu.addSeparator()
-            act_3d = QAction("✨ 3D 形象", menu)
-            act_3d.setMenu(self._build_mate3d_menu(menu))
+            in3d = bool(getattr(self, '_in3d', False))
+            if in3d:
+                act_3d = QAction("🖼 返回简易桌宠", menu)
+                act_3d.setToolTip("显示 2D 桌宠，隐藏 3D 米雪儿（桥保持在线）")
+            else:
+                act_3d = QAction("✨ 切换到 3D 米雪儿", menu)
+                act_3d.setToolTip("隐藏 2D 桌宠，显示 3D 米雪儿（热键/托盘/聊天/语音全保留）")
+            act_3d.triggered.connect(lambda: self.switch_face())
             menu.addAction(act_3d)
+            # 3D 控制子菜单（在线时才有用）：表情 / 动作 / 尺寸 / 窗口 / 藏手
+            act_ctl = QAction("🎛 3D 控制", menu)
+            act_ctl.setMenu(self._build_mate3d_menu(menu))
+            menu.addAction(act_ctl)
 
         menu.addSeparator()
 
@@ -2801,14 +2820,75 @@ class PetWindow(QWidget):
         except Exception:
             return False
 
+    def _mate3d_running(self):
+        """Mate-Engine 进程是否在运行"""
+        try:
+            import subprocess
+            r = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq MateEngineX.exe'],
+                               capture_output=True, text=True, timeout=10)
+            return 'MateEngineX.exe' in r.stdout
+        except Exception:
+            return False
+
+    def _mate3d_hwnd(self):
+        """找 Mate-Engine 主窗口句柄（0=未找到）。注意：必须包含已隐藏的窗口，
+        否则隐藏后再切换就找不回来（窗口标题固定为 'MateEngineX'）"""
+        try:
+            import ctypes as _c
+            from ctypes import wintypes as _w
+            u = _c.windll.user32
+            result = [0]
+            CB = _c.WINFUNCTYPE(_c.c_bool, _w.HWND, _w.LPARAM)
+            def cb(h, l):
+                pid = _w.DWORD()
+                u.GetWindowThreadProcessId(h, _c.byref(pid))
+                buf = _c.create_unicode_buffer(256)
+                u.GetWindowTextW(h, buf, 256)
+                cls = _c.create_unicode_buffer(256)
+                u.GetClassNameW(h, cls, 256)
+                t = buf.value or ''
+                # 主窗口：标题含 Mate，且是 Unity 的 UnityWndClass（排除 IME 等辅助窗口）
+                if 'Mate' in t and 'IME' not in cls.value:
+                    result[0] = h
+                    return False
+                return True
+            u.EnumWindows(CB(cb), 0)
+            return result[0]
+        except Exception:
+            return 0
+
+    def _win32_show(self, hwnd, show):
+        """显示/隐藏窗口。show=True 时用 SW_SHOWNA(8)+SW_RESTORE 兜底（Unity 窗口隐藏后需恢复）"""
+        try:
+            import ctypes as _c
+            if show:
+                # 若最小化先恢复，再显示（不抢焦点）
+                if _c.windll.user32.IsIconic(hwnd):
+                    _c.windll.user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+                _c.windll.user32.ShowWindow(hwnd, 8)       # SW_SHOWNA（显示但不激活）
+            else:
+                _c.windll.user32.ShowWindow(hwnd, 0)       # SW_HIDE
+        except Exception:
+            pass
+
+    def _mate3d_raise(self, hwnd):
+        """把 3D 窗口置顶（HWND_TOPMOST）但不抢焦点"""
+        try:
+            import ctypes as _c
+            _c.windll.user32.SetWindowPos(
+                hwnd, -1, 0, 0, 0, 0,
+                0x0001 | 0x0002 | 0x0010)  # NOSIZE|NOMOVE|NOACTIVATE
+        except Exception:
+            pass
+
     def _mate3d_launch(self):
-        """启动 Mate-Engine（若未运行）；需在其目录下启动才能加载 Doorstop/BepInEx"""
+        """启动 Mate-Engine（若未运行）；需在其目录下启动才能加载 Doorstop"""
         try:
             exe = r"C:\Users\mier\Desktop\deepseek work\mate-engine\unpacked\MateEngineX.exe"
             if not os.path.exists(exe):
                 print('mate3d: exe not found:', exe)
                 return
-            if self._mate3d_online():
+            if self._mate3d_running():
                 return
             import subprocess
             subprocess.Popen(
@@ -2826,6 +2906,65 @@ class PetWindow(QWidget):
             threading.Thread(target=_wait, daemon=True).start()
         except Exception as e:
             print('mate3d launch err:', e)
+
+    # ---------- 一键切换（2D 简易桌宠 ↔ 3D 米雪儿） ----------
+    def switch_face(self):
+        """在 2D 简易桌宠 与 3D 米雪儿之间切换。
+        切换=显示/隐藏窗口（进程都不退出→热键/托盘/聊天/语音全保留）"""
+        try:
+            if getattr(self, '_in3d', False):
+                self._switch_to_2d()
+            else:
+                self._switch_to_3d()
+            self.refresh_tray_menu()
+        except Exception as e:
+            print('switch_face err:', e)
+
+    def _switch_to_3d(self):
+        """切到 3D：启动 Mate-Engine → 显示其窗口 → 隐藏简易桌宠窗口"""
+        # 1) 确保 Mate 进程与桥在线
+        if not self._mate3d_online():
+            self._mate3d_launch()
+            # 等桥上线（最多 30s），期间先隐藏自己
+            self.hide()
+            self._in3d = True
+            def _wait_bridge():
+                for _ in range(30):
+                    time.sleep(1)
+                    if self._mate3d_online():
+                        # 显示 3D 窗口并置顶
+                        hwnd = self._mate3d_hwnd()
+                        if hwnd:
+                            self._win32_show(hwnd, True)
+                            self._mate3d_raise(hwnd)
+                        try:
+                            _mate_link.topmost(True)
+                        except Exception:
+                            pass
+                        break
+            threading.Thread(target=_wait_bridge, daemon=True).start()
+            return
+        # 2) 已在线：直接显示 3D 窗口，隐藏自己
+        self.hide()
+        self._in3d = True
+        hwnd = self._mate3d_hwnd()
+        if hwnd:
+            self._win32_show(hwnd, True)
+            self._mate3d_raise(hwnd)
+        try:
+            _mate_link.topmost(True)
+        except Exception:
+            pass
+
+    def _switch_to_2d(self):
+        """切回简易桌宠：隐藏 3D 窗口（桥不关），显示自己"""
+        hwnd = self._mate3d_hwnd()
+        if hwnd:
+            self._win32_show(hwnd, False)
+        self._in3d = False
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _mate3d_cmd(self, op, **kw):
         """发送命令（带重试：桥可能刚启动还没就绪）"""
