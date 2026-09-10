@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3D 桌宠</title>
+<style>
+  html, body { margin:0; padding:0; background:transparent; overflow:hidden; height:100%; }
+  canvas { display:block; }
+  /* 说话气泡 */
+  #bubble {
+    position:absolute; top:0; left:0; display:none;
+    max-width:190px;
+    background:rgba(255,255,255,0.96); color:#333;
+    font:13px/1.6 "Microsoft YaHei", sans-serif;
+    padding:9px 13px; border-radius:13px;
+    box-shadow:0 2px 12px rgba(0,0,0,0.20);
+    transform:translate(-50%,-100%);
+    white-space:pre-wrap;
+    user-select:none; pointer-events:none;
+    z-index:10;
+  }
+  #bubble::after {
+    content:''; position:absolute; left:50%; bottom:-8px; margin-left:-7px;
+    border:7px solid transparent; border-top-color:rgba(255,255,255,0.96);
+  }
+  #fps { position:fixed; bottom:2px; left:4px; color:rgba(255,255,255,0.45);
+         font:11px monospace; pointer-events:none; z-index:9; }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+             color:rgba(255,255,255,0.75); font:13px "Microsoft YaHei"; z-index:20;
+             text-shadow:0 0 3px rgba(0,0,0,0.5); }
+</style>
+</head>
+<body>
+<div id="loading">正在加载模型…</div>
+<div id="bubble"></div>
+<div id="fps"></div>
+<script src="./qwebchannel.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/addons/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js';
+import { MorphDriver } from './vrm_morphs.js';
+
+const bubble = document.getElementById('bubble');
+const fpsEl = document.getElementById('fps');
+const loading = document.getElementById('loading');
+
+// ---------- 场景 ----------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(25, window.innerWidth / window.innerHeight, 0.1, 100);
+const renderer = new THREE.WebGLRenderer({ alpha:true, antialias:true, preserveDrawingBuffer:true });
+renderer.setClearColor(0x000000, 0);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// 卡拉彼丘模型：底色全黑 + emissive 贴图 → 光照要克制，否则过曝发白
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const dl = new THREE.DirectionalLight(0xffffff, 0.55); dl.position.set(0.5, 2, 2.5); scene.add(dl);
+const dl2 = new THREE.DirectionalLight(0x99bbff, 0.3); dl2.position.set(-1, 0.5, -1.5); scene.add(dl2);
+
+// ---------- 状态 ----------
+let vrm = null, mixer = null;
+let morphDriver = null;      // ★ CPU 顶点烘焙表情驱动（见 vrm_morphs.js）
+const currentModel = { path: null };
+let lastBlink = performance.now(), autoBlink = true, curBlink = -1;
+let idleMotion = true;       // 待机微动（呼吸+轻摆）。自动化测试需冻结它，否则像素差分全是抖动
+const lookTarget = new THREE.Vector3(0, 0.75, 0.2);
+let idleTime = 0;
+let dragging = false, lastMX = 0, lastMY = 0, lastHoverSay = 0, bubbleTimer = null;
+const clock = new THREE.Clock();
+
+const MODELS = {
+  '米雪儿': './models/michelle.vrm',
+  '阿尔蒂娜': './models/aldina.vrm',
+  '祖姆': './models/Zome.vrm',
+  '拉兹莉': './models/Lazuli_VRM.vrm',
+};
+
+// ---------- 工具 ----------
+function speak(text, ms = 3500) {
+  let x = 50, y = 30;
+  try {
+    if (vrm) {
+      const box = new THREE.Box3().setFromObject(vrm.scene);
+      const head = new THREE.Vector3((box.min.x + box.max.x) / 2, box.max.y,
+                                     (box.min.z + box.max.z) / 2);
+      head.project(camera);
+      x = (head.x * 0.5 + 0.5) * 100;
+      y = (-head.y * 0.5 + 0.5) * 100;
+    }
+  } catch (e) {}
+  bubble.style.left = Math.max(12, Math.min(88, x)) + '%';
+  bubble.style.top = Math.max(8, y - 4) + '%';
+  bubble.textContent = text;
+  bubble.style.display = 'block';
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(() => { bubble.style.display = 'none'; }, ms);
+}
+
+function say(text) {
+  if (!text) return;
+  // 说话嘴型：用 CPU 烘焙（GPU morph 在 QtWebEngine 下无效）
+  if (morphDriver?.isReady()) {
+    morphDriver.clear();
+    morphDriver.set(text.length % 3 ? 'aa' : 'ih', 0.5);
+    morphDriver.apply();
+    // 300ms 后恢复
+    setTimeout(() => { try { morphDriver.clear(); morphDriver.apply(); } catch (e) {} }, 320);
+  }
+  speak(text);
+}
+
+// ---------- 表情（走 CPU 顶点烘焙） ----------
+function setExpression(name, weight) {
+  if (!morphDriver?.isReady()) return false;
+  morphDriver.clear();
+  if (name && name !== 'neutral') {
+    if (!morphDriver.set(name, weight)) return false;
+  }
+  morphDriver.apply();
+  return true;
+}
+
+function setBlink(v) {
+  if (!morphDriver?.isReady()) return;
+  // ★ 不能直接 delete state['blink']：那样会绕过 MorphDriver 的 _dirty 标记，
+  //   apply() 会因为「没变化」直接 return，顶点就残留在上一次眨眼的形状上
+  //   （实测：关掉自动眨眼后仍残留 nz=1718 的偏移，表情永远回不到原位）。
+  //   正确做法是走有 dirty 语义的 set()，权重 0 由 apply() 内部忽略。
+  morphDriver.set('blink', Math.max(0, Math.min(1, Number(v) || 0)));
+  morphDriver.apply();
+}
+
+// ---------- 模型加载（热切换，不重启） ----------
+
+/**
+ * 计算【蒙皮后】的真实包围盒。
+ *
+ * 不能用 Box3.setFromObject：它只看 geometry.boundingBox × matrixWorld，
+ * 完全不考虑骨骼变形 —— 摆姿势后它仍返回 T-pose 的盒子（实测宽 1.353 而非 0.568）。
+ * 这里逐顶点做一次蒙皮变换再取范围，按步长抽样保证速度。
+ */
+function skinnedBox(root, stride = 1) {
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  root.updateMatrixWorld(true);
+  root.traverse(o => {
+    if (!o.isMesh || !o.geometry?.attributes?.position) return;
+    const pos = o.geometry.attributes.position;
+    const n = pos.count;
+    const step = Math.max(stride, Math.floor(n / 4000));   // 每 mesh 最多采 4000 点
+    for (let i = 0; i < n; i += step) {
+      v.fromBufferAttribute(pos, i);
+      if (o.isSkinnedMesh && o.applyBoneTransform) o.applyBoneTransform(i, v);
+      v.applyMatrix4(o.matrixWorld);
+      box.expandByPoint(v);
+    }
+  });
+  return box;
+}
+
+/**
+ * 让双臂自然垂放。
+ *
+ * 这个模型（以及多数 MMD 转来的 VRM）的 rest pose 是【T-pose】：肩 Y=1.2929、
+ * 手 Y=1.2929，两臂完全水平张开，整体宽 1.353m 而身高只有 1.6m —— 看起来就是
+ * "展开双臂"。真人待机应把手放下。
+ *
+ * 实测上臂绕 Z 轴旋转的下垂效果（see diag_pose.py）：
+ *      rz=0    → 手 Y=1.293（水平张开），整体宽 1.353
+ *      rz=±1.4 → 手 Y=1.708 / 0.878，整体宽 0.568
+ * 取 ±1.45 rad（≈83°）让手贴近身体两侧、略留缝隙避免穿模。
+ *
+ * 只在检测到 T-pose 时才摆姿势，避免破坏本来就是自然站姿的模型。
+ */
+function relaxArms(vrm) {
+  const L = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
+  const R = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
+  if (!L || !R) return null;
+
+  const get = (n) => vrm.humanoid.getNormalizedBoneNode(n)
+    ?.getWorldPosition(new THREE.Vector3()) || null;
+  vrm.humanoid.update();
+  const sh = get('leftUpperArm'), hd = get('leftHand');
+  const box = skinnedBox(vrm.scene, 3);
+  const height = box.getSize(new THREE.Vector3()).y || 1.6;
+
+  if (sh && hd && Math.abs(hd.y - sh.y) > height * 0.10) {
+    return null;   // 手已经在肩下方，说明本来就是自然站姿，别动它
+  }
+
+  const D = 1.45;
+  L.rotation.z = -D;
+  R.rotation.z = D;
+  // 稍微往前放一点，避免手臂贴太紧穿进裙子
+  L.rotation.x = 0.06;
+  R.rotation.x = 0.06;
+  vrm.humanoid.update();
+  vrm.scene.updateMatrixWorld(true);
+  return { left: -D, right: D };
+}
+
+/**
+ * 自适应取景：让整个角色（含头脚）完整落在窗口里。
+ *
+ * 原实现用 camera.position.z = size.y * 1.25，但 FOV 25° 下可见高度只有
+ *   2 × 1.25 × size.y × tan(12.5°) = 0.554 × size.y
+ * 也就是只装得下全身 55%，对焦点又在 0.62 高度 → 头顶和大腿以下全部被裁。
+ * （实测 1.6m 的模型只剩 y∈[0.55, 1.44] 可见）
+ *
+ * 正确做法：由包围盒反推相机距离
+ *   fitH = (高/2) / tan(fov/2)          ← 装下高度需要的距离
+ *   fitW = (宽/2) / tan(fov/2) / aspect ← 装下宽度需要的距离
+ *   距离 = max(fitH, fitW) × 余量
+ */
+function fitCamera(vrm, margin = 1.10) {
+  const box = skinnedBox(vrm.scene, 3);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  if (!(size.y > 0)) return null;
+
+  const fov = (camera.fov * Math.PI) / 180;
+  const aspect = camera.aspect || (window.innerWidth / window.innerHeight) || 0.74;
+
+  // 先用解析式估一个起点（装下高度 / 装下宽度取较大者）
+  const fitH = (size.y / 2) / Math.tan(fov / 2);
+  const fitW = (size.x / 2) / Math.tan(fov / 2) / aspect;
+  let dist = Math.max(fitH, fitW) * margin;
+
+  // 视点略微上抬，给脚底留空隙
+  const lookY = center.y + size.y * 0.02;
+
+  // ★ 再迭代收敛：角色有 z 深度（-0.42~0.20），透视下「靠近相机的角」
+  //   会投影到更外侧，纯解析式算不准 → 实测脚底会贴出窗口 (-0.1%)。
+  //   这里把包围盒 8 个角投影到 NDC，按超出量放大距离，迭代几次即可。
+  const corners = [];
+  for (const x of [box.min.x, box.max.x])
+    for (const y of [box.min.y, box.max.y])
+      for (const z of [box.min.z, box.max.z])
+        corners.push(new THREE.Vector3(x, y, z));
+
+  const v = new THREE.Vector3();
+  for (let iter = 0; iter < 12; iter++) {
+    camera.position.set(0, lookY, dist);
+    camera.lookAt(0, lookY, 0);
+    camera.updateMatrixWorld(true);
+    camera.updateProjectionMatrix();
+
+    let worst = 0;
+    for (const c of corners) {
+      v.copy(c).project(camera);
+      worst = Math.max(worst, Math.abs(v.x), Math.abs(v.y));
+    }
+    // worst 是 NDC 半径，1.0 表示正好贴边；留 4% 安全余量
+    if (worst <= 0.96) break;
+    dist *= worst / 0.96;
+  }
+
+  camera.position.set(0, lookY, dist);
+  camera.lookAt(0, lookY, 0);
+  camera.near = Math.max(0.01, dist - size.y);
+  camera.far = dist + size.y * 4;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+
+  // 视线跟随的目标点放到脸部高度
+  lookTarget.set(0, box.max.y - size.y * 0.12, 0.2);
+  return { dist: +dist.toFixed(3), sizeY: +size.y.toFixed(3), sizeX: +size.x.toFixed(3) };
+}
+
+async function loadModel(path) {
+  if (path === currentModel.path) return true;
+  const loader = new GLTFLoader();
+  loader.register(p => new VRMLoaderPlugin(p));
+  try {
+    const gltf = await loader.loadAsync(path);
+    const next = gltf.userData.vrm;
+    if (!next) throw new Error('no vrm in ' + path);
+
+    if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); vrm = null; morphDriver = null; }
+    vrm = next;
+    currentModel.path = path;
+    scene.add(vrm.scene);
+    // ★ 朝向：这个模型的脸朝 −Z，而相机在 +Z 侧。
+    //   实测：旋转 π 会让射线首命中变成 'Hair'（后脑勺），表情完全看不见。
+    //   所以这里【不做旋转】。
+    vrm.scene.rotation.y = 0;
+    vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
+
+    // ★ 建立 CPU 顶点烘焙表情驱动
+    //   （three.js 的 GPU morph 在 QtWebEngine 下完全不生效，已逐项验证）
+    try {
+      morphDriver = new MorphDriver(vrm, gltf);
+      console.log('[js] morphDriver ' + JSON.stringify(morphDriver.info()));
+    } catch (e) {
+      console.warn('[js] morphDriver 建立失败: ' + e.message);
+      morphDriver = null;
+    }
+
+    // ★ 摆成自然站姿（这个模型的 rest pose 是 T-pose 张开双臂）
+    let pose = null;
+    try {
+      pose = relaxArms(vrm);
+      console.log('[js] relaxArms ' + (pose ? JSON.stringify(pose) : 'skipped(已自然站姿)'));
+    } catch (e) {
+      console.warn('[js] relaxArms 失败: ' + e.message);
+    }
+
+    // ★ 自适应取景（按蒙皮后的真实包围盒，保证头脚都在画面内）
+    let fit = null;
+    try {
+      fit = fitCamera(vrm);
+      console.log('[js] fitCamera ' + JSON.stringify(fit));
+    } catch (e) {
+      console.warn('[js] fitCamera 失败: ' + e.message);
+      const box = new THREE.Box3().setFromObject(vrm.scene);
+      const sz = box.getSize(new THREE.Vector3());
+      camera.position.set(0, sz.y * 0.55, sz.y * 2.6);
+      camera.lookAt(0, sz.y * 0.5, 0);
+    }
+    lastBlink = performance.now();
+    loading.style.display = 'none';
+    console.log('VRM loaded: ' + path.split('/').pop() +
+      ' expr=' + (morphDriver ? morphDriver.names().length : 0) +
+      ' bones=' + Object.keys(vrm.humanoid?.humanBones || {}).length);
+    try { window.pyBridge?.onModelLoaded(path.split('/').pop()); } catch (e) {}
+    return true;
+  } catch (e) {
+    console.error('loadModel failed:', e);
+    return false;
+  }
+}
+window.loadModel = loadModel;
+
+// ---------- 拖拽移动窗口 ----------
+renderer.domElement.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  dragging = true; lastMX = e.screenX; lastMY = e.screenY;
+});
+window.addEventListener('mousemove', (e) => {
+  lookTarget.x = (e.clientX / window.innerWidth) * 2 - 1;
+  lookTarget.y = 0.75 - (e.clientY / window.innerHeight) * 0.6;
+  if (dragging && window.pyBridge?.dragWindow) {
+    const dx = e.screenX - lastMX, dy = e.screenY - lastMY;
+    lastMX = e.screenX; lastMY = e.screenY;
+    window.pyBridge.dragWindow(dx, dy);
+  }
+});
+window.addEventListener('mouseup', () => { dragging = false; });
+
+// 悬停角色 → 说话
+renderer.domElement.addEventListener('mousemove', (e) => {
+  const now = performance.now();
+  if (now - lastHoverSay < 4500) return;
+  const ndc = new THREE.Vector2((e.clientX / window.innerWidth) * 2 - 1,
+                                -(e.clientY / window.innerHeight) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const hits = ray.intersectObject(vrm?.scene || new THREE.Object3D(), true);
+  if (hits.length > 0) {
+    lastHoverSay = now;
+    const pool = ['怎么啦？', '在的在的～', '摸摸头！', '有什么事吗？', '我一直在这里哦', '要不要一起玩？'];
+    say(pool[Math.floor(Math.random() * pool.length)]);
+  }
+});
+
+// ---------- 尺寸变化：重算相机（取景距离依赖宽高比） ----------
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  if (!w || !h) return;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(w, h);
+  // ★ 必须重算距离：同样的角色在窄窗口里要退得更远才装得下
+  if (vrm) {
+    try { fitCamera(vrm); } catch (e) {}
+  }
+}
+window.addEventListener('resize', onResize);
+
+// ---------- 主循环 ----------
+function animate() {
+  requestAnimationFrame(animate);
+  try {
+    const dt = Math.min(clock.getDelta(), 0.05);
+    idleTime += dt;
+    if (vrm) {
+      // 待机微动（呼吸 + 轻摆）。冻结时归零，保证画面完全静止
+      // （自动化测试要做像素差分，任何抖动都会把结果污染成「全都在动」）
+      if (idleMotion) {
+        vrm.scene.position.y = Math.sin(idleTime * 2.0) * 0.004;
+        vrm.scene.rotation.z = Math.sin(idleTime * 0.8) * 0.01;
+      } else {
+        vrm.scene.position.y = 0;
+        vrm.scene.rotation.z = 0;
+      }
+      // 眨眼：只在状态真的需要切换时调用 setBlink（避免每帧重算顶点）
+      const t = performance.now() - lastBlink;
+      if (autoBlink) {
+        let want = 0;
+        if (t < 120) want = t / 120;
+        else if (t < 260) want = 1 - (t - 120) / 140;
+        else want = 0;
+        if (t > 2800 + Math.random() * 1800) lastBlink = performance.now();
+        if (Math.abs(want - curBlink) > 0.02) {
+          curBlink = want;
+          setBlink(want);
+        }
+      } else if (curBlink > 0) {
+        curBlink = 0;
+        setBlink(0);
+      }
+      // 视线跟随鼠标
+      if (vrm.lookAt && vrm.lookAt.userTarget) {
+        vrm.lookAt.userTarget.copy(lookTarget);
+        vrm.lookAt.update();
+      }
+      vrm.update(dt);
+    }
+    if (mixer) mixer.update(dt);
+    renderer.render(scene, camera);
+    if (Math.floor(performance.now() % 1000) < 16) {
+      fpsEl.textContent = Math.round(1000 / Math.max(dt * 1000, 1)) + ' FPS';
+    }
+  } catch (err) {
+    if (!window.__animErr) {
+      window.__animErr = String((err && err.message) || err);
+      console.error('animate error:', err);
+    }
+  }
+}
+animate();
+
+// ---------- Python 桥 ----------
+window.setExpression = setExpression;
+window.say = say;
+window.listExpressions = () => morphDriver ? morphDriver.names() : [];
+window.listModels = () => Object.keys(MODELS);
+window.getModel = () => currentModel.path ? currentModel.path.split('/').pop() : null;
+window.setBlinkEnabled = (b) => { autoBlink = !!b; };
+window.toggleTopmost = (b) => { try { window.pyBridge?.setTopmost(!!b); } catch (e) {} };
+// 诊断用
+window.morphInfo = () => morphDriver ? morphDriver.info() : null;
+window.morphActive = () => morphDriver ? morphDriver.active() : [];
+window.__driver = () => morphDriver;
+window.__setBlink = setBlink;        // 诊断/测试用（生产走 autoBlink 自动眨眼）
+window.__currentBlink = () => curBlink;
+window.__setIdleMotion = (on) => { idleMotion = !!on; };
+// 取景/姿势诊断
+window.__refit = () => { try { return JSON.stringify(fitCamera(vrm)); } catch (e) { return 'ERR:' + e.message; } };
+window.__skinnedBox = () => {
+  try {
+    const b = skinnedBox(vrm.scene, 1);
+    const s = b.getSize(new THREE.Vector3()), c = b.getCenter(new THREE.Vector3());
+    return JSON.stringify({
+      min: [+b.min.x.toFixed(3), +b.min.y.toFixed(3), +b.min.z.toFixed(3)],
+      max: [+b.max.x.toFixed(3), +b.max.y.toFixed(3), +b.max.z.toFixed(3)],
+      size: [+s.x.toFixed(3), +s.y.toFixed(3), +s.z.toFixed(3)],
+      center: [+c.x.toFixed(3), +c.y.toFixed(3), +c.z.toFixed(3)],
+      camZ: +camera.position.z.toFixed(3),
+      camY: +camera.position.y.toFixed(3),
+    });
+  } catch (e) { return 'ERR:' + e.message; }
+};
+// 画面里角色实际占据的垂直范围（判断头脚是否都在窗口内）
+window.__screenExtent = () => {
+  try {
+    const b = skinnedBox(vrm.scene, 4);
+    const pts = [];
+    for (const X of [b.min.x, b.max.x]) for (const Y of [b.min.y, b.max.y]) for (const Z of [b.min.z, b.max.z]) {
+      const v = new THREE.Vector3(X, Y, Z).project(camera);
+      pts.push(v);
+      // 同时投影到近平面方向，避免透视下角点判断失真
+    }
+    // 更稳：把包围盒 8 角 + 中心投影
+    const ndcY = pts.map(p => p.y);
+    const ndcX = pts.map(p => p.x);
+    return JSON.stringify({
+      topPct: +((1 - Math.max(...ndcY)) / 2 * 100).toFixed(1),      // 头顶到窗口上沿的空白占比
+      bottomPct: +((1 + Math.min(...ndcY)) / 2 * 100).toFixed(1),   // 脚底到窗口下沿的空白占比
+      leftPct: +((1 + Math.min(...ndcX)) / 2 * 100).toFixed(1),
+      rightPct: +((1 - Math.max(...ndcX)) / 2 * 100).toFixed(1),
+      inView: Math.max(...ndcY) <= 1.02 && Math.min(...ndcY) >= -1.02,
+    });
+  } catch (e) { return 'ERR:' + e.message; }
+};
+// 当前 mesh 相对原始形状的顶点偏移量（诊断用：判断表情是否真的写进顶点）
+window.__vertexDelta = () => {
+  if (!morphDriver || !morphDriver.meshes.length) return '{}';
+  let nz = 0, mx = 0;
+  for (const e of morphDriver.meshes) {
+    const cur = e.mesh.geometry.attributes.position.array;
+    for (let i = 0; i < cur.length; i++) {
+      const d = Math.abs(cur[i] - e.base[i]);
+      if (d > 1e-6) nz++;
+      if (d > mx) mx = d;
+    }
+  }
+  return JSON.stringify({ nz: nz, max: +mx.toFixed(6) });
+};
+
+// 供自动化测试抓图：先强制渲染一帧再取数据
+// （窗口被遮挡时 Chromium 不合成，直接 toDataURL 可能拿到空图）
+window.__snapshot = () => {
+  try {
+    // ★ 连画两帧：第一帧把改过的顶点属性上传，第二帧才真正画出来。
+    //   只画一帧时 toDataURL 可能拿到「属性已改但还没绘制」的旧画面，
+    //   导致自动化测试误判表情无效（实测噪声基线 0px，问题全在取样时机）。
+    renderer.render(scene, camera);
+    renderer.render(scene, camera);
+    return renderer.domElement.toDataURL('image/png');
+  } catch (e) { return 'ERR:' + e.message; }
+};
+
+// 供自动化测试做像素统计（不依赖 toDataURL，直接读 GL 缓冲）
+window.__pixelStats = () => {
+  try {
+    renderer.render(scene, camera);
+    const gl = renderer.getContext();
+    const w = renderer.domElement.width, h = renderer.domElement.height;
+    const buf = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    let opaque = 0, transparent = 0;
+    const colors = new Set();
+    for (let i = 0; i < buf.length; i += 4) {
+      if (buf[i + 3] < 16) { transparent++; continue; }
+      opaque++;
+      colors.add((buf[i] >> 4) + ',' + (buf[i + 1] >> 4) + ',' + (buf[i + 2] >> 4));
+    }
+    return JSON.stringify({
+      w: w, h: h, opaque: opaque, transparent: transparent, colors: colors.size,
+      coverage: +(opaque / (w * h) * 100).toFixed(1),
+    });
+  } catch (e) { return 'ERR:' + e.message; }
+};
+
+function boot() {
+  loadModel('./models/michelle_expr.vrm').then(() => {
+    try { window.pyBridge?.onReady(currentModel.path ? currentModel.path.split('/').pop() : ''); } catch (e) {}
+    console.log('[js] init done');
+  });
+}
+
+if (window.qt && window.qt.webChannelTransport) {
+  new QWebChannel(window.qt.webChannelTransport, (channel) => {
+    window.pyBridge = channel.objects.py;
+    console.log('[js] py bridge ready');
+    boot();
+  });
+} else {
+  console.warn('[js] no QtWebChannel, 直接加载');
+  boot();
+}
+
+window.log = (m) => console.log(m);
+</script>
+</body>
+</html>

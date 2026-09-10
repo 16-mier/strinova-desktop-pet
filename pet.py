@@ -35,6 +35,63 @@ try:
 except Exception:
     _mate_avatar = None
 
+# 自研 Web 3D 桌宠（three.js + three-vrm + QtWebEngine，完全脱离 Mate-Engine）
+# 后端选择：优先 'web'（无重启热切换/全功能），失败自动回退 'mate'
+#
+# ⚠ 关键：QtWebEngineWidgets 必须在 QApplication 创建【之前】导入
+#   （否则报 "QtWebEngineWidgets must be imported ... before a QCoreApplication
+#     instance is created"）。且要在设置 Chromium flag 之后导入。
+if os.environ.get('PET_NO_WEB3D', '') != '1':
+    os.environ.setdefault(
+        "QTWEBENGINE_CHROMIUM_FLAGS",
+        "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-unsafe-swiftshader",
+    )
+    try:
+        from PyQt6 import QtWebEngineWidgets as _qtwe_probe  # noqa: F401
+        _QTWE_PRELOADED = True
+    except Exception as _qtwe_e:
+        _QTWE_PRELOADED = False
+        _QTWE_PRELOAD_ERR = str(_qtwe_e)
+else:
+    _QTWE_PRELOADED = False
+    _QTWE_PRELOAD_ERR = 'PET_NO_WEB3D=1'
+
+try:
+    import web3d_pet as _web3d
+    _WEB3D_OK = True
+except Exception as _web3d_e:
+    _web3d = None
+    _WEB3D_OK = False
+    import traceback as _tb
+    _WEB3D_ERR = ''.join(_tb.format_exception_only(type(_web3d_e), _web3d_e)).strip()
+    print('[pet] web3d 不可用，3D 将回退 Mate-Engine:', _WEB3D_ERR)
+
+# 3D 后端：'web' = 内置 three-vrm；'mate' = 外置 Mate-Engine 进程
+_3D_BACKEND_DEFAULT = 'web' if _WEB3D_OK else 'mate'
+
+# 内置引擎（VRM）表情的显示名。已实测确认「可见生效」的排前面。
+# 未列出的表情会自动收进「更多表情」子菜单，保证功能不丢。
+_WEB_EXPR_LABELS = [
+    ('blink', '😑 眨眼'),
+    ('happy', '😊 开心'),
+    ('surprised', '😲 惊讶'),
+    ('angry', '😠 生气'),
+    ('sad', '😢 难过'),
+    ('relaxed', '😌 放松'),
+    ('aa', '🅰 张嘴(あ)'),
+    ('ih', '🅸 咧嘴(い)'),
+    ('ou', '🅾 嘟嘴(う)'),
+    ('ee', '🅴 咧嘴(え)'),
+    ('oh', '🅾 圆嘴(お)'),
+    ('blinkLeft', '😉 眨眼(左)'),
+    ('blinkRight', '😉 眨眼(右)'),
+    ('lookUp', '👆 看上'),
+    ('lookDown', '👇 看下'),
+    ('瞳小', '👁 瞳孔缩小'),
+    ('じと目', '😒 嫌弃脸'),
+]
+_WEB_DEFAULT_EXPRS = [k for k, _ in _WEB_EXPR_LABELS]
+
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QUrl, QEvent, QObject
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie
 from PyQt6.QtWidgets import (
@@ -1668,7 +1725,18 @@ class MateOverlay(QWidget):
         return QRect(m, m, MENU_BTN_SIZE, MENU_BTN_SIZE)
 
     def follow_mate(self):
-        """跟随 Mate-Engine 窗口右上角定位（找不到则居中屏顶）"""
+        """跟随 3D 窗口右上角定位（内置 Web 3D 或外置 Mate-Engine 均支持）"""
+        # ① 内置 Web 3D 窗口：直接用 Qt 几何（最准，无需 Win32）
+        try:
+            w = getattr(self.pet, '_web3d_win', None)
+            if w is not None and w.isVisible():
+                g = w.geometry()
+                self.move(g.right() - self.width() - 8, g.top() + 8)
+                return True
+        except Exception:
+            pass
+
+        # ② 外置 Mate-Engine 窗口：走 Win32 hwnd
         try:
             hwnd = self.pet._mate3d_hwnd()
             if hwnd:
@@ -1799,6 +1867,13 @@ class PetWindow(QWidget):
         self._in3d = False   # 当前是否处于 3D 米雪儿模式（切换用）
         self._mate_overlay = None   # 3D 模式浮层（三横按钮）
         self._mate_overlay_timer = None
+        self._web3d_win = None      # 自研 3D 桌宠窗口（three-vrm）
+        self._web3d_ready = False
+        # 3D 后端：'web'（内置，默认）/'mate'（外置），运行时可切换
+        _saved = _cfg.get('3d_backend', '')
+        if _saved == 'web' and not _WEB3D_OK:
+            _saved = 'mate'
+        self._3d_backend = os.environ.get('PET_3D_BACKEND', _saved or _3D_BACKEND_DEFAULT)
         self._overlay_task = None   # QThread 调度器（浮层跟随 Mate 窗口）
         self._overlay_worker = None
         self.setFixedSize(self._pet_size, self._pet_size)
@@ -2164,12 +2239,17 @@ class PetWindow(QWidget):
 
     def closeEvent(self, e):
         """退出前注销热键、停止动图与钩子"""
-        # 若当前处于 3D 模式，退出时确保 3D 窗口可见（否则桌面会空无一物）
+        # 若当前处于 3D 模式，退出时确保 3D 形象仍在（否则桌面会空无一物）
         try:
             if getattr(self, '_in3d', False):
-                hwnd = self._mate3d_hwnd()
-                if hwnd:
-                    self._win32_show(hwnd, True)
+                if getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK:
+                    w = getattr(self, '_web3d_win', None)
+                    if w is not None:
+                        w.show()      # 保留 3D 桌宠可见
+                else:
+                    hwnd = self._mate3d_hwnd()
+                    if hwnd:
+                        self._win32_show(hwnd, True)
         except Exception:
             pass
         try:
@@ -2339,7 +2419,10 @@ class PetWindow(QWidget):
         # 3D 模式：尺寸同步到 3D 角色（改 2D 大小 → 3D 跟着变）
         if getattr(self, '_in3d', False):
             try:
-                self._mate3d_sync_size()
+                if getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK:
+                    self._web3d_sync_size()
+                else:
+                    self._mate3d_sync_size()
             except Exception:
                 pass
 
@@ -2934,9 +3017,15 @@ class PetWindow(QWidget):
         menu.addAction(act_quit)
         return menu
 
-    # ============ Mate-Engine 3D 联动 ============
+    # ============ 3D 联动（双后端：web 内置 / mate 外置） ============
     def _mate3d_online(self):
-        """Mate-Engine 桥是否在线（快速，失败返回 False）"""
+        """3D 是否可用：
+        * 内置 Web 后端 → 永远可用（引擎内置在同进程，窗口按需创建），
+          只有显式设置 PET_NO_WEB3D=1 才判为不可用
+        * 外置 Mate 后端 → 看 socket 桥是否在线
+        """
+        if getattr(self, '_3d_backend', 'web') == 'web':
+            return bool(_WEB3D_OK)
         try:
             if _mate_link is None:
                 return False
@@ -3006,8 +3095,24 @@ class PetWindow(QWidget):
             pass
 
     def _mate3d_switch_avatar(self, path, name):
-        """切换 3D 角色：改配置 + 重启 Mate 进程（官方持久化路径，安全）。
-        后台线程执行，完成后在主线程刷新菜单。"""
+        """切换 3D 角色。
+        * 内置 Web 后端：直接热切换（0.4~0.7 秒，无需重启）
+        * 外置 Mate 后端：改配置 + 重启进程（官方持久化路径，5~40 秒）
+        """
+        # ① 内置 Web 3D：热切换（首选）
+        if getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK:
+            w = getattr(self, '_web3d_win', None)
+            if w is not None:
+                ok = w.set_model(os.path.splitext(name)[0])
+                print('web3d avatar switch ->', name, ok)
+                if ok:
+                    # 切换后让角色打个招呼，确认生效
+                    QTimer.singleShot(700, lambda: self._mate3d_cmd(
+                        'say', text='我是%s，请多关照～' % os.path.splitext(name)[0]))
+                    return
+                print('web3d 未找到该模型，回退 Mate 路径')
+
+        # ② 外置 Mate 后端：改配置 + 重启
         if _mate_avatar is None:
             return
 
@@ -3054,8 +3159,12 @@ class PetWindow(QWidget):
             print('mate3d launch err:', e)
 
     # ---------- 一键切换（2D 简易桌宠 ↔ 3D 米雪儿） ----------
+    # 双后端设计：
+    #   'web'  = 内置 three-vrm 渲染（QtWebEngine，同进程；热切换 0.4s；全部 Python 可控）
+    #   'mate' = 外置 Mate-Engine 进程（socket 桥；切模型需重启，5~40s）
+    # 两者共享：三横浮层 / 悬停对话 / 尺寸同步 / 原有全部菜单功能
     def switch_face(self):
-        """在 2D 简易桌宠 与 3D 米雪儿之间切换。
+        """在 2D 简易桌宠 与 3D 之间切换。
         切换=显示/隐藏窗口（进程都不退出→热键/托盘/聊天/语音全保留）"""
         try:
             if getattr(self, '_in3d', False):
@@ -3067,7 +3176,99 @@ class PetWindow(QWidget):
             print('switch_face err:', e)
 
     def _switch_to_3d(self):
-        """切到 3D：启动 Mate-Engine → 显示其窗口 → 隐藏自己 → 显示三横浮层 + 同步尺寸"""
+        """切到 3D：按当前后端启动（web 内置 / mate 外置）→ 显示浮层 + 同步尺寸"""
+        if getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK:
+            self._switch_to_3d_web()
+        else:
+            self._switch_to_3d_mate()
+
+    # ---------------- 内置 Web 3D 后端 ----------------
+    def _switch_to_3d_web(self):
+        """切到内置 3D：创建/显示 three-vrm 窗口（同进程，无需外部程序）
+
+        ⚠ Qt 规则：QWidget/QWebEngineView 必须在【主线程】创建/操作。
+        因此窗口创建投递到主线程事件循环（QTimer.singleShot(0)），
+        后台线程只负责等待模型就绪，绝不能碰 Qt GUI。
+        """
+        self.hide()
+        self._in3d = True
+        self._web3d_ready = False
+
+        def _create_on_main():
+            try:
+                if getattr(self, '_web3d_win', None) is None:
+                    size = self._web3d_view_size()
+                    win = _web3d.Web3DPetWindow(model='michelle', size=size)
+                    # 位置：沿用 2D 桌宠位置，但保证完整落在屏幕内（否则浮层会被夹紧）
+                    scr = QApplication.primaryScreen().availableGeometry()
+                    g = self.geometry()
+                    x = max(scr.left() + 4, min(g.x(), scr.right() - size[0] - 4))
+                    y = max(scr.top() + 4, min(g.y(), scr.bottom() - size[1] - 4))
+                    win.move(x, y)
+                    self._web3d_win = win
+                    try:
+                        win.bridge.ready.connect(self._on_web3d_ready)
+                    except Exception:
+                        pass
+                # ★ 新建后必须 show（否则窗口存在但不可见）
+                self._web3d_win.show()
+                self._web3d_win.raise_()
+                self._web3d_sync_size()
+            except Exception as e:
+                print('web3d create err:', e)
+
+        # 主线程创建窗口
+        QTimer.singleShot(0, _create_on_main)
+
+        # 后台线程：等模型就绪后显示浮层（只读状态，不碰 GUI）
+        def _wait_ready_then_overlay():
+            for _ in range(60):
+                if self._web3d_ready:
+                    break
+                time.sleep(0.25)
+            # 浮层显示也投递到主线程
+            QTimer.singleShot(400, self._show_mate_overlay)
+
+        threading.Thread(target=_wait_ready_then_overlay, daemon=True).start()
+
+    def _on_web3d_ready(self, name):
+        """内置 3D 就绪回调（主线程）"""
+        self._web3d_ready = True
+        print('web3d ready:', name)
+
+    def _web3d_view_size(self):
+        """2D 桌宠尺寸 → 3D 窗口尺寸（等比放大，保证角色完整可见）"""
+        try:
+            s = int(getattr(self, '_pet_size', BASE_SIZE))
+        except Exception:
+            s = BASE_SIZE
+        s = max(160, min(900, s))
+        # 3D 需要更高（角色是竖长的），宽高比 ~3:4
+        w = int(s * 1.45)
+        h = int(s * 1.95)
+        return (max(180, w), max(260, h))
+
+    def _web3d_sync_size(self):
+        """尺寸联动：2D 桌宠尺寸变化 → 3D 窗口等比变化"""
+        try:
+            w = getattr(self, '_web3d_win', None)
+            if w is None:
+                return
+            nw, nh = self._web3d_view_size()
+            if (w.width(), w.height()) != (nw, nh):
+                # 保持左下角不动的观感：以底边中点为锚点缩放
+                cx = w.x() + w.width() // 2
+                bottom = w.y() + w.height()
+                w.resize(nw, nh)
+                w.move(cx - nw // 2, bottom - nh)
+                w.view.setGeometry(0, 0, nw, nh)
+                print('web3d size sync -> %dx%d' % (nw, nh))
+        except Exception as e:
+            print('web3d sync size err:', e)
+
+    # ---------------- 外置 Mate-Engine 后端 ----------------
+    def _switch_to_3d_mate(self):
+        """切到外置 3D：启动 Mate-Engine → 显示其窗口 → 隐藏自己 → 浮层 + 尺寸"""
         self.hide()
         self._in3d = True
 
@@ -3183,15 +3384,21 @@ class PetWindow(QWidget):
                     "我一直在这里哦", "要不要一起玩？"]
             text = random.choice(pool)
         try:
-            if _mate_link is not None and self._mate3d_online():
-                _mate_link.say(text)
-                print('hover chat ->', text)
+            self._mate3d_cmd('say', text=text)
+            print('hover chat ->', text)
         except Exception as e:
             print('hover chat err:', e)
 
     def _switch_to_2d(self):
-        """切回简易桌宠：隐藏 3D 窗口（桥不关）+ 隐藏浮层 + 显示自己"""
+        """切回简易桌宠：隐藏 3D 窗口（不退出）+ 隐藏浮层 + 显示自己"""
         self._hide_mate_overlay()
+        # 内置 Web 3D：隐藏窗口（保留进程，回来秒开）
+        try:
+            if getattr(self, '_web3d_win', None) is not None:
+                self._web3d_win.hide()
+        except Exception:
+            pass
+        # 外置 Mate-Engine：隐藏其窗口
         hwnd = self._mate3d_hwnd()
         if hwnd:
             self._win32_show(hwnd, False)
@@ -3201,13 +3408,81 @@ class PetWindow(QWidget):
         self.activateWindow()
 
     def _mate3d_cmd(self, op, **kw):
-        """发送命令（带重试：桥可能刚启动还没就绪）"""
+        """发送 3D 命令 —— 按当前后端自动分派（web 内置优先，mate 外置兜底）。
+
+        这样上层菜单代码完全不用改：同一个 'say'/'scale'/'topmost' 调用，
+        会自动走内置 three-vrm 或外置 Mate-Engine。
+        """
         try:
+            if getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK:
+                if self._web3d_cmd(op, **kw):
+                    return
             if _mate_link is None:
                 return
             getattr(_mate_link, op)(**kw)
         except Exception as e:
             print('mate3d cmd err:', op, e)
+
+    def _web3d_cmd(self, op, **kw):
+        """把统一的 3D 命令翻译成内置 Web 3D 的操作。返回 True 表示已处理。"""
+        w = getattr(self, '_web3d_win', None)
+        try:
+            if op == 'say':
+                if w is None:
+                    return True   # 已认领（避免落到 mate 后端），只是窗口还没建好
+                w.say(str(kw.get('text', '')), int(kw.get('ms', 3500)))
+                return True
+
+            if op == 'topmost':
+                if w is not None:
+                    w.set_topmost(bool(kw.get('on', True)))
+                return True
+
+            if op == 'scale':
+                # 统一语义：value 为倍率(1.0=基准) → 换算成窗口尺寸
+                if w is not None:
+                    v = float(kw.get('value', 1.0))
+                    base = int(getattr(self, '_pet_size', BASE_SIZE))
+                    nw = max(140, int(base * 1.45 * v))
+                    nh = max(200, int(base * 1.95 * v))
+                    w.resize(nw, nh)
+                    w.view.setGeometry(0, 0, nw, nh)
+                    print('web3d scale -> %dx%d' % (nw, nh))
+                return True
+
+            if op == 'blend_set':
+                if w is not None:
+                    w.expression(str(kw.get('name', '')), float(kw.get('value', 100.0)) / 100.0)
+                return True
+
+            if op == 'blend_reset':
+                if w is not None:
+                    w.reset_expression()
+                return True
+
+            if op == 'sleep':
+                if w is not None:
+                    on = bool(kw.get('on', True))
+                    w.set_blink(not on)
+                    w.say('呼…呼…' if on else '我醒啦！', 2600)
+                return True
+
+            if op == 'food_spawn':
+                if w is not None:
+                    w.expression('happy', 0.9)
+                    w.say('好吃！', 2200)
+                return True
+
+            if op == 'voice_random':
+                if w is not None:
+                    import random
+                    w.say(random.choice(['嗯？', '怎么啦～', '我在哦', '嘿嘿']), 2000)
+                return True
+        except Exception as e:
+            print('web3d cmd err:', op, e)
+            return True   # 命令已认领（避免重复下发到 mate）
+        # 未识别的命令 → 交回给 mate 后端（或忽略）
+        return False
 
     def _build_mate3d_menu(self, parent):
         """3D 联动子菜单：表情 / 动作 / 尺寸"""
@@ -3226,42 +3501,134 @@ class PetWindow(QWidget):
             menu.addAction(act_go)
             return menu
 
-        # 🎭 3D 角色切换（列出可用模型，点击切换 → 改配置+重启进程）
-        if _mate_avatar is not None:
+        # 🎭 3D 角色切换（内置后端=即时热切换；外置后端=重启进程）
+        _web_mode = (getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK)
+        if _web_mode or _mate_avatar is not None:
             m_role = QMenu("🎭 3D 角色", menu)
             m_role.setStyleSheet(MENU_QSS)
-            try:
-                cur_path = (_mate_avatar.current_model() or "").lower()
-                models = _mate_avatar.list_models()
-            except Exception:
-                cur_path, models = "", []
-            if models:
-                for name, path in models:
-                    mark = " ✓" if path.lower() == cur_path else ""
-                    display = os.path.splitext(name)[0]
-                    act = QAction(display + mark, m_role)
+
+            if _web_mode:
+                # 内置：列出 web3d/models 下的全部 VRM，点击即切（0.4 秒）
+                w = getattr(self, '_web3d_win', None)
+                try:
+                    names = w.models() if w is not None else []
+                except Exception:
+                    names = []
+                if not names:
+                    try:
+                        names = list(_web3d.sync_models().keys())
+                    except Exception:
+                        names = []
+                cur = ''
+                try:
+                    cur = (w._model_name if w is not None else 'michelle')
+                except Exception:
+                    cur = ''
+                for n in names:
+                    mark = " ✓" if n.lower() == str(cur).lower() else ""
+                    act = QAction(n + mark, m_role)
+                    act.setToolTip("点击即时切换（无需重启）")
                     act.triggered.connect(
-                        lambda c, p=path, n=name: self._mate3d_switch_avatar(p, n))
+                        lambda c, nn=n: self._mate3d_switch_avatar(nn + '.vrm', nn + '.vrm'))
                     m_role.addAction(act)
+                if not names:
+                    na = QAction("（未找到 VRM 模型）", m_role)
+                    na.setEnabled(False)
+                    m_role.addAction(na)
             else:
-                na = QAction("（未找到 VRM 模型）", m_role)
-                na.setEnabled(False)
-                m_role.addAction(na)
+                try:
+                    cur_path = (_mate_avatar.current_model() or "").lower()
+                    models = _mate_avatar.list_models()
+                except Exception:
+                    cur_path, models = "", []
+                if models:
+                    for name, path in models:
+                        mark = " ✓" if path.lower() == cur_path else ""
+                        display = os.path.splitext(name)[0]
+                        act = QAction(display + mark, m_role)
+                        act.triggered.connect(
+                            lambda c, p=path, n=name: self._mate3d_switch_avatar(p, n))
+                        m_role.addAction(act)
+                else:
+                    na = QAction("（未找到 VRM 模型）", m_role)
+                    na.setEnabled(False)
+                    m_role.addAction(na)
+
             m_role.addSeparator()
+            # 后端切换（内置 ⇄ 外置 Mate-Engine）
+            m_be = QMenu("⚙ 3D 引擎", m_role)
+            m_be.setStyleSheet(MENU_QSS)
+            for label, key, tip in (
+                ("内置引擎（推荐·即时切换）", 'web', "three-vrm 内置渲染：热切换 0.4s，无需外部程序"),
+                ("Mate-Engine（外置）", 'mate', "外置进程：切模型需重启（5~40s），玩法更丰富"),
+            ):
+                if key == 'web' and not _WEB3D_OK:
+                    continue
+                a = QAction(("● " if key == self._3d_backend else "○ ") + label, m_be)
+                a.setToolTip(tip)
+                a.triggered.connect(lambda c, k=key: self._set_3d_backend(k))
+                m_be.addAction(a)
+            m_role.addMenu(m_be)
+
             act_dir = QAction("📂 打开模型目录", m_role)
-            act_dir.triggered.connect(lambda: os.startfile(
-                r"C:\Users\mier\Desktop\deepseek work\mate-engine\michelle_model"))
+            act_dir.triggered.connect(lambda: self._open_3d_model_dir())
             m_role.addAction(act_dir)
             menu.addMenu(m_role)
 
-        # 表情（VRM blendshape，动态读）
-        try:
-            blends = _mate_link.blends_dict()
-        except Exception:
-            blends = {}
-        nice = {'にこり': '微笑', '笑い': '笑', '怒り': '生气', '困る': '困扰',
-                '真面目': '认真', 'まばたき': '眨眼', 'ウィンク': '眨眼(右)'}
-        if blends:
+        # 表情（内置引擎读 VRM 表情表；外置 Mate 读其 blends 表）
+        blends = {}
+        _web_exprs = []
+        if _web_mode:
+            # ★ 内置引擎：表情名是 VRM 标准名（aa/ih/ou/ee/oh/blink/happy…），
+            #   和外置 Mate 的日文 blends 名不通用 —— 之前统一走 _mate_link
+            #   会拿到 Mate 的表，点到就落空。
+            try:
+                w = getattr(self, '_web3d_win', None)
+                if w is not None:
+                    _web_exprs = list(getattr(w, '_expressions', []) or [])
+            except Exception:
+                _web_exprs = []
+            if not _web_exprs:
+                _web_exprs = _WEB_DEFAULT_EXPRS
+        else:
+            try:
+                blends = _mate_link.blends_dict()
+            except Exception:
+                blends = {}
+
+        if _web_mode and _web_exprs:
+            m_expr = QMenu("😊 表情", menu)
+            m_expr.setStyleSheet(MENU_QSS)
+            # 全部表情按「可见生效程度」排序，常用的放前面
+            for name, label in _WEB_EXPR_LABELS:
+                if name not in _web_exprs:
+                    continue
+                act = QAction("%s  %s" % (label, name), m_expr)
+                act.triggered.connect(
+                    lambda c, n=name: (self._mate3d_cmd('blend_reset'),
+                                       self._mate3d_cmd('blend_set', name=n, value=100.0)))
+                m_expr.addAction(act)
+            # 其余未列出的表情也放进来（保证「该插件有的所有功能」不丢）
+            rest = [n for n in _web_exprs
+                    if n not in [k for k, _ in _WEB_EXPR_LABELS] and n != 'neutral']
+            if rest:
+                m_more = QMenu("更多表情", m_expr)
+                m_more.setStyleSheet(MENU_QSS)
+                for name in rest:
+                    act = QAction(name, m_more)
+                    act.triggered.connect(
+                        lambda c, n=name: (self._mate3d_cmd('blend_reset'),
+                                           self._mate3d_cmd('blend_set', name=n, value=100.0)))
+                    m_more.addAction(act)
+                m_expr.addMenu(m_more)
+            m_expr.addSeparator()
+            act_r = QAction("🔄 重置表情", m_expr)
+            act_r.triggered.connect(lambda: self._mate3d_cmd('blend_reset'))
+            m_expr.addAction(act_r)
+            menu.addMenu(m_expr)
+        elif blends:
+            nice = {'にこり': '微笑', '笑い': '笑', '怒り': '生气', '困る': '困扰',
+                    '真面目': '认真', 'まばたき': '眨眼', 'ウィンク': '眨眼(右)'}
             m_expr = QMenu("😊 表情", menu)
             m_expr.setStyleSheet(MENU_QSS)
             for name in ('にこり', '笑い', '怒り', '困る', '真面目'):
@@ -3364,6 +3731,37 @@ class PetWindow(QWidget):
         return menu
 
     # ---------- 3D 互动辅助 ----------
+    def _set_3d_backend(self, key):
+        """切换 3D 引擎（web 内置 / mate 外置）。切换时退出当前 3D 模式。"""
+        try:
+            key = 'web' if key == 'web' and _WEB3D_OK else 'mate'
+            if key == self._3d_backend:
+                return
+            # 先退回 2D，避免两个 3D 同时存在
+            if getattr(self, '_in3d', False):
+                self._switch_to_2d()
+            self._3d_backend = key
+            cfg = load_config()
+            cfg['3d_backend'] = key
+            save_config(cfg)
+            print('3d backend ->', key)
+            self.refresh_tray_menu()
+        except Exception as e:
+            print('set 3d backend err:', e)
+
+    def _open_3d_model_dir(self):
+        """打开 3D 模型目录（内置后端用 web3d/models；外置用 Mate 模型目录）"""
+        try:
+            if getattr(self, '_3d_backend', 'web') == 'web' and _WEB3D_OK:
+                d = str(_web3d.MODEL_DIR)
+            else:
+                d = r"C:\Users\mier\Desktop\deepseek work\mate-engine\michelle_model"
+            if not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            print('open 3d model dir err:', e)
+
     def _mate3d_say_dialog(self):
         """弹输入框让 3D 角色说话"""
         try:

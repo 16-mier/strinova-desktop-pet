@@ -19,3 +19,31 @@ qt_align_check.py
 meow_*.py
 
 contexts/
+
+# 诊断/测试产出的截图与临时日志（每次跑都会重新生成，体积大不入库）
+_*.png
+_*.log
+_itest*.log
+all_*.png
+real_*.png
+face_*.png
+final_*.png
+bake_*.png
+expr_*.png
+dn_*.png
+shot_*.png
+framing_*.png
+qtweb_*.png
+web3d_*.png
+integration_3d.png
+shot_edge.png
+drawn_*.png
+
+# 大模型文件（本地硬链接/复制而来，版权限制且体积大）
+web3d/models/
+michelle.vrm
+vrm_tex/
+vrm_mats.json
+vrm_nodes_michelle.txt
+pet.py.bak_mate
+expr_visible.json
