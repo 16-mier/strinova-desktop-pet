@@ -124,33 +124,34 @@ def main() -> int:
               f"浮层x={ov.x()} 期望={expect_x}")
 
     print("\n【问题4】拖动有没有反应…")
-    check("3D 窗口装了事件过滤器", w.view.hasMouseTracking())
-    # 直接构造鼠标事件走 eventFilter
-    from PyQt6.QtGui import QMouseEvent
+    # ⚠ 拖动实现已经换过一代：
+    #   旧版走 QWidget.eventFilter，但 QtWebEngine 的渲染控件在 Windows 上是
+    #   独立原生 HWND，鼠标事件被 Chromium 直接消费 → 过滤器根本收不到，
+    #   拖动完全无效（这是用户报的"3D桌宠无法拖动"）。
+    #   现在改成全局鼠标轮询 _mouse_tick（GetAsyncKeyState + QCursor.pos）。
+    #   所以这里不再构造 QMouseEvent，而是替换掉两个输入源再驱动 tick。
+    check("3D 窗口有全局鼠标轮询定时器",
+          getattr(w, '_mouse_timer', None) is not None)
     start = w.pos()
-    gp = QPointF(start.x() + 50, start.y() + 50)
-    press2 = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(50, 50), gp,
-                         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
-                         Qt.KeyboardModifier.NoModifier)
-    w.eventFilter(w.view, press2)
-    gp3 = QPointF(gp.x() + 80, gp.y() + 40)
-    move = QMouseEvent(QEvent.Type.MouseMove, QPointF(130, 90), gp3,
-                       Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
-                       Qt.KeyboardModifier.NoModifier)
-    w.eventFilter(w.view, move)
+    fake = {"pos": QPoint(start.x() + 50, start.y() + 50), "down": True}
+    w._lbutton_down = staticmethod(lambda: fake["down"])      # type: ignore
+    w._cursor_pos = staticmethod(lambda: fake["pos"])         # type: ignore
+    w._ready = True
+    w._hit_cache_fn = lambda x, y: True          # 假装点在角色身上
+    w._mouse_tick()                              # 按下 → 开始拖
+    fake["pos"] = QPoint(start.x() + 130, start.y() + 90)
+    w._mouse_tick()                              # 移动 → 窗口跟过去
     wait(200)
-    moved = (w.x(), w.y())
     print(f"       拖动前 {start.x()},{start.y()}  →  拖动后 {w.x()},{w.y()}")
     check("窗口跟着鼠标移动了", (w.x(), w.y()) != (start.x(), start.y()),
           f"{start.x()},{start.y()} -> {w.x()},{w.y()}")
     check("位移量正确（+80,+40）",
           w.x() == start.x() + 80 and w.y() == start.y() + 40,
           f"Δ=({w.x()-start.x()},{w.y()-start.y()})")
-    # 松开
-    rel = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(130, 90), gp3,
-                      Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
-                      Qt.KeyboardModifier.NoModifier)
-    w.eventFilter(w.view, rel)
+    # 松手
+    fake["down"] = False
+    w._mouse_tick()
+    check("松手后拖动状态结束", w._dragging is False)
 
     print("\n【问题5】鼠标移入显示输入栏…")
     pet._on_web3d_hover(True)

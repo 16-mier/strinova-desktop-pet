@@ -63,10 +63,24 @@ def clear_scene():
 
 
 def import_pmx(path):
-    """用 MMD Tools 导入 PMX"""
+    """用 MMD Tools 导入 PMX
+
+    ⚠⚠ types 这个集合决定"哪些东西会被导入"，漏一个就静默丢功能：
+      · "PHYSICS" —— 曾经的 bug。不传就不会创建 MMD 刚体对象，而
+        vrm.assign_spring_bone1_from_mmd 是靠遍历 `obj.mmd_type == "RIGID_BODY"`
+        找物理骨骼的 → 场景里没有刚体，它直接 `return {"FINISHED"}`，
+        【不报错也不生成任何 SpringBone】。结果导出的 VRM 没有
+        VRMC_springBone 扩展，262 根头发/裙摆骨骼全静止。
+      · "MORPHS" —— 第二次踩同样的坑。不传就不会导入顶点 morph，
+        导出的 VRM 里 morph targets 数量是 0 → 角色的表情全部失效
+        （只剩 VRM 预设的空壳，点哪个都没反应）。
+      · "DISPLAY" —— MMD 显示枠（表示枠）信息，让骨骼分组更完整。
+    """
     result = bpy.ops.mmd_tools.import_model(
         filepath=path,
-        types={"MESH", "ARMATURE"},   # MMD Tools 4.x 合法值：MESH/ARMATURE/PHYSICS/DISPLAY/MORPHS
+        # MMD Tools 4.x 合法值：MESH/ARMATURE/PHYSICS/DISPLAY/MORPHS
+        # 五个都要，少一个就丢一大块功能（见上面的注释）
+        types={"MESH", "ARMATURE", "PHYSICS", "DISPLAY", "MORPHS"},
         scale=0.08,          # MMD 模型默认单位，缩放到 1.6m 人形
         clean_model=True,
         remove_doubles=True,
@@ -81,6 +95,23 @@ def import_pmx(path):
     )
     if "CANCELLED" in str(result):
         raise RuntimeError(f"PMX 导入失败: {path}")
+    # 自检：刚体和形态键都必须真的进来了，否则后面一定白做
+    rigids = [o for o in bpy.data.objects if getattr(o, "mmd_type", "") == "RIGID_BODY"]
+    print(f"[INFO] 导入 MMD 刚体对象: {len(rigids)} 个")
+    if not rigids:
+        print("[WARN] 没有刚体对象 —— springBone 一定生成不出来，"
+              "请检查 types 是否包含 PHYSICS")
+    n_morph = 0
+    for ob in bpy.data.objects:
+        if ob.type != "MESH":
+            continue
+        try:
+            n_morph += len(ob.data.shape_keys.key_blocks) - 1 if ob.data.shape_keys else 0
+        except Exception:
+            pass
+    print(f"[INFO] 导入顶点形态键(morph): {n_morph} 个")
+    if n_morph == 0:
+        print("[WARN] 没有形态键 —— 表情会全部失效，请检查 types 是否包含 MORPHS")
 
 
 def find_armature():
@@ -119,11 +150,31 @@ def setup_vrm():
         traceback.print_exc()
 
     # 3. 物理：从 MMD 刚体/约束映射为 SpringBone
+    #    ⚠ 这一步依赖 import_pmx 时导入了 PHYSICS（刚体对象）。
+    #      op 在"找不到动态刚体骨骼"时会静默 FINISHED 而不生成任何东西，
+    #      所以下面必须【自己检查结果】，不能只看有没有抛异常。
     try:
         bpy.ops.vrm.assign_spring_bone1_from_mmd(armature_object_name=arm_name)
-        bpy.ops.vrm.assign_vrm0_secondary_animation_group_bone(
-            armature_object_name=arm_name)
-        print("[OK] 物理 SpringBone 从 MMD 映射完成")
+        try:
+            bpy.ops.vrm.assign_vrm0_secondary_animation_group_bone(
+                armature_object_name=arm_name)
+        except Exception:
+            pass  # 导出 1.0 时用不到 0.x 那套存储
+        # 自检：VRM 1.0 的 spring_bone1 数据是否真的填上了
+        arm = bpy.data.objects.get(arm_name)
+        sb = None
+        try:
+            sb = arm.data.vrm_addon_extension.spring_bone1
+        except Exception:
+            pass
+        n_spring = len(sb.springs) if sb else 0
+        n_collider = len(sb.colliders) if sb else 0
+        print(f"[INFO] springBone: springs={n_spring} colliders={n_collider}")
+        if n_spring == 0:
+            print("[WARN] springBone 没有生成！头发/裙摆将是静止的。"
+                  "最常见原因：PMX 导入时没带 PHYSICS，场景里没有刚体对象。")
+        else:
+            print("[OK] 物理 SpringBone 从 MMD 映射完成")
     except Exception:
         print("[WARN] 物理映射未完成（头发/裙子不会摆动）")
         traceback.print_exc()

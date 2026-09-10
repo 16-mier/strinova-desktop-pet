@@ -41,10 +41,23 @@ except Exception:
 # ⚠ 关键：QtWebEngineWidgets 必须在 QApplication 创建【之前】导入
 #   （否则报 "QtWebEngineWidgets must be imported ... before a QCoreApplication
 #     instance is created"）。且要在设置 Chromium flag 之后导入。
+#
+# ⚠ 关于 CHROMIUM_FLAGS 的作用域（踩过的坑）：
+#   这里【必须】用赋值（=）而不是 setdefault。因为 pet.py 是最先被导入的，
+#   一旦用 setdefault 抢先占位，后面 web3d_pet.py 里那份更完整的 flag 列表
+#   就永远不会生效 —— 表现为"帧率怎么调都上不去"（实测只跑到 60 帧，
+#   且页面被判定遮挡时掉到 1 帧）。flags 统一以本文件为准。
 if os.environ.get('PET_NO_WEB3D', '') != '1':
-    os.environ.setdefault(
-        "QTWEBENGINE_CHROMIUM_FLAGS",
-        "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-unsafe-swiftshader",
+    # 帧率相关的三项缺一不可（用户要求"顶格 120 帧"）：
+    #   --disable-frame-rate-limit / --disable-gpu-vsync  解除 60Hz vsync 锁
+    #   --disable-backgrounding-occluded-windows          桌宠是透明置顶小窗，
+    #       Chromium 极易把它判成"被遮挡的后台窗口"而停掉合成（实测掉到 1 帧）
+    #   --disable-renderer-backgrounding / -timer-throttling  同上，防定时器被压
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-unsafe-swiftshader "
+        "--disable-frame-rate-limit --disable-gpu-vsync "
+        "--disable-backgrounding-occluded-windows --disable-renderer-backgrounding "
+        "--disable-background-timer-throttling"
     )
     try:
         from PyQt6 import QtWebEngineWidgets as _qtwe_probe  # noqa: F401
@@ -3864,7 +3877,8 @@ class PetWindow(QWidget):
             text = random.choice(pool)
         try:
             self._mate3d_cmd('say', text=text)
-            print('hover chat ->', text)
+            # 故意不打日志：悬停对话是常态行为，刷屏会淹没真正有用的报错
+            # （用户反馈终端被这句刷满。功能照旧，只是不再打印）
         except Exception as e:
             print('hover chat err:', e)
 

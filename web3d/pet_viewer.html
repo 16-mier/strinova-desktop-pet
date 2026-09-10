@@ -23,8 +23,7 @@
     content:''; position:absolute; left:50%; bottom:-8px; margin-left:-7px;
     border:7px solid transparent; border-top-color:rgba(255,255,255,0.96);
   }
-  #fps { position:fixed; bottom:2px; left:4px; color:rgba(255,255,255,0.45);
-         font:11px monospace; pointer-events:none; z-index:9; }
+  #fps { display:none; }   /* 不显示帧率（用户要求） */
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
              color:rgba(255,255,255,0.75); font:13px "Microsoft YaHei"; z-index:20;
              text-shadow:0 0 3px rgba(0,0,0,0.5); }
@@ -60,6 +59,7 @@ const renderer = new THREE.WebGLRenderer({ alpha:true, antialias:true, preserveD
 renderer.setClearColor(0x000000, 0);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
+// 帧率与循环调度的说明集中写在文件下方「主循环调度」一节（含三个踩过的坑）。
 renderer.toneMapping = THREE.NoToneMapping;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
@@ -71,22 +71,320 @@ const dl2 = new THREE.DirectionalLight(0x99bbff, 0.3); dl2.position.set(-1, 0.5,
 
 // ---------- 状态 ----------
 let vrm = null, mixer = null;
+let hairPhysics = null;      // 自研头发/裙摆弹簧骨（本模型没有 VRMC_springBone）
 let morphDriver = null;      // ★ CPU 顶点烘焙表情驱动（见 vrm_morphs.js）
+
+// ================================================================
+// 自然运动系统（解决"动作生硬"的核心）
+//
+// 为什么原来生硬：待机是几个固定正弦波（周期恒定 → 像节拍器，看得出生硬），
+// 拖动则是"瞬间吸附"到某个姿势（没有起势、没有跟随、没有回弹）。
+//
+// 现在改成三层：
+//   1) 弹簧阻尼（Spring）—— 所有状态变化都走弹簧，天然带加速度曲线和惯性。
+//      临界阻尼（c = 2√k）不振荡、最快到位；略欠阻尼则有自然回弹。
+//   2) 钟摆（sway）—— 被拎起来时身体像挂在手上一样摆荡，拖动越快摆越大。
+//   3) 随机微动作 —— 歪头/换重心/抬手不再按固定周期，改成随机触发 + 缓入缓出，
+//      并且多个不同频率的正弦叠加，避免看出循环。
+//
+// ⚠ class 声明有 TDZ：必须定义在所有 `new Spring(...)` 之前，
+//   否则报 "Cannot access 'Spring' before initialization"（整个模块都不执行）。
+// ================================================================
+
+/** 一维弹簧阻尼：让任何数值变化都有"重量感"，而不是瞬间跳变 */
+class Spring {
+  constructor(value = 0, stiffness = 90, dampingRatio = 1.0) {
+    this.value = value;
+    this.goal = value;
+    this.vel = 0;
+    this.k = stiffness;
+    // 临界阻尼 = 2√k；dampingRatio < 1 会振荡（回弹），> 1 更迟钝
+    this.c = 2 * Math.sqrt(stiffness) * dampingRatio;
+  }
+  to(v) { this.goal = v; return this; }
+  /** 给一个速度冲击（用于钟摆/被撞了一下的效果） */
+  kick(v) { this.vel += v; return this; }
+  step(dt) {
+    if (!(dt > 0)) return this.value;
+    // 固定步长子步进：dt 突然变大时也不会炸掉
+    const steps = Math.min(6, Math.max(1, Math.ceil(dt / 0.01)));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i++) {
+      const a = this.k * (this.goal - this.value) - this.c * this.vel;
+      this.vel += a * h;
+      this.value += this.vel * h;
+    }
+    // 静止判定：位移和速度都极小就彻底停住，避免无休止的浮点抖动
+    // （否则角色会在"几乎看不见"的幅度上永远微颤）
+    if (Math.abs(this.goal - this.value) < 1e-5 && Math.abs(this.vel) < 1e-4) {
+      this.value = this.goal;
+      this.vel = 0;
+    }
+    return this.value;
+  }
+  reset(v = 0) { this.value = this.goal = v; this.vel = 0; return this; }
+}
+
 // relaxArms 摆好的手臂基准角，待机动画在此基础上叠加（避免每帧覆盖掉姿势）
 let armBase = { L: 0, R: 0 };
 const currentModel = { path: null };
 let lastBlink = performance.now(), autoBlink = true, curBlink = -1;
 let idleMotion = true;       // 待机微动（呼吸+轻摆）。自动化测试需冻结它，否则像素差分全是抖动
-const lookTarget = new THREE.Vector3(0, 0.75, 0.2);
+const lookTarget = new THREE.Vector3(0, 0.75, 0.2);       // 实际用于 lookAt 的值（弹簧输出）
+const lookTargetGoal = new THREE.Vector3(0, 0.75, 0.2);   // 鼠标给出的目标值（弹簧输入）
+const gazeSpring = { x: new Spring(0, 26, 0.85), y: new Spring(0, 26, 0.85) };
 let idleTime = 0;
 let dragging = false, dragStartX = 0, dragStartY = 0, lastHoverSay = 0, bubbleTimer = null;
 const clock = new THREE.Clock();
 
+// —— 拖动相关弹簧 ——
+// 参数含义：刚度越大回得越快；dampingRatio < 1 才会摆动（回弹）
+//   dragSway 是"被拎起来后身体像钟摆一样晃"的主角，故意调得又软又欠阻尼：
+//     刚度 22 → 摆动周期约 1.3 秒；阻尼比 0.16 → 松手后能自然晃 3~4 下再停
+//     （实测刚度 55/阻尼 0.28 时 1.3 秒就完全静止，晃感全无，看着像瞬间弹回）
+const dragAmount = new Spring(0, 130, 0.80);   // 0→1「被拎起来」的程度，略回弹
+const dragSway   = new Spring(0, 22, 0.16);    // 摆动：软且欠阻尼 → 明显的余摆
+const dragLift   = new Spring(0, 150, 0.55);   // 拿起/放下时的拉伸压缩
+// ★ 拖动速度（平滑过）。这是"自然"的关键：
+//   匀速拖动时，被拎起的下半身应该【稳定地拖在后面】（滞后角），
+//   而不是一直在那儿振。只有起步/刹车/松手时才该荡。
+//   所以把"摆动"拆成两部分：稳态滞后（跟随速度）+ 瞬态余摆（弹簧振荡）。
+const dragVel    = new Spring(0, 26, 1.0);     // 跟随时不振荡，只要平滑
+// —— 待机相关弹簧 ——
+const idleBreath = new Spring(0, 12, 1.0);     // 呼吸起伏
+const idleShift  = new Spring(0, 5, 1.0);      // 重心左右转移（慢）
+const idleHead   = new Spring(0, 40, 0.75);    // 歪头/转头
+
+// —— 被提起来时的"重力下垂"弹簧（第三版新增，"生硬"的解药）——
+//   实现方式：把"重力下垂"表达成各骨骼绕 X 轴的前弯，由这几个弹簧驱动。
+//   阻尼比取 0.55~0.70 → 【略欠阻尼】：被拎起来时会有一次轻微过冲，
+//   那个"沉下去再稳住"的过程就是重量感来源。
+//   临界阻尼（1.0）会像液压杆一样没有生命感，这是实测出来的差别。
+//   刚度沿链递增 → 腰先沉、头后沉，自然错相（鞭梢效应），不会整块一起僵住。
+const spineSag    = new Spring(0, 34, 0.62);   // 脊柱下垂（周期≈1.08s）
+const neckSag     = new Spring(0, 45, 0.70);   // 颈+头下坠（周期≈0.94s）
+const shoulderSag = new Spring(0, 38, 0.65);   // 肩带下沉（周期≈1.02s）
+
+// ★ 两个必须实测标定的方向符号（已在浏览器里用数值 probe 标定，见下方注释）
+//   PITCH_FWD：脊柱绕 X 轴前弯的符号。
+//     脊柱链骨骼的 +Y 指向子节点（朝上），绕 +X 转 θ 时 +Y 转向 +Z；
+//     而角色面朝 −Z（相机在 +Z），所以 +Z 是【背后】→ 正角度=后仰，
+//     负角度=前弯。故 PITCH_FWD = −1。
+const PITCH_FWD = -1;
+//   LEG_Z_MIRROR：左右大腿骨骼局部 Z 轴若镜像，两腿同号旋转会变成"劈叉"
+//     而不是同向摆动。probe 实测：施加同号 rotation.z 后，两脚世界 X 反向
+//     移动 → 骨骼镜像 → 右侧需取反（保持"两腿并着一起荡"）。
+const LEG_Z_MIRROR = 1;
+
+// —— 随机微动作调度（不再是固定周期）——
+const gesture = { next: 2.5, kind: null, t: 0, dur: 2.2 };
+// 拖动时的水平速度（喂给钟摆）
+let dragLastDx = 0;
+// 上一帧的身体摇摆角，用于算"身体转动的角速度" → 喂给头发物理做惯性
+let bodySwayPrev = 0, bodySwayDelta = 0;
+// 复用对象，避免每帧 new（物理要跑 208 根骨骼，不能有额外分配）
+const _tmpQuat = new THREE.Quaternion();
+// 拖动时的"抓取点"高度（腰部）。用户明确要"从腰部被提起来"，
+// 所以绕腰摆动：腿离支点最远、甩得最明显，头只有小幅跟随。
+// 实测模型高约 1.6m，腰在 0.93 附近（由 __skinnedBox 的 hips 位置确定）。
+const GRAB_Y = 0.93;
+
+// 拖动反应状态（保持旧字段名，测试/诊断接口 __dragState 依赖它）
+const dragReaction = { on: false, tilt: 0 };
+
+// —— 垂直速度（上提/下放）——
+//   旧接口只传了 dx，所以"向上猛一提"和"向下快一放"完全没有通道，
+//   任何姿态都做不出来。现在补上 dy，让竖直方向的快慢也能驱动姿态。
+const dragVelY = new Spring(0, 26, 1.0);
+
+// —— springBone 调参（★ 关键的"生硬"解药）——
+//
+// 实测模型导出的原始参数（我逐个 joint 解析 GLB JSON 确认过）：
+//   stiffness 全 = 1.0、gravityPower 全 = 0.0、dragForce 全 = 0.5、hitRadius 全 = 0.0
+// 209 个 joint 取值完全一致 → 这是 VRM Add-on for Blender 的默认落值，
+// 【不是】原作者调过的（旧注释写错了，已更正）。
+//
+// 用 ζ = γ/ω 判据（three-vrm 实现：ω = √(stiffness/(B·dt))，γ = −ln(1−dragForce)·fps）：
+//   原始 1.0/0.5 → ω≈59 rad/s、ζ≈1.40 → 【过阻尼】，一次回摆都没有。
+//   所以头发裙摆被甩到 36° 后会"立刻定住"，看着像钢丝发条 —— 这就是生硬的来源之一。
+//   目标 ζ≈0.18 → 欠阻尼，松手后有 1~2 次可见余摆，才有"飘"的感觉。
+//
+// ⚠ 帧率敏感性：stiffness 与 gravityPower 都乘 dt，dragForce 是【每帧】系数不乘 dt，
+//   所以下面这套值是按本项目的 120fps 标定的。若把 TARGET_FPS 改成 60，
+//   需要 stiffness ×0.5、gravityPower ×0.5、dragForce → 1−(1−d)²。
+// ⚠ 不设 center：规范说 center 用于"移动时防止晃动"（VR 里走路用），
+//   而桌宠要的恰恰是整体位移时的滞后甩动。设了 center 头发会像焊死一样不动。
+// ⚠ 参数依据：只动 2 个参数，用社区通用值，其余保持模型原值。
+//
+// 【为什么只动 2 个】
+// 模型导出的原始值是 stiffness=1.0 / dragForce=0.5（209 个 joint 全一样，
+// 是 Blender 导出器的默认落值，没人调过）。这两个值凑在一起是【过阻尼】：
+//   ω = √(stiffness/(骨段长·dt)) ≈ 59 rad/s
+//   γ = −ln(1−dragForce)·fps ≈ 83
+//   ζ = γ/ω ≈ 1.40  →  抖一下立刻定住，零回摆。这就是"头发裙摆像钢丝"的原因。
+//
+// 社区共识只有一句话（[Tcam Tips](https://note.com/tcam727/n/n312bcd42d4e2)）：
+//   **stiffness = 摇动范围，dragForce = 摇动时间。**
+// 把两者一起调小 → 回摆变慢变久 → 有"飘"的感觉。这样 ζ 落到 0.3~0.5 的
+// 自然区间，既不是钢丝（ζ>1）也不是面条（ζ<0.1）。
+//
+// 【为什么不加 gravityPower】
+// 一条实测教训：把它从 0 加到 0.04~0.055 后，头发被重力压到 90°~130° 偏角，
+// 外观变成"塌下来"而不是"垂着"，反而更糟（社区也建议"Gravity 从 0 开始")。
+// 模型原始就是 0，保持不动最稳。
+//
+// 【为什么不设 hitRadius】
+// 模型骨段长中位数 0.034m，安全上限是它的一半 0.017 —— 超过这个值，同一根链上
+// 相邻 joint 的碰撞球会互相顶住，链会崩坏乱飞。给个远低于红线的小值即可。
+//
+// 【为什么不设 center】
+// 规范说 center 用于"移动时防止晃动"（VR 里走路用），而桌宠要的恰恰是
+// 整体位移时头发滞后甩动。设了 center，被拎起来时头发就像焊死一样不动。
+const SB_RULES = [
+  // 顺序有意义：先匹配到的生效
+  // 头发类：细、短、要灵活 → 稍硬一点、回摆久一点
+  { re: /^(hair|ponytail|earring|part_|weiba)/i,
+    name: '头发', stiffness: 0.30, dragForce: 0.10, gravityPower: 0.0, hitRadius: 0.005 },
+  // 裙摆/披风/布料：长、重、要沉 → 更软、衰减更慢
+  { re: /^(qun_|cloak|cloth)/i,
+    name: '裙摆', stiffness: 0.20, dragForce: 0.08, gravityPower: 0.0, hitRadius: 0.005 },
+];
+const SB_FALLBACK = { name: '其他', stiffness: 0.25, dragForce: 0.09, gravityPower: 0.0, hitRadius: 0.005 };
+
+// 拖拽时的 springBone 动态调参状态：
+//   静止时用调好的基准值；被拎起来时把 dragForce 调小 → 速度衰减变慢 → 甩得更开、飘得更久。
+//   ⚠ 必须平滑过渡：Verlet 的隐式速度 = (currentTail − prevTail)，它被 (1−dragForce) 缩放。
+//     dragForce 一帧之内突变会让隐式速度翻倍，头发当场炸开。
+const springDrag = { blend: 0, applied: false, wasActive: false };
+
+// 静止姿态基线（模型加载后快照，供下垂动画叠加）。键是 normalized humanoid 骨骼名。
+let restRot = {};
+
+/** 给模型的 springBone 按链名分组套用调好的参数；返回统计供日志/测试用 */
+function tuneSpringBone(vrmRef) {
+  const mgr = vrmRef?.springBoneManager;
+  if (!mgr || !mgr.joints) return null;
+  const joints = mgr.joints instanceof Map ? [...mgr.joints.values()] : [...mgr.joints];
+  const groups = {};
+  let n = 0;
+  for (const j of joints) {
+    const s = j.settings;
+    if (!s) continue;
+    const boneName = (j.bone && j.bone.name) || j.boneName || '';
+    const rule = SB_RULES.find((r) => r.re.test(boneName)) || SB_FALLBACK;
+    // 备份两套值：
+    //   __orig  = 模型里导出的原始值（供"恢复出厂"/对照）
+    //   __tuned = 本次调好的基准值（拖拽时在它基础上做动态缩放）
+    if (s.__orig === undefined) {
+      s.__orig = {
+        stiffness: s.stiffness, dragForce: s.dragForce,
+        gravityPower: s.gravityPower, hitRadius: s.hitRadius,
+      };
+    }
+    s.stiffness = rule.stiffness;
+    s.dragForce = rule.dragForce;
+    s.gravityPower = rule.gravityPower;
+    s.hitRadius = rule.hitRadius;
+    s.__tuned = { dragForce: rule.dragForce, gravityPower: rule.gravityPower };
+    groups[rule.name] = (groups[rule.name] || 0) + 1;
+    n += 1;
+  }
+  springDrag.applied = true;
+  return { joints: n, groups };
+}
+
+/**
+ * 拖拽 / 静止之间平滑过渡 springBone 的 dragForce。
+ *
+ * 静止 = 基准值（ζ≈0.18，安静时只有轻微呼吸带动）；
+ * 被拎起来 = dragForce 降到基准的 45% → 速度衰减更慢 → 甩得更开、余摆更久，
+ *            这就是"被拎起来头发裙摆飘起来"的观感来源。
+ *
+ * ⚠ 为什么必须平滑：Verlet 的隐式速度是 (currentTail − prevTail)，它被 (1 − dragForce)
+ *   缩放。dragForce 一帧之内突变会让隐式速度瞬间翻倍，头发当场炸开（这份报告里
+ *   反复警告的那个坑）。这里用 0.12s 时间常数的一阶低通，全程无突变。
+ *
+ * @param dt 帧间隔（秒）
+ * @param target 0 = 完全静止基准，1 = 拖拽最飘
+ */
+function stepSpringBoneDrag(dt, target) {
+  if (!springDrag.applied || !vrm?.springBoneManager) return;
+  const k = 1 - Math.exp(-dt / 0.12);
+  springDrag.blend += (target - springDrag.blend) * k;
+  // 已经完全回到静止：把值精确复位并跳过后续每帧写入
+  if (springDrag.blend < 0.01 && target === 0) {
+    if (springDrag.wasActive) {
+      applySpringDrag(0);
+      springDrag.wasActive = false;
+    }
+    return;
+  }
+  springDrag.wasActive = true;
+  applySpringDrag(springDrag.blend);
+}
+
+/** 按混合系数把 springBone 的 dragForce 写到基准值与该缩放之间（0 = 基准，1 = 最飘） */
+function applySpringDrag(b) {
+  const mgr = vrm?.springBoneManager;
+  if (!mgr || !mgr.joints) return;
+  const joints = mgr.joints instanceof Map ? mgr.joints.values() : mgr.joints;
+  // 拖拽时 dragForce 降到基准的 45%（0.030 → 0.0135），衰减时间常数拉长约 1.8 倍
+  const DRAG_SCALE = 0.45;
+  const f = 1 + b * (DRAG_SCALE - 1);   // b=0 → 1.0（基准），b=1 → 0.45
+  for (const j of joints) {
+    const s = j.settings;
+    if (!s || !s.__tuned) continue;
+    s.dragForce = s.__tuned.dragForce * f;
+  }
+}
+
+/** 诊断/测试：读 springBone 调参现状（供自动化断言） */
+window.__springBoneState = () => {
+  const mgr = vrm?.springBoneManager;
+  if (!mgr || !mgr.joints) return { native: false };
+  const joints = mgr.joints instanceof Map ? [...mgr.joints.values()] : [...mgr.joints];
+  const groups = {};
+  let first = null;
+  for (const j of joints) {
+    const s = j.settings;
+    if (!s) continue;
+    const nm = (j.bone && j.bone.name) || '';
+    const rule = SB_RULES.find((r) => r.re.test(nm)) || SB_FALLBACK;
+    groups[rule.name] = (groups[rule.name] || 0) + 1;
+    if (!first) {
+      first = { bone: nm, stiffness: s.stiffness, dragForce: s.dragForce,
+                gravityPower: s.gravityPower, hitRadius: s.hitRadius };
+    }
+  }
+  return {
+    native: true,
+    joints: joints.length,
+    applied: springDrag.applied,
+    blend: +springDrag.blend.toFixed(4),
+    groups,
+    first,
+  };
+};
+
+/** 多个不同频率叠加的"拟随机"波动：比单个 sin 自然得多，且不会看出循环 */
+function layered(t, f1, f2, f3, ph) {
+  return Math.sin(t * f1 + ph) * 0.56
+       + Math.sin(t * f2 + ph * 1.7) * 0.30
+       + Math.sin(t * f3 + ph * 3.1) * 0.14;
+}
+/** 平滑缓入缓出（0→1），用于微动作的起止 */
+function smoothstep(x) {
+  const t = Math.max(0, Math.min(1, x));
+  return t * t * (3 - 2 * t);
+}
+
+// 可切换的模型列表。
+// 只列 michelle_phys：它是从 PMX 重转的，同时带原生物理（39 条 spring / 209 joint）
+// 和 42 个表情（18 预设 + 25 自定义），是严格优于旧版的版本。
+// 旧的 michelle_expr.vrm 仍留在 models 目录作为后备，但不放进菜单，
+// 免得用户在两个几乎同名的选项之间犯迷糊。
 const MODELS = {
-  '米雪儿': './models/michelle.vrm',
-  '阿尔蒂娜': './models/aldina.vrm',
-  '祖姆': './models/Zome.vrm',
-  '拉兹莉': './models/Lazuli_VRM.vrm',
+  '米雪儿': './models/michelle_phys.vrm',
 };
 
 // ---------- 工具 ----------
@@ -325,6 +623,50 @@ async function loadModel(path) {
       console.warn('[js] relaxArms 失败: ' + e.message);
     }
 
+    // ★ 静止姿态基线快照（拖动下垂要叠加在它上面，不能凭空赋值）
+    //   待机分支每帧只写 rotation.z，从不写 rotation.x；
+    //   所以下垂用的 rotation.x 必须先记下静止值，否则第一帧就会把姿势打回 T-pose 或漂移。
+    try {
+      restRot = {};
+      const names = ['hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
+                     'leftShoulder', 'rightShoulder',
+                     'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
+                     'leftHand', 'rightHand',
+                     'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
+                     'leftFoot', 'rightFoot'];
+      vrm.humanoid.update();
+      const snap = {};
+      for (const n of names) {
+        const b = vrm.humanoid.getNormalizedBoneNode(n);
+        if (b) snap[n] = { x: b.rotation.x, y: b.rotation.y, z: b.rotation.z };
+      }
+      restRot = snap;
+      console.log('[js] restRot 基线已记录 ' + Object.keys(snap).length + ' 根骨骼');
+    } catch (e) {
+      console.warn('[js] restRot 记录失败: ' + e.message);
+      restRot = {};
+    }
+
+    // ★ 头发/裙摆物理
+    //   优先用模型【自带】的 VRMC_springBone（Blender 从 MMD 刚体转出来的，
+    //   19 collider / 39 条链 / 209 joint）。
+    //   ⚠ 两者不能同时开：会叠加两次摆动，头发直接飞起来。
+    try {
+      if (vrm.springBoneManager) {
+        hairPhysics = null;
+        const joints = vrm.springBoneManager.joints ? vrm.springBoneManager.joints.size : 0;
+        const tuned = tuneSpringBone(vrm);
+        console.log('[js] 使用模型自带 springBone, joints=' + joints
+                  + ' 调参=' + JSON.stringify(tuned));
+      } else {
+        hairPhysics = new HairPhysics(vrm);
+        console.log('[js] 模型无 springBone，改用自研物理 ' + JSON.stringify(hairPhysics.stats()));
+      }
+    } catch (e) {
+      console.warn('[js] 头发物理建立失败: ' + e.message);
+      hairPhysics = null;
+    }
+
     // ★ 自适应取景（按蒙皮后的真实包围盒，保证头脚都在画面内）
     let fit = null;
     try {
@@ -355,23 +697,223 @@ window.loadModel = loadModel;
 //
 // ★ 为什么不在 JS 里拖动窗口：
 //   原先这里用 mousemove 算增量 → pyBridge.dragWindow(dx,dy) → Python move()。
-//   但 Python 侧（Web3DPetWindow.eventFilter）也在处理同一批鼠标事件拖动窗口，
-//   两套同时搬窗口 → 抖动、迟滞、手感"很生硬"。
-//   现在统一由 Python 的 eventFilter 拖动（带屏幕夹紧 + 即时同步浮层），
-//   JS 这边只负责视线跟随，避免双重拖动。
+//   但 Python 侧也在处理同一批鼠标事件拖动窗口，两套同时搬窗口 → 抖动、
+//   迟滞、手感"很生硬"。现在统一由 Python 的全局鼠标轮询（_mouse_tick）拖动，
+//   JS 只负责视线跟随 + 命中检测 + 拖动时的角色反应动作。
+//   注意：拖动时 Chromium 仍可能把 mousemove 送进来，这里只更新视线，
+//   【绝不】再调用 dragWindow 移动窗口。
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  // 只用于区分"点击"与"拖动"，不再自己搬窗口
   dragStartX = e.screenX; dragStartY = e.screenY;
 });
 
 window.addEventListener('mousemove', (e) => {
-  // 视线跟随鼠标（纯视觉，不涉及窗口移动）
-  lookTarget.x = (e.clientX / window.innerWidth) * 2 - 1;
-  lookTarget.y = 0.75 - (e.clientY / window.innerHeight) * 0.6;
+  // 视线跟随鼠标（纯视觉，不涉及窗口移动）。
+  // 目标值不直接写给 lookAt，而是先喂给弹簧做缓冲 —— 否则眼球/头部
+  // 会"瞬间跳到"鼠标方向，看着很僵硬。弹簧让转头有起势和余韵。
+  lookTargetGoal.x = (e.clientX / window.innerWidth) * 2 - 1;
+  lookTargetGoal.y = 0.75 - (e.clientY / window.innerHeight) * 0.6;
+  // 鼠标动得越快，头跟得越急（模拟"注意到"的加速）。
+  // gazeSpring 是 {x, y} 两个弹簧，各自 kick（不是整体 kick）
+  const sp_raw = Math.hypot(lookTargetGoal.x - lookTarget.x, lookTargetGoal.y - lookTarget.y);
+  const sp = Math.min(sp_raw * 0.35, 1.2);
+  gazeSpring.x.kick(sp);
+  gazeSpring.y.kick(sp);
 });
 
 window.addEventListener('mouseup', () => { dragging = false; });
+
+/**
+ * 命中检测：这个窗口坐标是否点到了角色本体？
+ * Python 用它决定「点空白处不要拖窗口 / 不抢下层窗口的事件」。
+ */
+window.__hitTest = (px, py) => {
+  try {
+    if (!vrm) return true;
+    const ndc = new THREE.Vector2((px / window.innerWidth) * 2 - 1,
+                                  -(py / window.innerHeight) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, camera);
+    return ray.intersectObject(vrm.scene, true).length > 0;
+  } catch (e) {
+    return true;
+  }
+};
+
+/**
+ * 拖动状态同步（由 Python 每 16ms 调用）。
+ *
+ * 参数 dx / dy 是本次的水平、垂直移动量（像素）。它们不只是"倾斜多少"，
+ * 而是给对应方向的弹簧一个角速度冲击 —— 拖得越快冲得越猛，松手后还会自然晃两下。
+ * 这就是"拖动有反应、有重量"的来源，而不是简单地把身体转个角度。
+ *
+ * ⚠ 垂直通道（dy）是后补的。旧接口只传 dx，导致"向上猛一提"和"向下快一放"
+ *   根本没有输入通道，无论怎么调参数都做不出被提起的顿挫感。
+ */
+window.setDragging = (on, dx, dy) => {
+  const wasOn = dragReaction.on;
+  dragReaction.on = !!on;
+  if (on) {
+    const d = Number(dx) || 0;
+    const v = Number(dy) || 0;
+    // ① 平滑速度 → 稳态滞后角（拖动过程中身体"拖在后面"）
+    //    这是"自然"的关键：匀速拖动时不该来回振，而应该稳定地偏一个角度。
+    dragVel.to(THREE.MathUtils.clamp(d, -90, 90));
+    // ② 角速度冲击 → 瞬态余摆（起步/急停/松手时才明显）
+    //    摆幅 ≈ 冲击 / √刚度。拖一下（dx≈25）约摆 15°，快拖能到 25°。
+    dragSway.kick(THREE.MathUtils.clamp(-d * 0.055, -1.6, 1.6));
+    // ③ 垂直速度：向上提（v 为负）→ 身体被"抽紧"，抵消一部分下垂；
+    //    向下放（v 为正）→ 腿先到、躯干滞后，然后回弹。
+    dragVelY.to(THREE.MathUtils.clamp(v, -90, 90));
+    // 兼容旧字段（__dragState 诊断接口用）
+    dragReaction.tilt = THREE.MathUtils.clamp(d * 0.02, -0.25, 0.25);
+    dragLastDx = d;
+    // 刚被拿起来的瞬间额外给一下"顿挫"，像真被拎起来
+    if (!wasOn) {
+      dragSway.kick(0.45);
+      dragLift.kick(1.5);
+      dragVel.reset(0);
+      dragVelY.reset(0);
+    }
+  } else {
+    dragReaction.tilt = 0;
+    dragVel.to(0);      // 松手：滞后角平滑归零，同时钟摆自己阻尼停下
+    dragVelY.to(0);
+  }
+};
+// 诊断/测试：读当前拖动反应状态
+window.__dragState = () => ({
+  on: dragReaction.on,
+  tilt: dragReaction.tilt,
+  amount: +dragAmount.value.toFixed(4),
+  sway: +dragSway.value.toFixed(4),
+  swayVel: +dragSway.vel.toFixed(4),
+  scaleY: +vrm.scene.scale.y.toFixed(4),
+  // 第三版新增：下垂链的三个弹簧 + 垂直速度通道
+  spineSag: +spineSag.value.toFixed(4),
+  neckSag: +neckSag.value.toFixed(4),
+  shoulderSag: +shoulderSag.value.toFixed(4),
+  velY: +dragVelY.value.toFixed(4),
+});
+
+/**
+ * ★ 场景几何 + 关键骨骼角度（自动化测试用）。
+ *
+ * 为什么必须有这个：`vrm` 是模块作用域的变量，不在 window 上，
+ * 所以测试脚本里直接写 `vrm.scene.position.y` 会抛
+ * "ReferenceError: vrm is not defined"（runJavaScript 在全局作用域执行）。
+ * 所有需要读 vrm 的断言都得走这里的 page helper。
+ */
+window.__sceneGeo = () => {
+  try {
+    const s = vrm.scene;
+    const g = (n) => {
+      const b = vrm.humanoid?.getNormalizedBoneNode(n);
+      if (!b) return null;
+      return { x: +b.rotation.x.toFixed(4), y: +b.rotation.y.toFixed(4), z: +b.rotation.z.toFixed(4) };
+    };
+    const P = (n) => {
+      const b = vrm.humanoid?.getNormalizedBoneNode(n);
+      if (!b) return null;
+      const v = b.getWorldPosition(new THREE.Vector3());
+      return { x: +v.x.toFixed(4), y: +v.y.toFixed(4), z: +v.z.toFixed(4) };
+    };
+    return {
+      // 场景层
+      lift: +s.position.y.toFixed(4),            // 被提起的高度
+      lateral: +Math.abs(s.position.x).toFixed(4), // 横向位移
+      rotZ: +s.rotation.z.toFixed(4),
+      scaleY: +s.scale.y.toFixed(4),
+      // 下垂链（U 形）——这些是真实骨骼角度，不是弹簧值
+      spineX: (g('spine') || {}).x,
+      chestX: (g('chest') || g('upperChest') || {}).x,
+      neckX: (g('neck') || {}).x,
+      headX: (g('head') || {}).x,
+      shoulderLZ: (g('leftShoulder') || {}).z,
+      shoulderRZ: (g('rightShoulder') || {}).z,
+      footLX: (g('leftFoot') || {}).x,
+      lowerLegLX: (g('leftLowerLeg') || {}).x,
+      armLZ: (g('leftUpperArm') || {}).z,
+      // 世界坐标（判断"腰是不是最高点、肩有没有往下塌"）
+      wHips: P('hips'), wHead: P('head'), wFootL: P('leftFoot'),
+      wShoulderL: P('leftShoulder'),
+    };
+  } catch (e) { return { __err: String(e.message || e) }; }
+};
+
+/**
+ * ★ 方向标定 probe（自动化用，不依赖肉眼）。
+ *
+ * 两个方向符号无法靠读代码 100% 确定，必须实测：
+ *   ① PITCH_FWD —— 脊柱前弯到底是 rotation.x 取正还是取负
+ *   ② LEG_Z_MIRROR —— 左右大腿骨骼的 Z 轴是否镜像
+ *
+ * 判据（都是世界坐标，与骨骼局部系无关）：
+ *   ① 给 spine.rotation.x = -0.30，看【头】的世界 Z 往哪走。
+ *      角色面朝 −Z，头往前弯应该朝 −Z 去 → headZ 变负 → PITCH_FWD=-1 正确。
+ *   ② 给两腿同号 rotation.z = +0.40，看两【脚】的世界 X 是否同向。
+ *      同向 = 没镜像（MIRROR=1）；反向 = 镜像了（MIRROR=-1）。
+ *
+ * 用完自动把骨骼还原，不污染画面。
+ */
+window.__probeSigns = () => {
+  const out = {};
+  try {
+    if (!vrm) return { error: 'no vrm' };
+    const V = THREE.Vector3;
+    const wp = (n) => {
+      const b = vrm.humanoid?.getNormalizedBoneNode(n);
+      return b ? b.getWorldPosition(new V()) : null;
+    };
+    vrm.humanoid.update(); vrm.scene.updateMatrixWorld(true);
+
+    // —— ① 脊柱前弯方向 ——
+    const spN = vrm.humanoid?.getNormalizedBoneNode('spine');
+    const hdN = vrm.humanoid?.getNormalizedBoneNode('head');
+    if (spN && hdN) {
+      const headBefore = wp('head');
+      const saveX = spN.rotation.x;
+      spN.rotation.x = -0.30;
+      vrm.humanoid.update(); vrm.scene.updateMatrixWorld(true);
+      const headAfter = wp('head');
+      spN.rotation.x = saveX;
+      vrm.humanoid.update(); vrm.scene.updateMatrixWorld(true);
+      const dz = headAfter.z - headBefore.z;
+      const dy = headAfter.y - headBefore.y;
+      out.pitch = {
+        headDeltaZ: +dz.toFixed(4),
+        headDeltaY: +dy.toFixed(4),
+        // 面朝 −Z：头往 −Z 去 = 前弯 = PITCH_FWD 应为 -1
+        verdict: dz < -0.005 ? -1 : (dz > 0.005 ? 1 : 0),
+        note: dz < 0 ? 'rotation.x 负 = 前弯（PITCH_FWD=-1 正确）'
+                     : (dz > 0 ? 'rotation.x 正 = 前弯（PITCH_FWD=1）' : '位移太小，无法判定'),
+      };
+    }
+    // —— ② 左右腿 Z 轴镜像 ——
+    const tL = vrm.humanoid?.getNormalizedBoneNode('leftUpperLeg');
+    const tR = vrm.humanoid?.getNormalizedBoneNode('rightUpperLeg');
+    if (tL && tR) {
+      const fL0 = wp('leftFoot'), fR0 = wp('rightFoot');
+      const sL = tL.rotation.z, sR = tR.rotation.z;
+      tL.rotation.z = 0.40; tR.rotation.z = 0.40;   // 同号施加
+      vrm.humanoid.update(); vrm.scene.updateMatrixWorld(true);
+      const fL1 = wp('leftFoot'), fR1 = wp('rightFoot');
+      tL.rotation.z = sL; tR.rotation.z = sR;
+      vrm.humanoid.update(); vrm.scene.updateMatrixWorld(true);
+      const dL = fL1.x - fL0.x, dR = fR1.x - fR0.x;
+      out.legMirror = {
+        leftFootDeltaX: +dL.toFixed(4),
+        rightFootDeltaX: +dR.toFixed(4),
+        sameDirection: (dL * dR) > 0,
+        verdict: (dL * dR) > 0 ? 1 : -1,
+        note: (dL * dR) > 0 ? '同号 → 未镜像（LEG_Z_MIRROR=1）'
+                            : '反向 → 已镜像，右侧需取反（LEG_Z_MIRROR=-1）',
+      };
+    }
+    out.current = { PITCH_FWD, LEG_Z_MIRROR };
+    return out;
+  } catch (e) { return { error: e.message }; }
+};
 
 // 悬停角色 → 说话
 renderer.domElement.addEventListener('mousemove', (e) => {
@@ -405,50 +947,336 @@ function onResize() {
 window.addEventListener('resize', onResize);
 
 // ---------- 主循环 ----------
-function animate() {
-  requestAnimationFrame(animate);
+// ★ 帧率策略（用户要求"顶格 120 帧"）—— 这里踩过三个坑，都记下来：
+//
+//  坑1：Chromium 默认把 rAF 锁在 vsync 上（60Hz → 60 帧）。加启动参数
+//       --disable-frame-rate-limit / --disable-gpu-vsync 才解的开。
+//       注意参数必须写在【最先被导入】的那个文件里（pet.py），
+//       否则 setdefault 会让后写的参数永远不生效。
+//
+//  坑2：透明置顶小窗会被 Chromium 判成"被遮挡的后台窗口"而停止合成，
+//       实测掉到 1 帧。要加 --disable-backgrounding-occluded-windows 等参数。
+//
+//  坑3（最关键）：【不要用 setAnimationLoop + 跳过帧来限速】。
+//       三个参数的循环是"渲染完才触发下一次回调"，一旦某一帧选择跳过
+//       （不渲染），下一次回调就被推迟到下一个 vsync（16.6ms）——
+//       于是"渲染→跳过→渲染→跳过"交替，帧率被硬生生砍半：
+//       实测 120 上限只跑出 51 帧，而不限速反而有 421 帧。
+//       正确做法：用 setTimeout 自己定节拍。setTimeout 不受 vsync 耦合，
+//       配合 --disable-background-timer-throttling 可以稳定跑到目标帧率。
+let TARGET_FPS = 120;
+let _nextFrameAt = 0;
+
+let _fpsCount = 0, _fpsT0 = performance.now(), _fpsValue = 0;
+window.__fps = () => _fpsValue;   // 自动化测试可读，但不上屏
+let _rawCalls = 0, _skipped = 0;
+window.__rawFrames = () => _rawCalls;
+window.__skipped = () => _skipped;
+window.__targetFps = () => TARGET_FPS;
+window.__resetStats = () => {
+  _rawCalls = 0; _skipped = 0; _fpsCount = 0; _fpsValue = 0;
+  _fpsT0 = performance.now(); _nextFrameAt = 0;
+};
+// 帧耗时拆解（诊断用）
+const _prof = { total: 0, vrmUpdate: 0, render: 0 };
+window.__profile = () => JSON.stringify(_prof);
+// 渲染后端信息（判断有没有掉进 SwiftShader 软件渲染）
+window.__gpuInfo = () => {
   try {
+    const gl = renderer.getContext();
+    const d = gl.getExtension('WEBGL_debug_renderer_info');
+    return JSON.stringify({
+      vendor: d ? gl.getParameter(d.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+      renderer: d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+      targetFps: TARGET_FPS,
+    });
+  } catch (e) { return 'ERR:' + e.message; }
+};
+
+function animate() {
+  try {
+    _rawCalls++;
+    const _p0 = performance.now();
     const dt = Math.min(clock.getDelta(), 0.05);
     idleTime += dt;
     if (vrm) {
-      // 待机动作：呼吸起伏 + 轻微摇摆 + 手臂轻摆 + 偶尔歪头。
-      // ★ 之前幅度只有 0.004m（4 毫米）且没有骨骼动作，用户反馈「没有动作」——
-      //   现在整体幅度放大到肉眼可见，并加上骨骼级的小动作。
-      //   冻结时（idleMotion=false）全部归零，保证自动化测试的像素差分干净。
+      // ---------- 动作系统（弹簧 + 钟摆 + 随机微动作）----------
+      const L = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
+      const R = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
+      const neck = vrm.humanoid?.getNormalizedBoneNode('neck')
+                || vrm.humanoid?.getNormalizedBoneNode('head');
+      const spine = vrm.humanoid?.getNormalizedBoneNode('spine')
+                 || vrm.humanoid?.getNormalizedBoneNode('chest');
+      const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+      const chest = vrm.humanoid?.getNormalizedBoneNode('chest')
+                 || vrm.humanoid?.getNormalizedBoneNode('upperChest');
+      const head = vrm.humanoid?.getNormalizedBoneNode('head');
+
       if (idleMotion) {
         const t = idleTime;
-        // 呼吸：整体上下 ~1.2cm（0.012），周期约 3.1 秒
-        vrm.scene.position.y = Math.sin(t * 2.0) * 0.012;
-        // 轻盈摇摆：绕 Z 轴 ±1.2°
-        vrm.scene.rotation.z = Math.sin(t * 0.8) * 0.021;
-        // 手臂轻摆（在 relaxArms 设的基准角上叠加，幅度 ±3.5°）
-        const L = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
-        const R = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
+
+        // —— 待机目标值：呼吸/重心用弹簧跟随，避免"匀速正弦"的机械感 ——
+        // 呼吸：用叠加波做不规则起伏（真实呼吸本来就长短不一）
+        idleBreath.to(layered(t, 1.9, 3.1, 0.7, 0.0) * 0.011);
+        idleBreath.k = 12; idleBreath.step(dt);
+        // 重心左右转移：很慢，像站着轻轻换脚
+        idleShift.to(layered(t, 0.31, 0.53, 0.19, 1.3));
+        idleShift.step(dt);
+
+        // —— 随机微动作：歪头 / 转头 / 抬手，随机选一个，缓入缓出 ——
+        gesture.next -= dt;
+        if (gesture.next <= 0 && !dragReaction.on) {
+          const kinds = ['headTilt', 'headTurn', 'shoulderShift', 'weightShift'];
+          gesture.kind = kinds[Math.floor(Math.random() * kinds.length)];
+          gesture.t = 0;
+          gesture.dur = 1.6 + Math.random() * 1.8;
+          gesture.next = 2.2 + Math.random() * 4.5;   // 随机间隔 → 看不出循环
+        }
+        let gHead = 0, gArm = 0, gBody = 0;
+        if (gesture.kind) {
+          gesture.t += dt;
+          const k = gesture.t / gesture.dur;
+          if (k >= 1) { gesture.kind = null; }
+          else {
+            // 缓入缓出包络：0→1→0，起止都平滑
+            const env = smoothstep(k < 0.5 ? k * 2 : (1 - k) * 2);
+            if (gesture.kind === 'headTilt')    gHead = env * (0.06 + Math.random() * 0.05);
+            else if (gesture.kind === 'headTurn') gHead = env * 0.16;
+            else if (gesture.kind === 'shoulderShift') gArm = env * 0.10;
+            else gBody = env * 0.020;
+          }
+        }
+        idleHead.to(gHead);
+        idleHead.step(dt);
+        // 头部朝向：叠加在 lookAt 之上做小幅自由摆动
+        const headWander = layered(t, 0.23, 0.41, 0.13, 2.2) * 0.035;
+
+        // —— 应用到骨骼 ——
+        // 注意：场景 position 不在这里写（统一由下方"统一写入场景位移"处理），
+        // 否则待机和拖动两处互相覆盖，拖动偏移会被冲掉。
+        // 身体摇摆：两个不同频率叠加，缓慢且不规则
+        const bodySway = layered(t, 0.37, 0.61, 0.89, 0.6) * 0.017;
+        vrm.scene.rotation.z = bodySway + idleShift.value * 0.004 + gBody;
+        // 记录角速度 → 头发物理据此甩动（身体动，头发滞后）
+        bodySwayDelta += (bodySway - bodySwayPrev);
+        bodySwayPrev = bodySway;
+        if (spine) {
+          spine.rotation.z = idleShift.value * 0.024;
+          spine.rotation.y = layered(t, 0.29, 0.47, 0.67, 4.1) * 0.018;
+        }
+        if (chest) chest.rotation.z = idleShift.value * 0.010;
+        // 手臂：随呼吸和重心自然轻摆，两侧相位不同（真人不会完全同步）
         if (L && R) {
-          const sw = Math.sin(t * 1.3) * 0.06;
-          L.rotation.z = armBase.L - sw;
-          R.rotation.z = armBase.R + sw;
+          const sw = layered(t, 1.31, 1.77, 0.41, 0.0) * 0.055;
+          const swR = layered(t, 1.27, 1.61, 0.37, 1.9) * 0.055;
+          L.rotation.z = armBase.L - sw + gArm;
+          R.rotation.z = armBase.R + swR - gArm * 0.6;
+          L.rotation.x = 0.06 + layered(t, 0.53, 0.83, 0.31, 3.3) * 0.020;
+          R.rotation.x = 0.06 + layered(t, 0.49, 0.79, 0.29, 5.1) * 0.020;
         }
-        // 偶尔歪头（每 ~7 秒一次，持续 ~2 秒，平滑出入）
-        const cyc = t % 7.0;
-        let tilt = 0;
-        if (cyc > 4.6 && cyc < 6.6) {
-          const k = (cyc - 4.6) / 2.0;              // 0→1
-          tilt = Math.sin(k * Math.PI) * 0.10;      // 平滑淡入淡出
+        if (neck) {
+          neck.rotation.z = idleHead.value + headWander * 0.5;
+          neck.rotation.y = idleHead.value * 0.8 - headWander;
         }
-        const neck = vrm.humanoid?.getNormalizedBoneNode('neck')
-                  || vrm.humanoid?.getNormalizedBoneNode('head');
-        if (neck) neck.rotation.z = idleMotion ? tilt : 0;
+        if (head) head.rotation.y = headWander * 0.6;
+        if (hips) hips.rotation.z = idleShift.value * 0.008;
       } else {
-        vrm.scene.position.y = 0;
+        // 冻结（自动化测试用）：全部归位，保证像素差分干净
+        idleBreath.reset(0); idleShift.reset(0); idleHead.reset(0);
         vrm.scene.rotation.z = 0;
-        const L = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
-        const R = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
+        if (spine) { spine.rotation.z = 0; spine.rotation.y = 0; }
+        if (chest) chest.rotation.z = 0;
         if (L && R) { L.rotation.z = armBase.L; R.rotation.z = armBase.R; }
-        const neck = vrm.humanoid?.getNormalizedBoneNode('neck')
-                  || vrm.humanoid?.getNormalizedBoneNode('head');
-        if (neck) neck.rotation.z = 0;
+        if (neck) { neck.rotation.z = 0; neck.rotation.y = 0; }
+        if (head) head.rotation.y = 0;
+        if (hips) hips.rotation.z = 0;
       }
+
+      // ---------- 拖动反应：从【腰部】整只被提起来 ----------
+      //
+      // ⚠ 三轮返工记录（前两轮都是用户指出来的）：
+      //   第一版：vrm.scene.rotation.z += sway —— 旋转轴在脚底原点，
+      //           角色像节拍器一样以脚为支点左右翻，像要摔倒 → "很诡异"。
+      //   第二版：改绕头顶抓点 —— 又不对，用户要的是【从腰部提起来】。
+      //   第三版（当前）：**不再只靠整体旋转**。
+      //
+      // ★ 第三版的核心诊断（这是"生硬"的根因）：
+      //   把整个模型当刚体绕腰点转 ≠ 被重力拽着下垂。
+      //   刚体旋转时所有骨骼都不弯，身体是一根直棍 —— 做不出"腰是最高点、
+      //   肩和腿往下坠"的 U 形。而且当时横向摆动位移 22cm 是提起高度 11cm 的
+      //   两倍，观感上角色主要在【左右平移】而不是【被提起来】。
+      //
+      // ★ 正确模型：支点就是 hips 本身。
+      //   腰被抓住 → hips 是锚点（由 Python 移动窗口负责宏观位移）；
+      //   身体其余部分【相对 hips 下垂】：
+      //     ① 脊柱塌陷：spine/chest/neck/head 逐级前弯 → U 形的左上臂
+      //     ② 肩带下沉：shoulder 骨骼下垂 → U 形的两个上端（旧版完全没用到）
+      //     ③ 腿自然垂直：几乎笔直，只靠膝盖放松 + 脚背绷直
+      //   整体旋转只保留【小幅】连带（0.42× → 0.20×），不再当主力。
+      //
+      // ⚠ 绕点旋转的 position 补偿（数学已验证正确，保留）：
+      //   只设 rotation.z=θ 时，场景是绕【自身原点】(脚底) 转的。
+      //   要改成绕 C=(0,Cy,0) 转，原点 O 的最终位置应为 R·(O−C)+C。
+      //   代入 O=(0,0,0)、绕 Z 轴旋转矩阵，得到原点位移：
+      //       dx =  Cy·sinθ
+      //       dy =  Cy·(1−cosθ)
+      //
+      // ⚠⚠ 绝对赋值，不是累加！
+      //   之前写成 `vrm.scene.position.x += ...`，而待机分支只写了
+      //   `position.y = idleBreath.value`，从来没把 x 归零 →
+      //   x 每帧累加，实测几秒内漂到 −14（角色直接飞出画面）。
+      //   现在统一用 dragOffsetX/Y 这两个"本帧绝对偏移量"，最后一次性赋值。
+      dragAmount.to(dragReaction.on ? 1 : 0);
+      dragAmount.step(dt);
+      const dA = dragAmount.value;
+      dragSway.step(dt);
+      dragVel.step(dt);
+      dragVelY.step(dt);
+      dragLift.to(dragReaction.on ? 1 : 0);
+      dragLift.step(dt);
+      // 脊柱/颈/肩的下垂弹簧各自跟随"被提起来"的程度，
+      // 刚度不同 → 沿链自然错相（腰先沉、头后沉），这就是鞭梢效应。
+      spineSag.to(dA);    spineSag.step(dt);
+      neckSag.to(dA);     neckSag.step(dt);
+      shoulderSag.to(dA); shoulderSag.step(dt);
+
+      let dragOffsetX = 0, dragOffsetY = 0;
+      const swayActive = dA > 0.001 || Math.abs(dragSway.value) > 0.001
+                      || Math.abs(dragSway.vel) > 0.001;
+      if (swayActive) {
+        const sway = dragSway.value;
+        const lift = dragLift.value;
+        // 稳态滞后：被拎起的下半身"拖在运动反方向"。
+        //   dragVel 是鼠标每帧的水平位移（px），换算成角度时取小系数，
+        //   限幅 0.35rad（20°），避免快速拖动时腿甩到不合理的位置。
+        const lagAngle = THREE.MathUtils.clamp(-dragVel.value * 0.0045, -0.35, 0.35);
+        // 垂直速度：向上猛提（velY 负）→ stretch 为正 → 身体被"抽紧"
+        const stretch = THREE.MathUtils.clamp(-dragVelY.value / 90, -1, 1);
+
+        // ★ 钟摆拆两份：整体倾斜只做小幅连带，主力是骨骼下垂
+        //   旧版 bodyTilt 系数 0.42、legSwing 1.35 → 横向位移远超提升高度，像平移。
+        const bodyTilt = THREE.MathUtils.clamp(sway * 0.20 + lagAngle * 0.18, -0.14, 0.14);
+        const legSwing = THREE.MathUtils.clamp(sway * 1.35 + lagAngle, -0.70, 0.70);
+
+        // —— 1) 整体绕【腰部】抓点做小幅倾斜（连带，不再是主力）——
+        const cs = Math.cos(bodyTilt), sn = Math.sin(bodyTilt);
+        const Cy = GRAB_Y;
+        vrm.scene.rotation.z = bodyTilt;
+        // 绕 C=(0,Cy,0) 旋转时原点的位移（推导见上方注释）
+        dragOffsetX = (Cy * sn) * dA;
+        dragOffsetY = (Cy * (1 - cs)) * dA;
+
+        // —— 2) 整只被提离地面 ——
+        // 高度从 0.110 提到 0.180（约身高的 11%）。旧值 11cm 只占身高 6.9%，
+        // 再被 22cm 的横向位移盖过，肉眼读不出"悬空"。现在提升高度 > 横向位移。
+        dragOffsetY += dA * 0.180 + lift * 0.022;
+        // 悬空被重力拉长一点，落地瞬间压缩（squash & stretch）
+        // ⚠ 幅度收小了：scale.y 拉太多会被读成"橡皮人"而不是"重力"，
+        //   而且非均匀缩放会让 springBone 的骨段长变化（UniVRM #2242）。
+        vrm.scene.scale.y = 1 + dA * 0.008 - lift * 0.010;
+        vrm.scene.scale.x = vrm.scene.scale.z = 1 - dA * 0.005 + lift * 0.006;
+
+        // —— 3) ★ 骨骼下垂：U 形（这一整段是第三版新增的"生硬"解药）——
+        //   下垂量由 dragAmount 驱动、经各自弹簧平滑，所以被拎起来时是"沉下去"的
+        //   过程（带一次轻微过冲 = 重量感），而不是瞬间变形。
+        const P = PITCH_FWD;                 // 前弯方向（已由 probe 实测标定）
+        const sagS = spineSag.value;         // 脊柱下垂 0→1
+        const sagN = neckSag.value;          // 颈头下坠 0→1
+        const sagH = shoulderSag.value;      // 肩下沉 0→1
+        // 上提时被"抽紧"：下垂量减小（最多减少 40%）
+        const loosen = 1 - 0.40 * Math.max(0, stretch);
+        const trail = lagAngle;              // 拖尾（腿甩在运动反方向）
+
+        // ⚠ 命名注意：这个查询函数绝不能叫 R —— 外层 animate() 里的 R 是
+        //   rightUpperArm 骨骼节点，同名会遮蔽它，导致 `R.rotation.z = ...`
+        //   抛 "Cannot set properties of undefined"，每帧中断整个拖拽块。
+        const rst = (n) => restRot[n] || { x: 0, y: 0, z: 0 };
+        const sp = vrm.humanoid?.getNormalizedBoneNode('spine');
+        const ch = vrm.humanoid?.getNormalizedBoneNode('chest')
+                || vrm.humanoid?.getNormalizedBoneNode('upperChest');
+        const nk = vrm.humanoid?.getNormalizedBoneNode('neck');
+        const hd = vrm.humanoid?.getNormalizedBoneNode('head');
+        const shL = vrm.humanoid?.getNormalizedBoneNode('leftShoulder');
+        const shR = vrm.humanoid?.getNormalizedBoneNode('rightShoulder');
+        const hipB = vrm.humanoid?.getNormalizedBoneNode('hips');
+
+        // ① 脊柱链逐级前弯 → 腰是顶点、头和肩往下塌
+        //    角度来自调研：spine 9.2° / chest 7° / neck 11.5° / head 8°，
+        //    从腰到头顶累计约 35° —— 这个量级才读得出 U 形。
+        if (hipB) hipB.rotation.x = rst('hips').x + P * (-0.04 * dA);
+        if (sp) sp.rotation.x = rst('spine').x + P * (0.16 * sagS * loosen);
+        if (ch) ch.rotation.x = rst('chest').x + P * ((0.12 + 0.04 * Math.abs(sway)) * sagS * loosen);
+        if (nk) nk.rotation.x = rst('neck').x + P * (0.20 * sagN * loosen);
+        if (hd) hd.rotation.x = rst('head').x + P * (0.14 * sagN * loosen);
+        // ② 肩带下沉 → U 形的两个上端（旧版完全没用 shoulder，所以肩膀是平的）
+        if (shL) shL.rotation.z = rst('leftShoulder').z - (0.18 * sagH * loosen);
+        if (shR) shR.rotation.z = rst('rightShoulder').z + (0.18 * sagH * loosen);
+
+        // —— 4) 腿：几乎笔直地垂着，主运动是拖尾 ——
+        const thighL = vrm.humanoid?.getNormalizedBoneNode('leftUpperLeg');
+        const thighR = vrm.humanoid?.getNormalizedBoneNode('rightUpperLeg');
+        const legL = vrm.humanoid?.getNormalizedBoneNode('leftLowerLeg');
+        const legR = vrm.humanoid?.getNormalizedBoneNode('rightLowerLeg');
+        const footL = vrm.humanoid?.getNormalizedBoneNode('leftFoot');
+        const footR = vrm.humanoid?.getNormalizedBoneNode('rightFoot');
+        // 侧向摆（绕 Z）：腿像钟摆一样甩出去，幅度最大。
+        //   相机在 +Z 正面看，水平拖动时腿应该【在画面里横向拖在后面】，
+        //   所以主摆动就走 Z 轴（这是刻意的，和"改成前后甩"的建议相反：
+        //   前后甩在正面相机下几乎没有透视位移，读不出"跟着鼠标甩"）。
+        //   ⚠ LEG_Z_MIRROR：左右腿骨骼的局部 Z 可能镜像；若镜像，两腿同号会变成
+        //     "劈叉"而不是同向摆动。该值已由 probe 实测标定。
+        if (thighL) thighL.rotation.z = legSwing;
+        if (thighR) thighR.rotation.z = legSwing * LEG_Z_MIRROR;
+        // 前后摆（绕 X）：小幅，悬空时腿自然微蜷（腿绷直会像体操运动员）
+        if (thighL) thighL.rotation.x = rst('leftUpperLeg').x + P * (-0.05 * dA);
+        if (thighR) thighR.rotation.x = rst('rightUpperLeg').x + P * (-0.05 * dA);
+        // 膝盖放松后弯（不是绷直）+ 脚背绷直下垂
+        //   脚尖朝下是"被提着"性价比最高的一个提示，单独一根骨头就够读出来。
+        if (legL) legL.rotation.x = rst('leftLowerLeg').x + P * (-dA * 0.28 * loosen);
+        if (legR) legR.rotation.x = rst('rightLowerLeg').x + P * (-dA * 0.26 * loosen);
+        if (footL) footL.rotation.x = rst('leftFoot').x + 0.35 * dA;
+        if (footR) footR.rotation.x = rst('rightFoot').x + 0.32 * dA;
+
+        // —— 5) 手臂：自然垂在身侧，随身体轻甩（比腿滞后、幅度小）——
+        const armSway = -legSwing * 0.45 - trail * 0.25;
+        if (L && R) {
+          L.rotation.z = armBase.L + armSway - dA * 0.05;
+          R.rotation.z = armBase.R + armSway + dA * 0.05;
+          L.rotation.x = rst('leftUpperArm').x + P * (-0.10 * dA);
+          R.rotation.x = rst('rightUpperArm').x + P * (-0.10 * dA);
+        }
+        const loL = vrm.humanoid?.getNormalizedBoneNode('leftLowerArm');
+        const loR = vrm.humanoid?.getNormalizedBoneNode('rightLowerArm');
+        if (loL) loL.rotation.x = rst('leftLowerArm').x + P * (-0.25 * dA);
+        if (loR) loR.rotation.x = rst('rightLowerArm').x + P * (-0.25 * dA);
+        if (neck) {
+          // 摆动时的侧向跟随（叠加在下垂之上）
+          neck.rotation.z += -bodyTilt * 0.40;
+          neck.rotation.y += bodyTilt * 0.18;
+        }
+        if (sp) sp.rotation.z += -bodyTilt * 0.55;
+        if (ch) ch.rotation.z += -bodyTilt * 0.30;
+      } else if (!dragReaction.on) {
+        // 完全停下：彻底归位（含拖动时动过的所有骨骼）
+        //   ⚠ 必须回到 restRot，不能一律 set(0,0,0) —— 那会把 relaxArms 摆好的
+        //     自然站姿打回 T-pose（这个模型的 rest 是张臂 T-pose）。
+        vrm.scene.scale.set(1, 1, 1);
+        dragLift.reset(0);
+        for (const n of ['leftFoot', 'rightFoot', 'leftLowerLeg', 'rightLowerLeg',
+                         'leftUpperLeg', 'rightUpperLeg', 'spine', 'chest', 'upperChest',
+                         'neck', 'head', 'hips', 'leftShoulder', 'rightShoulder',
+                         'leftLowerArm', 'rightLowerArm']) {
+          const b = vrm.humanoid?.getNormalizedBoneNode(n);
+          const r = restRot[n];
+          if (b && r) b.rotation.set(r.x, r.y, r.z);
+        }
+      }
+      // 统一写入场景位移：待机呼吸 + 拖动偏移（绝对赋值，杜绝累加漂移）
+      vrm.scene.position.x = dragOffsetX;
+      vrm.scene.position.y = (idleMotion ? idleBreath.value : 0) + dragOffsetY;
+      // 被拎起来时让 springBone 的 dragForce 变小 → 头发裙摆甩得更开、余摆更久
+      // （必须在 vrm.update 之前写完；0=静止基准，1=最飘）
+      stepSpringBoneDrag(dt, dragReaction.on ? 1 : 0);
       // 眨眼：只在状态真的需要切换时调用 setBlink（避免每帧重算顶点）
       const t = performance.now() - lastBlink;
       if (autoBlink) {
@@ -465,17 +1293,53 @@ function animate() {
         curBlink = 0;
         setBlink(0);
       }
-      // 视线跟随鼠标
+      // 视线跟随鼠标：目标值经弹簧缓冲后再交给 lookAt，
+      // 让眼球/头部转向有起势、有余韵，而不是瞬间跳过去
+      gazeSpring.x.to(lookTargetGoal.x); gazeSpring.x.step(dt);
+      gazeSpring.y.to(lookTargetGoal.y); gazeSpring.y.step(dt);
+      lookTarget.x = gazeSpring.x.value;
+      lookTarget.y = gazeSpring.y.value;
       if (vrm.lookAt && vrm.lookAt.userTarget) {
         vrm.lookAt.userTarget.copy(lookTarget);
         vrm.lookAt.update();
       }
+      const _p1 = performance.now();
       vrm.update(dt);
+      _prof.vrmUpdate = performance.now() - _p1;
     }
-    if (mixer) mixer.update(dt);
+    const _p2 = performance.now();
     renderer.render(scene, camera);
-    if (Math.floor(performance.now() % 1000) < 16) {
-      fpsEl.textContent = Math.round(1000 / Math.max(dt * 1000, 1)) + ' FPS';
+    const _p3 = performance.now();
+    _prof.render = _p3 - _p2;
+    _prof.total = _p3 - _p0;
+    // ★ 不显示 FPS：用户要求去掉（这是给人看的桌宠，不是性能监视器）。
+    //   这里只默默统计，供自动化测试用 window.__fps() 读取。
+    //   ⚠ 注意闭包陷阱：这里必须用【独立的】变量名记录窗口起点，
+    //     若复用外层的 _fpsT0，赋值后相减恒为 0 → fps 变成 Infinity。
+    _fpsCount++;
+    const _fpsNow = performance.now();
+    const _fpsSpan = _fpsNow - _fpsT0;
+    if (_fpsSpan >= 1000) {
+      _fpsValue = Math.round(_fpsCount * 1000 / _fpsSpan);
+      _fpsCount = 0;
+      _fpsT0 = _fpsNow;
+    }
+
+    // ---------- 头发/裙摆物理 ----------
+    // 放在 vrm.update 之后、render 之前：先让骨骼动画定好父级姿态，
+    // 物理再在其上叠加摆动，最后一起渲染。
+    if (hairPhysics && hairPhysics.enabled && vrm) {
+      // 身体这一帧的角速度 → 头发的惯性力
+      //   bodySwayDelta 是身体摇摆的增量；dragSway.vel 是拖动钟摆的角速度。
+      //   两者都乘一个放大系数：角速度本身很小（弧度级），
+      //   而惯性项是"加速度"，需要放大到能推动头发的量级。
+      const angVel = bodySwayDelta * 60 + dragSway.vel * 0.9;
+      hairPhysics.update(dt, {
+        x: -angVel * 3.2,      // 身体往右倾 → 头发往左甩（惯性反向）
+        y: 0,
+        z: 0,
+      });
+      bodySwayDelta = 0;       // 用完清零，下一帧重新累积
     }
   } catch (err) {
     if (!window.__animErr) {
@@ -484,7 +1348,39 @@ function animate() {
     }
   }
 }
-animate();
+// ---------- 主循环调度 ----------
+// 用 setTimeout 自定节拍驱动渲染（原因见上面"坑3"的注释）。
+// 每帧根据实际耗时动态安排下一次：目标 1000/TARGET_FPS 毫秒，
+// 扣除本帧已经花掉的时间，既不会空转也不会叠加漂移。
+function scheduleNext() {
+  if (!_loopRunning) return;
+  const period = TARGET_FPS > 0 ? 1000 / TARGET_FPS : 0;
+  const elapsed = performance.now() - _frameStart;
+  const wait = Math.max(0, period - elapsed);
+  _loopTimer = setTimeout(_loopTick, wait);
+}
+
+function _loopTick() {
+  _frameStart = performance.now();
+  animate();
+  scheduleNext();
+}
+
+let _loopRunning = false, _loopTimer = null, _frameStart = 0;
+
+window.__startLoop = () => {
+  if (_loopRunning) return;
+  _loopRunning = true;
+  _frameStart = performance.now();
+  _loopTick();
+};
+window.__stopLoop = () => {
+  _loopRunning = false;
+  if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; }
+};
+window.__loopRunning = () => _loopRunning;
+
+window.__startLoop();
 
 // ---------- Python 桥 ----------
 window.setExpression = setExpression;
@@ -501,6 +1397,112 @@ window.__driver = () => morphDriver;
 window.__setBlink = setBlink;        // 诊断/测试用（生产走 autoBlink 自动眨眼）
 window.__currentBlink = () => curBlink;
 window.__setIdleMotion = (on) => { idleMotion = !!on; };
+// 头发/裙摆物理开关（自动化测试可关掉，保证像素差分干净）
+window.setHairPhysics = (on) => {
+  const was = hairPhysics ? hairPhysics.enabled : false;
+  if (hairPhysics) hairPhysics.enabled = !!on;
+  return { was: was, now: hairPhysics ? hairPhysics.enabled : false };
+};
+window.__hairStats = () => {
+  if (hairPhysics) return hairPhysics.stats();
+  if (vrm && vrm.springBoneManager) {
+    const j = vrm.springBoneManager.joints;
+    return { native: true, joints: j ? j.size : 0, enabled: true };
+  }
+  return null;
+};
+// 诊断：悬垂骨骼的"活动量"。
+//   · 自研物理：读质点的偏移量
+//   · 原生物理（VRMC_springBone）：反复采样同一批骨骼的四元数，
+//     取相对静止姿态的偏差 —— 变了就说明物理在跑
+const _physProbe = { rest: null, cur: null };
+window.__hairDelta = () => {
+  if (hairPhysics) {
+    let nz = 0, mx = 0;
+    for (const c of hairPhysics.chains) {
+      for (const p of c.parts) {
+        const d = p.pos.length();
+        if (d > 1e-4) nz++;
+        if (d > mx) mx = d;
+      }
+    }
+    return JSON.stringify({ mode: 'custom', moving: nz, maxOffset: +mx.toFixed(4) });
+  }
+  if (!vrm || !vrm.springBoneManager) return 'no-physics';
+  // 原生物理：把当前四元数快照存起来，和静止基准比
+  const names = ['hair_ribbon_l_01', 'hair_ribbon_l_05', 'ponytail_hair_m_03',
+                 'qun_0_0', 'qun_3_5', 'qun_7_12', 'weiba3', 'cloak_m_03'];
+  const snap = {};
+  for (const nm of names) {
+    const b = vrm.scene.getObjectByName(nm);
+    if (b) snap[nm] = b.quaternion.clone();
+  }
+  if (!_physProbe.rest) {
+    // 第一次调用：把当前状态当作"静止基准"（用于后续比较）
+    _physProbe.rest = snap;
+    return JSON.stringify({ mode: 'native', sampled: Object.keys(snap).length,
+                            note: '已记录基准，再调一次即可看到活动量' });
+  }
+  let moving = 0, mx = 0, worst = null;
+  for (const nm of Object.keys(snap)) {
+    const r = _physProbe.rest[nm];
+    if (!r) continue;
+    const d = snap[nm].angleTo(r);     // 四元数夹角（弧度）
+    if (d > 1e-4) moving++;
+    if (d > mx) { mx = d; worst = nm; }
+  }
+  return JSON.stringify({ mode: 'native', sampled: Object.keys(snap).length,
+                          moving: moving, maxAngle: +mx.toFixed(4), worst: worst,
+                          joints: vrm.springBoneManager.joints.size });
+};
+// 重置物理基准（测试用：改完姿势后想重新量）
+window.__resetPhysProbe = () => { _physProbe.rest = null; };
+/**
+ * 物理数值健全性 + 指定链现状（自动化用）。
+ * 判据：① 四元数不能有 NaN/Infinity（数值爆炸的硬信号）
+ *       ② 返回最偏的那条链的当前设置，便于对照调参是否生效
+ */
+window.__physSanity = () => {
+  try {
+    const mgr = vrm && vrm.springBoneManager;
+    if (!mgr) return { native: false };
+    const arr = mgr.joints instanceof Map ? [...mgr.joints.values()] : [...mgr.joints];
+    let bad = 0, maxAbs = 0, worstBone = '';
+    for (const j of arr) {
+      const q = j.bone.quaternion;
+      for (const v of [q.x, q.y, q.z, q.w]) {
+        if (!isFinite(v)) bad++;
+        if (Math.abs(v) > maxAbs) { maxAbs = Math.abs(v); worstBone = j.bone.name || ''; }
+      }
+    }
+    // 找一根有代表性的发带骨，回报它的实时四元数与设置
+    const probeName = 'hair_ribbon_l_05';
+    const t = arr.find((j) => (j.bone.name || '').indexOf(probeName) >= 0);
+    return {
+      native: true,
+      joints: arr.length,
+      nonFinite: bad,
+      maxQuatComponent: +maxAbs.toFixed(5),
+      worstBone,
+      probe: t ? {
+        bone: t.bone.name,
+        quat: [+t.bone.quaternion.x.toFixed(5), +t.bone.quaternion.y.toFixed(5),
+               +t.bone.quaternion.z.toFixed(5), +t.bone.quaternion.w.toFixed(5)],
+        stiffness: t.settings.stiffness,
+        dragForce: +t.settings.dragForce.toFixed(4),
+        gravityPower: t.settings.gravityPower,
+        hitRadius: t.settings.hitRadius,
+      } : null,
+      hasCenter: arr.some((j) => j.center != null),
+    };
+  } catch (e) { return { __err: String(e.message || e) }; }
+};
+// 帧率上限（Python 侧 / 设置面板可调；0 = 不限制）
+window.setTargetFps = (n) => {
+  const v = Number(n) || 0;
+  TARGET_FPS = v > 0 ? v : 0;
+  return TARGET_FPS;
+};
 // 取景/姿势诊断
 window.__refit = () => { try { return JSON.stringify(fitCamera(vrm)); } catch (e) { return 'ERR:' + e.message; } };
 window.__skinnedBox = () => {
@@ -554,8 +1556,58 @@ window.__vertexDelta = () => {
   return JSON.stringify({ nz: nz, max: +mx.toFixed(6) });
 };
 
+// 诊断：把角色渲染成 ASCII 字符画（本项目的视觉通道对图片无效，
+// 只能用字符画人工核对姿态：腿有没有悬空、倾斜是不是绕腰）
+window.__silhouette = (cols, rows) => {
+  try {
+    if (!vrm) return 'no-vrm';
+    cols = cols | 0 || 46; rows = rows | 0 || 30;
+    const grid = [];
+    for (let r = 0; r < rows; r++) grid.push(new Array(cols).fill(0));
+    const v = new THREE.Vector3();
+    let n = 0;
+    vrm.scene.traverse(o => {
+      if (!o.isSkinnedMesh || !o.geometry?.attributes?.position) return;
+      const pos = o.geometry.attributes.position;
+      const step = Math.max(1, Math.floor(pos.count / 4000));
+      for (let i = 0; i < pos.count; i += step) {
+        try {
+          if (o.getVertexPosition) o.getVertexPosition(i, v);
+          else v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+        } catch (e) { continue; }
+        // ★ 变换到世界空间再投影：vrm.scene 上的 position/rotation
+        //   （呼吸起伏、绕腰摆动）必须算进去，否则画出来的轮廓永远
+        //   是"站直不动"的样子，看不出拖动效果。
+        v.applyMatrix4(vrm.scene.matrixWorld);
+        v.project(camera);
+        const px = Math.round((v.x * 0.5 + 0.5) * (cols - 1));
+        const py = Math.round((1 - (v.y * 0.5 + 0.5)) * (rows - 1));
+        if (px >= 0 && px < cols && py >= 0 && py < rows) { grid[py][px]++; n++; }
+      }
+    });
+    const lines = grid.map(row => row.map(c => c === 0 ? ' ' : (c > 8 ? '#' : (c > 3 ? '+' : '.'))).join(''));
+    // 附上关键骨骼的屏幕位置，方便核对（腰、脚、头）
+    const mark = (name) => {
+      const b = vrm.humanoid?.getNormalizedBoneNode(name);
+      if (!b) return null;
+      const p = new THREE.Vector3();
+      b.getWorldPosition(p);      // 已是世界坐标（含 scene 上的拖动变换）
+      p.project(camera);
+      return [Math.round((p.x * 0.5 + 0.5) * (cols - 1)),
+              Math.round((1 - (p.y * 0.5 + 0.5)) * (rows - 1))];
+    };
+    const info = {
+      hips: mark('hips'), leftFoot: mark('leftFoot'), head: mark('head'),
+      sceneY: +vrm.scene.position.y.toFixed(4),
+      sceneX: +vrm.scene.position.x.toFixed(4),
+      rotZ: +vrm.scene.rotation.z.toFixed(4),
+      samples: n,
+    };
+    return lines.join('\n') + '\n' + JSON.stringify(info);
+  } catch (e) { return 'ERR:' + e.message; }
+};
+
 // 供自动化测试抓图：先强制渲染一帧再取数据
-// （窗口被遮挡时 Chromium 不合成，直接 toDataURL 可能拿到空图）
 window.__snapshot = () => {
   try {
     // ★ 连画两帧：第一帧把改过的顶点属性上传，第二帧才真正画出来。
@@ -589,8 +1641,225 @@ window.__pixelStats = () => {
   } catch (e) { return 'ERR:' + e.message; }
 };
 
+// 诊断：骨骼清单（判断模型有没有头发/裙摆骨骼可用作物理）
+window.__bones = () => {
+  try {
+    if (!vrm) return 'no-vrm';
+    const humanNodes = new Set();
+    for (const k of Object.keys(vrm.humanoid.humanBones || {})) {
+      const hb = vrm.humanoid.humanBones[k];
+      if (hb && hb.node) humanNodes.add(hb.node.name);
+    }
+    const all = [];
+    vrm.scene.traverse(o => { if (o.isBone) all.push(o.name); });
+    return JSON.stringify({
+      total: all.length,
+      humanoid: humanNodes.size,
+      nonHumanoid: all.filter(n => !humanNodes.has(n)),
+      all: all,
+    });
+  } catch (e) { return 'ERR:' + e.message; }
+};
+// 诊断：VRM 元信息 + 表情/弹簧骨状态
+window.__vrmMeta = () => {
+  try {
+    if (!vrm) return 'no-vrm';
+    return JSON.stringify({
+      name: vrm.meta?.name || null,
+      version: vrm.meta?.metaVersion || vrm.meta?.vrmVersion || null,
+      hasSpringBone: !!vrm.springBoneManager,
+      springJoints: vrm.springBoneManager?.joints?.size || 0,
+      expressions: vrm.expressionManager ? Object.keys(vrm.expressionManager.expressionMap || {}).length : 0,
+      hairPhysics: hairPhysics ? hairPhysics.stats() : null,
+    });
+  } catch (e) { return 'ERR:' + e.message; }
+};
+
+// ================================================================
+// 头发 / 裙子物理（自研弹簧骨）
+//
+// 为什么必须自己做：本模型（PMX 转 VRM）【没有】VRMC_springBone 扩展，
+// three-vrm 的 springBoneManager 是 null。但模型里其实有 262 根
+// 头发/裙摆/披风/马尾/耳环骨骼（hair_ribbon_*、qun_*、ponytail_*、
+// cloak_*、earring_*、weiba*）—— 全部静止不动，是"动作生硬"的最大来源。
+//
+// 算法：Verlet 质点弹簧（游戏行业标准做法，比 Unity 的 SpringBone 更稳）
+//   · 每根链的骨骼当作一个质点，受到重力 + 父节点位移带来的惯性
+//   · 用"保持与父骨骼的静止长度"作为约束，迭代收敛
+//   · 加阻尼衰减，避免永远抖动
+// 效果：走动/倾斜/被拖动时，头发裙摆会自然甩动、滞后、回弹。
+// ================================================================
+class HairPhysics {
+  constructor(vrm) {
+    this.chains = [];
+    this.enabled = true;
+    this._v = new THREE.Vector3();
+    this._build(vrm);
+  }
+
+  /**
+   * 找悬垂骨骼并串成链。
+   *
+   * 骨骼命名规律（实测本模型 315 根骨骼）：
+   *   hair_ribbon_l_01…010   发带（10 节，逐级父子）
+   *   ponytail_hair_m_01…06  马尾（6 节）
+   *   qun_${列}_${行}         裙摆：8 列 × 20 行 = 160 根
+   *                           ⚠ 命名是"列_行"，但父子关系是【按行递增】的，
+   *                             即 qun_3_0 → qun_3_1 → … ，列号才是索引
+   *   cloak_m_01…05 / earring_l_01…06 / hair_rr / hair_up_r2 / weiba1…7
+   *
+   * 关键点：不按"父级不是骨骼"来切链（裙摆第一行直接挂在下半身骨骼下，
+   * 那样每列只会被切成 1 节，实测只跑出 27 根）。正确做法是先把所有
+   * 目标骨骼收集起来，再按名字前缀 + 数字后缀排序串成长链。
+   */
+  _build(vrm) {
+    // 前缀 → 是否按"列_行"两级编号（裙摆特殊）
+    const RULES = [
+      { p: 'hair_ribbon_l_', two: false }, { p: 'hair_ribbon_r_', two: false },
+      { p: 'ponytail_hair_m_', two: false },
+      { p: 'hair_rr_', two: false }, { p: 'hair_up_r2_', two: false },
+      { p: 'cloak_m_', two: false },
+      { p: 'earring_l_', two: false }, { p: 'earring_r_', two: false },
+      { p: 'qun_', two: true },
+      { p: 'weiba', two: false },
+    ];
+    const groups = new Map();     // key → [{bone, a, b}]
+    vrm.scene.traverse(o => {
+      if (!o.isBone) return;
+      for (const r of RULES) {
+        if (!o.name.startsWith(r.p)) continue;
+        const tail = o.name.slice(r.p.length);
+        let a = 0, b = 0, key;
+        if (r.two) {
+          // qun_列_行：列 = 分组键，行 = 链内序
+          const m = tail.match(/^(\d+)_(\d+)$/);
+          if (!m) continue;
+          a = +m[1]; b = +m[2];
+          key = r.p + a;
+        } else {
+          const m = tail.match(/^_?(\d+)$/);
+          if (!m) continue;
+          a = +m[1];
+          key = r.p;
+        }
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ bone: o, a: a, b: b });
+        return;
+      }
+    });
+
+    for (const [key, list] of groups) {
+      // 链内按行号（裙摆）或数字（其它）排序
+      const rule = RULES.find(r => key.startsWith(r.p));
+      const two = rule ? rule.two : false;
+      list.sort((x, y) => (two ? x.b - y.b : x.a - y.a));
+      if (list.length >= 2) this.chains.push(this._makeChain(list.map(e => e.bone)));
+    }
+  }
+
+  _makeChain(bones) {
+    const parts = [];
+    const n = Math.max(1, bones.length - 1);
+    for (let i = 0; i < bones.length; i++) {
+      const b = bones[i];
+      const tip = i / n;               // 0=根部 1=末端
+      parts.push({
+        bone: b,
+        rest: b.quaternion.clone(),
+        // Verlet 状态：把"偏离静止姿态的旋转小量"当作质点位置
+        pos: new THREE.Vector3(),
+        prev: new THREE.Vector3(),
+        // ⚠ 刚度单位是 1/s²（Verlet 里 accel 直接就是 1/s²）。
+        //   自然频率 ω=√k：k=400 → ω=20rad/s → 周期 0.31s，回弹干脆；
+        //   k=120 → ω=11rad/s → 周期 0.57s，发梢更飘。
+        //   （曾经误用 k=0.1，比正确值小 3 个数量级，弹簧完全拉不住，
+        //     偏移一路涨到限幅值 —— 表现为头发乱飞。）
+        k: 400 - 280 * tip,
+        // 每帧速度衰减。接近 1 才摆得久；0.97 大约能看见 3 次回摆。
+        damp: 0.97 - 0.03 * tip,
+        // 惯性灵敏度：末端受力更大（甩得更狠）
+        inertia: 0.35 + 0.65 * tip,
+      });
+    }
+    return { parts: parts };
+  }
+
+  stats() {
+    return { chains: this.chains.length, bones: this.chains.reduce((s, c) => s + c.parts.length, 0), enabled: this.enabled };
+  }
+
+  /**
+   * 每帧更新。
+   * @param dt       帧时长（秒）
+   * @param inertia  {x,y,z} 身体侧向加速度（用来把头发甩起来）
+   */
+  update(dt, inertia) {
+    if (!this.enabled || this.chains.length === 0) return;
+    // Verlet 对大步长敏感，夹到 1/60 以内保证稳定
+    const h = Math.min(dt, 1 / 60);
+    const h2 = h * h;
+    const ix = inertia ? inertia.x : 0;
+    const iy = inertia ? inertia.y : 0;
+    const iz = inertia ? inertia.z : 0;
+    const CL = 0.5;                      // 偏移限幅 0.5rad≈29°，防意外翻车
+
+    for (const chain of this.chains) {
+      for (const p of chain.parts) {
+        const px = p.pos.x, py = p.pos.y, pz = p.pos.z;
+        // 弹簧拉回静止姿态（加速度 = k × 偏移）
+        const ax = -p.k * px;
+        const ay = -p.k * py;
+        const az = -p.k * pz;
+        // Verlet：新位置 = 当前位置 + 速度 + 加速度×h²
+        let nx = px + (px - p.prev.x) * p.damp + ax * h2;
+        let ny = py + (py - p.prev.y) * p.damp + ay * h2;
+        let nz = pz + (pz - p.prev.z) * p.damp + az * h2;
+        // 惯性：身体动得越猛，头发被"甩"得越开（直接作用在位置上）
+        nx += ix * p.inertia * h;
+        ny += iy * p.inertia * h;
+        nz += iz * p.inertia * h;
+        // 限幅 + 死区（幅度太小就归零，避免永远微颤）
+        nx = nx > CL ? CL : (nx < -CL ? -CL : nx);
+        ny = ny > CL ? CL : (ny < -CL ? -CL : ny);
+        nz = nz > CL ? CL : (nz < -CL ? -CL : nz);
+        if (Math.abs(nx) < 1e-4 && Math.abs(ny) < 1e-4 && Math.abs(nz) < 1e-4) {
+          nx = ny = nz = 0;
+          if (Math.abs(px) < 1e-3 && Math.abs(py) < 1e-3 && Math.abs(pz) < 1e-3) {
+            p.prev.set(0, 0, 0); p.pos.set(0, 0, 0);
+            continue;                   // 已静止：跳过写回，省开销
+          }
+        }
+        p.prev.set(px, py, pz);
+        p.pos.set(nx, ny, nz);
+      }
+      // --- 写回骨骼：静止姿态 × 偏移旋转 ---
+      const e = new THREE.Euler(0, 0, 0, 'XYZ');
+      for (const p of chain.parts) {
+        const q = p.bone.quaternion;
+        q.copy(p.rest);
+        if (p.pos.lengthSq() > 1e-8) {
+          e.set(p.pos.x, p.pos.y, p.pos.z);
+          q.multiply(_tmpQuat.setFromEuler(e));
+        }
+      }
+    }
+  }
+
+  /** 由身体运动给头发一个速度冲量（拖动时调用，甩得更直接） */
+  kick(x, y, z) {
+    if (!this.enabled) return;
+    for (const chain of this.chains) {
+      for (const p of chain.parts) {
+        p.prev.x -= x * p.inertia;
+        p.prev.y -= y * p.inertia;
+        p.prev.z -= z * p.inertia;
+      }
+    }
+  }
+}
+
 function boot() {
-  loadModel('./models/michelle_expr.vrm').then(() => {
+  loadModel('./models/michelle_phys.vrm').then(() => {
     try { window.pyBridge?.onReady(currentModel.path ? currentModel.path.split('/').pop() : ''); } catch (e) {}
     console.log('[js] init done');
   });
