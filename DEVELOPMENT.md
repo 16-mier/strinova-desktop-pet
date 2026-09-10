@@ -96,6 +96,28 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-10（新增「🎭 3D桌宠」顶层菜单 + 只保留米雪儿 + 清理 2.5GB）
+- **用户反馈**：「你没有写一个 3D 桌宠选项，不好切换」+「只需要保留米雪儿」+「把不需要的清理掉」
+- **① 3D 入口太深 → 新增置顶顶层菜单**
+  - **根因**：3D 只有一个平铺的「✨ 切换到 3D 米雪儿」，排在 22 项菜单的**第 19 位**（倒数第 3），用户往下翻都未必看得到；而且没有集中的 3D 功能区
+  - **修复**：新增 `_build_3d_menu()`，在菜单**第 2 项**（紧跟"打开设置"）放「🎭 3D桌宠」右扩菜单，展开即为完整 3D 功能区：
+    - `✨ 切换到 3D 桌宠` / `🖼 返回简易桌宠（2D）`（随状态变化标题）
+    - `状态：● 3D 显示中　当前角色：米雪儿`
+    - `🎭 3D 角色`（**中文名**：米雪儿）· `😊 表情`（27 个）· `🎬 动作` · `📐 尺寸` · `🪟 窗口` · `🙈 藏手` · `🎮 互动` · `⚙ 3D 引擎` · `📂 打开模型目录`
+  - 新增 `_mate3d_sections()`：把 `_build_mate3d_menu` 的子菜单抽出来复用，避免重复维护两套
+  - 3D 使用中时顶层项显示 `🎭 3D桌宠 ● 使用中`
+- **② 只保留米雪儿**
+  - 删除 `web3d/models/` 下的 `aldina.vrm` / `Zome.vrm` / `Lazuli_VRM.vrm`
+  - **⚠ 关键**：`sync_models()` 原本会自动扫 `mate_research` 的 DLC 目录，会把删掉的模型**又同步回来** → 新增 `MODEL_ALLOWLIST = {michelle, michelle_expr}` 白名单 + 移除 DLC 源目录（源码保留在 `mate_research`，随时可恢复）
+  - 新增 `_MODEL_LABELS`（中文名映射）+ `_prefer_expr_models()`（`michelle` 与 `michelle_expr` 是同一角色，**优先保留带表情的 `_expr` 版**，否则切过去表情全没）
+- **③ 清理 2.5GB**
+  - 项目：`docker build/`+`dist/`（138MB）、46 个临时截图/日志（4.6MB）、`webgpu_probe/`（36MB）、17 个过时诊断脚本（`qtweb_*`/`diag_morph*`/`vrm_*`）、`pet.py.bak_mate` → **325MB → 36MB**
+  - `mate-engine`：删 `unpacked/`（外置 Mate 主程序 1.58GB，已弃用）+ 4 个安装包 zip（793MB）+ 一次性探测文件 → **2400MB → 18MB**（保留 `michelle_model` 表情转换源材料 + `bridge` 源码）
+  - 桌面：删 2 个旧 exe（各 60.7MB，**9/9 22:23 构建，比 3D 功能早 2 小时，根本不含 3D**）+ `卡丘3D桌宠.lnk`（指向已删的 Mate-Engine）
+  - 桌面 `卡丘简易桌宠数据/`：旧 exe 遗留（源码模式用脚本目录下的 `assets`/`pet_config.json`）→ 先备份配置/上下文/世界书到 `_backup_桌宠数据_20260910`，再删除
+- **⚠ 打包未做**：`卡丘简易桌宠.spec` 目前**主动排除**了 `PyQt6.QtWebEngine` / `QtWebChannel` / `Qt6WebEngineCore`，且 `datas` 不含 `web3d/` → **直接打包做不出带 3D 的版本**，需要改 spec（预计 exe 60MB → 约 200MB，QtWebEngine 自带 Chromium）
+- **验证**：`web3d_integration_test.py` **30/30** ✅；`expr_menu_test.py` **14/14**（新增「3D桌宠入口」「角色列表只有米雪儿」断言）✅
+
 ### 2026-09-10（修用户实测三问题：看不到头脚 + 展开双臂 + 表情菜单点不动）
 - **用户反馈**：「这个显示不出来脚和头的部分，然后动作是默认的展开双臂」
 - **问题① 头脚被裁（相机取景算错）**

@@ -92,6 +92,41 @@ _WEB_EXPR_LABELS = [
 ]
 _WEB_DEFAULT_EXPRS = [k for k, _ in _WEB_EXPR_LABELS]
 
+# 3D 模型的中文名（VRM 文件名 → 菜单显示名）
+# 只保留米雪儿：aldina / Zome / Lazuli 已按用户要求移除（源文件仍在 mate_research）
+_MODEL_LABELS = {
+    'michelle': '米雪儿',
+    'michelle_expr': '米雪儿',
+}
+# 同一角色的不同文件（michelle / michelle_expr）→ 归并成一个，菜单里不重复出现
+_MODEL_ALIAS = {
+    'michelle_expr': '米雪儿',
+    'michelle': '米雪儿',
+}
+
+
+def _prefer_expr_models(names):
+    """同名角色只保留一个，且优先保留带表情的那个（*_expr）。
+
+    michelle.vrm 是无表情的原始模型，michelle_expr.vrm 是补了 27 个表情的版本；
+    两个都列出来会让用户困惑，而保留错的那个会导致表情菜单点了没用。
+    """
+    out, chosen = [], {}
+    for n in names:
+        key = _MODEL_ALIAS.get(n.lower())
+        if key is None:
+            out.append(n)
+            continue
+        prev = chosen.get(key)
+        if prev is None:
+            chosen[key] = n
+            out.append(n)
+        elif n.lower().endswith('_expr'):
+            # 换成带表情的版本，替换掉先前那个
+            out[out.index(prev)] = n
+            chosen[key] = n
+    return out
+
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QUrl, QEvent, QObject
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie
 from PyQt6.QtWidgets import (
@@ -2871,6 +2906,14 @@ class PetWindow(QWidget):
         act_settings = QAction("⚙ 打开设置…", menu)
         act_settings.triggered.connect(lambda: self.open_settings_panel())
         menu.addAction(act_settings)
+
+        # ①-3D：🎭 3D桌宠（置顶醒目入口 —— 以前埋在菜单最底部，用户找不到）
+        act_3dtop = QAction("🎭 3D桌宠", menu)
+        act_3dtop.setMenu(self._build_3d_menu(menu))
+        if getattr(self, '_in3d', False):
+            act_3dtop.setText("🎭 3D桌宠 ● 使用中")
+        menu.addAction(act_3dtop)
+
         # ①-聊天：打开模型网站式完整聊天窗口（角色列表 + 消息流 + 多行输入）
         act_chat = QAction("💬 聊天", menu)
         act_chat.setToolTip("打开完整聊天窗口（像模型网站：左侧角色列表 + 消息流 + 多行输入）")
@@ -2992,23 +3035,6 @@ class PetWindow(QWidget):
             na.setEnabled(False)
             menu.addAction(na)
 
-        # ✨ 3D 一键切换（3D 米雪儿 ↔ 2D 简易桌宠；切换不动进程→功能全保留）
-        if _mate_link is not None:
-            menu.addSeparator()
-            in3d = bool(getattr(self, '_in3d', False))
-            if in3d:
-                act_3d = QAction("🖼 返回简易桌宠", menu)
-                act_3d.setToolTip("显示 2D 桌宠，隐藏 3D 米雪儿（桥保持在线）")
-            else:
-                act_3d = QAction("✨ 切换到 3D 米雪儿", menu)
-                act_3d.setToolTip("隐藏 2D 桌宠，显示 3D 米雪儿（热键/托盘/聊天/语音全保留）")
-            act_3d.triggered.connect(lambda: self.switch_face())
-            menu.addAction(act_3d)
-            # 3D 控制子菜单（在线时才有用）：表情 / 动作 / 尺寸 / 窗口 / 藏手
-            act_ctl = QAction("🎛 3D 控制", menu)
-            act_ctl.setMenu(self._build_mate3d_menu(menu))
-            menu.addAction(act_ctl)
-
         menu.addSeparator()
 
         # ③ 退出
@@ -3016,6 +3042,71 @@ class PetWindow(QWidget):
         act_quit.triggered.connect(QApplication.quit)
         menu.addAction(act_quit)
         return menu
+
+    def _build_3d_menu(self, parent):
+        """🎭 3D桌宠 子菜单 —— 放在主菜单最上方，一眼就能看到。
+
+        以前 3D 只有一个「✨ 切换到 3D 米雪儿」平铺在最底部（22 项里的第 19 项），
+        往下翻都未必看得到，也没有集中的入口。这里改成醒目的顶层右扩菜单：
+            切到 3D / 回 2D（随状态变化标题）
+            🎭 3D 角色   → 米雪儿 / 阿尔蒂娜 / 祖姆 / 拉兹莉（即时切换）
+            😊 表情      → 开心 / 眨眼 / 张嘴…（走 CPU 烘焙，已实测可见）
+            🎬 动作      → 睡觉 / 唤醒 / 喂食 / 语音
+            📐 尺寸      → 放大 / 还原 / 缩小
+            🪟 窗口      → 置顶开关
+            ⚙ 3D 引擎    → 内置引擎 / Mate-Engine
+            📂 打开模型目录
+        """
+        menu = QMenu(parent)
+        menu.setStyleSheet(MENU_QSS)
+
+        if not self._mate3d_online():
+            act_go = QAction("3D 不可用（引擎未就绪）", menu)
+            act_go.setEnabled(False)
+            menu.addAction(act_go)
+            return menu
+
+        in3d = bool(getattr(self, '_in3d', False))
+
+        # —— 切换（最显眼的一行）——
+        if in3d:
+            act_face = QAction("🖼 返回简易桌宠（2D）", menu)
+            act_face.setToolTip("显示 2D 桌宠，隐藏 3D 角色（进程不退出，热键/托盘/聊天全保留）")
+        else:
+            act_face = QAction("✨ 切换到 3D 桌宠", menu)
+            act_face.setToolTip("显示 3D 角色（米雪儿），隐藏 2D 桌宠（热键/托盘/聊天/语音全保留）")
+        act_face.triggered.connect(lambda: self.switch_face())
+        menu.addAction(act_face)
+
+        # 状态行
+        _win = getattr(self, '_web3d_win', None)
+        _cur = ''
+        try:
+            _cur = (_win._model_name if _win is not None else '') or ''
+        except Exception:
+            _cur = ''
+        st = QAction("状态：%s%s" % ("● 3D 显示中" if in3d else "○ 2D 显示中",
+                                    ("　当前角色：" + _cur) if _cur else ""), menu)
+        st.setEnabled(False)
+        menu.addAction(st)
+
+        menu.addSeparator()
+        # 其余全部 3D 功能复用同一个构建器（角色/表情/动作/尺寸/窗口/引擎）
+        for label, sub in self._mate3d_sections(menu):
+            a = QAction(label, menu)
+            a.setMenu(sub)
+            menu.addAction(a)
+        return menu
+
+    def _mate3d_sections(self, parent):
+        """返回 [(标题, 子菜单)] —— 给「3D桌宠」顶层菜单用。"""
+        out = []
+        full = self._build_mate3d_menu(parent)
+        for a in full.actions():
+            sub = a.menu()
+            if sub is not None and a.text() and a.isEnabled():
+                out.append((a.text(), sub))
+        return out
 
     # ============ 3D 联动（双后端：web 内置 / mate 外置） ============
     def _mate3d_online(self):
@@ -3524,10 +3615,18 @@ class PetWindow(QWidget):
                     cur = (w._model_name if w is not None else 'michelle')
                 except Exception:
                     cur = ''
-                for n in names:
+                # 去掉重复项：michelle 与 michelle_expr 是同一个角色
+                # （后者补了表情，必须优先保留，否则切过去表情全没了）
+                seen_role = set()
+                for n in _prefer_expr_models(names):
+                    role = _MODEL_ALIAS.get(n.lower(), n)
+                    if role in seen_role:
+                        continue
+                    seen_role.add(role)
+                    label = _MODEL_LABELS.get(n.lower(), n)
                     mark = " ✓" if n.lower() == str(cur).lower() else ""
-                    act = QAction(n + mark, m_role)
-                    act.setToolTip("点击即时切换（无需重启）")
+                    act = QAction(label + mark, m_role)
+                    act.setToolTip("点击即时切换（无需重启，约 0.4 秒）")
                     act.triggered.connect(
                         lambda c, nn=n: self._mate3d_switch_avatar(nn + '.vrm', nn + '.vrm'))
                     m_role.addAction(act)

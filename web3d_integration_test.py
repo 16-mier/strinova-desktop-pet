@@ -217,9 +217,10 @@ def main() -> int:
     wait(800)
 
     # ---------- 7. 热切换角色 ----------
+    # 只保留米雪儿后，用 michelle ↔ michelle_expr 验证热切换（同一个角色的两份模型）
     print("\n[7] 热切换 3D 角色（重点：不重启）…")
     t0 = time.time()
-    win._mate3d_switch_avatar('aldina.vrm', 'aldina.vrm')
+    win._mate3d_switch_avatar('michelle.vrm', 'michelle.vrm')
     cur = None
     for _ in range(50):
         wait(300)
@@ -230,14 +231,15 @@ def main() -> int:
             if r["done"]:
                 break
         cur = r["v"]
-        if cur and 'aldina' in str(cur).lower():
+        if cur and 'michelle' in str(cur).lower() and 'expr' not in str(cur).lower():
             break
     dt = time.time() - t0
-    check("切换到 aldina（无需重启）", cur and 'aldina' in str(cur).lower(),
+    check("热切换模型（无需重启）",
+          cur and 'michelle' in str(cur).lower(),
           f"当前={cur} 耗时 {dt:.1f}s")
     check("切换速度 < 8 秒（对比 Mate 的 5~40s）", dt < 8, f"{dt:.1f}s")
-    # 切回米雪儿
-    win._mate3d_switch_avatar('michelle.vrm', 'michelle.vrm')
+    # 切回带表情的版本（默认启动就是这个）
+    win._mate3d_switch_avatar('michelle_expr.vrm', 'michelle_expr.vrm')
     for _ in range(40):
         wait(300)
         r = {"v": None, "done": False}
@@ -246,9 +248,9 @@ def main() -> int:
             wait(100)
             if r["done"]:
                 break
-        if r["v"] and 'michelle' in str(r["v"]).lower():
+        if r["v"] and 'michelle_expr' in str(r["v"]).lower():
             break
-    check("切回米雪儿", 'michelle' in str(r["v"]).lower(), f"当前={r['v']}")
+    check("切回米雪儿（带表情版）", 'michelle_expr' in str(r["v"]).lower(), f"当前={r['v']}")
 
     # ---------- 8. 三横菜单（功能保留） ----------
     print("\n[8] 三横菜单功能保留…")

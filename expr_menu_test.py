@@ -101,8 +101,10 @@ def main() -> int:
     check("能拿到菜单", menu is not None)
 
     if menu is not None:
-        m3d = find_menu(menu, '3D 控制')
-        check("存在「3D 控制」子菜单", m3d is not None)
+        # 新结构：主菜单里是一个置顶的「🎭 3D桌宠」右扩菜单
+        # （旧结构是平铺的「✨ 切换到 3D 米雪儿」+「🎛 3D 控制」，已改）
+        m3d = find_menu(menu, '3D桌宠') or find_menu(menu, '3D 控制')
+        check("存在「🎭 3D桌宠」入口", m3d is not None)
         if m3d is not None:
             me = find_menu(m3d, '表情')
             check("存在「表情」子菜单", me is not None)
@@ -112,6 +114,14 @@ def main() -> int:
                 has_vrm = any(('happy' in t or 'blink' in t or 'aa' in t) for t in items)
                 has_jp = any(('にこり' in t or '笑い' in t) for t in items)
                 check("菜单是 VRM 表情名（非日文 Mate 表）", has_vrm and not has_jp)
+            # 3D 角色列表应只有米雪儿（其他模型已按用户要求移除）
+            mr = find_menu(m3d, '3D 角色')
+            if mr is not None:
+                roles = [a.text() for a in mr.actions()
+                         if a.text() and not a.text().startswith(('📂', '⚙', '─'))]
+                print(f"       3D 角色: {roles}")
+                check("角色列表只有米雪儿",
+                      len(roles) == 1 and '米雪儿' in roles[0], str(roles))
 
     print("\n[4] 点表情 → 顶点真的动了…")
     js = lambda code, t=10000: _run_js(win, code, t)  # noqa: E731

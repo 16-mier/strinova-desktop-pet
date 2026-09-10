@@ -1,0 +1,41 @@
+新增「3D桌宠」顶层菜单 + 只保留米雪儿 + 清理 2.5GB
+
+① 3D 入口太深 → 新增置顶顶层菜单
+  根因: 3D 只有一个平铺的「切换到 3D 米雪儿」, 排在 22 项菜单的第 19 位
+        (倒数第 3), 用户往下翻都未必看得到, 也没有集中的 3D 功能区
+  修复: 新增 _build_3d_menu(), 在菜单第 2 项(紧跟"打开设置")放
+        「3D桌宠」右扩菜单, 展开即完整 3D 功能区:
+          切换到 3D 桌宠 / 返回简易桌宠(随状态变标题)
+          状态行(显示当前角色)
+          3D 角色(中文名) / 表情(27个) / 动作 / 尺寸 / 窗口 /
+          藏手 / 互动 / 3D 引擎 / 打开模型目录
+  新增 _mate3d_sections() 抽取子菜单复用, 避免维护两套
+  3D 使用中时顶层显示「3D桌宠 ● 使用中」
+
+② 只保留米雪儿
+  删除 web3d/models 下 aldina / Zome / Lazuli_VRM
+  ⚠ 关键: sync_models() 原本会自动扫 mate_research 的 DLC 目录,
+     会把删掉的模型又同步回来 → 新增 MODEL_ALLOWLIST 白名单 +
+     移除 DLC 源目录(源码保留在 mate_research, 随时可恢复)
+  新增 _MODEL_LABELS(中文名) + _prefer_expr_models()
+     (michelle 与 michelle_expr 是同一角色, 优先保留带表情的 _expr 版,
+      否则切过去表情全没)
+
+③ 清理 2.5GB
+  项目: build/dist(138MB) + 46 个临时截图日志(4.6MB) + webgpu_probe(36MB)
+        + 17 个过时诊断脚本 + pet.py.bak_mate  →  325MB → 36MB
+  mate-engine: unpacked(外置 Mate 主程序 1.58GB, 已弃用) + 4 个安装包
+        zip(793MB) + 一次性探测文件  →  2400MB → 18MB
+        (保留 michelle_model 表情转换源材料 + bridge 源码)
+  桌面: 2 个旧 exe(各 60.7MB, 9/9 22:23 构建, 比 3D 功能早 2 小时,
+        根本不含 3D) + 卡丘3D桌宠.lnk(指向已删的 Mate-Engine)
+  桌面数据夹: 旧 exe 遗留, 先备份配置/上下文/世界书到
+        _backup_桌宠数据_20260910 再删除
+
+⚠ 打包未做: 卡丘简易桌宠.spec 目前主动排除了 PyQt6.QtWebEngine /
+  QtWebChannel / Qt6WebEngineCore, 且 datas 不含 web3d/ →
+  直接打包做不出带 3D 的版本, 需改 spec
+  (预计 exe 60MB → 约 200MB, QtWebEngine 自带 Chromium)
+
+验证: web3d_integration_test 30/30 | expr_menu_test 14/14
+      (新增「3D桌宠入口」「角色列表只有米雪儿」断言)

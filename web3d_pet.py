@@ -42,12 +42,15 @@ WEB_DIR = HERE / "web3d"
 MODEL_DIR = WEB_DIR / "models"
 
 # 可发现的模型源目录
+# 只保留米雪儿（用户要求）。aldina / Zome / Lazuli 原先从这里自动同步进来，
+# 已移除；如需恢复某个角色，把它的目录加回本列表即可。
 MODEL_SOURCES = [
     Path(r"C:\Users\mier\Desktop\deepseek work\mate-engine\michelle_model"),
-    Path(r"C:\Users\mier\Desktop\deepseek work\mate_research\src\Mate-Engine-main\Assets\MATE ENGINE - Avatar"),
-    Path(r"C:\Users\mier\Desktop\deepseek work\mate_research\src\Mate-Engine-main\Assets\MATE ENGINE - Avatar\DLCs"),
     MODEL_DIR,
 ]
+
+# 白名单：只有这些模型会被同步到 web3d/models（防止源目录里其他 VRM 被带进来）
+MODEL_ALLOWLIST = {"michelle", "michelle_expr"}
 
 DEFAULT_SIZE = (280, 380)
 
@@ -55,6 +58,9 @@ DEFAULT_SIZE = (280, 380)
 # ---------------------------------------------------------------- 模型管理
 def sync_models() -> dict[str, Path]:
     """把可用的 .vrm 汇总到 web3d/models/（硬链接省空间，失败则复制）。
+
+    只同步 MODEL_ALLOWLIST 里的模型（目前=米雪儿），避免源目录里的
+    其他角色被自动带进来。
 
     返回 {显示名: 路径}
     """
@@ -64,6 +70,8 @@ def sync_models() -> dict[str, Path]:
         if not src.exists():
             continue
         for p in sorted(src.glob("*.vrm")):
+            if MODEL_ALLOWLIST and p.stem not in MODEL_ALLOWLIST:
+                continue
             dst = MODEL_DIR / p.name
             if not dst.exists():
                 try:
