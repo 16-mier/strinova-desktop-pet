@@ -1904,6 +1904,7 @@ class PetWindow(QWidget):
         self._mate_overlay_timer = None
         self._web3d_win = None      # 自研 3D 桌宠窗口（three-vrm）
         self._web3d_ready = False
+        self._pending_3d_model = None   # 进 3D 后要加载的模型（右键「切换 3D 形象」用）
         # 3D 后端：'web'（内置，默认）/'mate'（外置），运行时可切换
         _saved = _cfg.get('3d_backend', '')
         if _saved == 'web' and not _WEB3D_OK:
@@ -4130,6 +4131,76 @@ class PetWindow(QWidget):
                 self._settings_panel._watch_current_dir()
         except Exception:
             pass
+
+    # ---------------- 设置面板「形象角色」里的 3D 选项 ----------------
+    # 设置面板的角色列表来自 pet.roles（2D 图片角色）。3D 米雪儿不是图片角色，
+    # 所以用这个哨兵值作为特殊条目，_on_role_clicked 见到它就走 3D 切换。
+    ROLE_3D = '__3d__'
+
+    def is_3d_role(self) -> bool:
+        """当前是否正在使用 3D 形象"""
+        return bool(getattr(self, '_in3d', False))
+
+    def switch_to_3d_from_panel(self):
+        """设置面板点「3D 米雪儿」→ 切到 3D（与菜单「切换到 3D 桌宠」同一条路径）"""
+        try:
+            if not self.is_3d_role():
+                self.switch_face()
+        except Exception as e:
+            print('switch_to_3d_from_panel err:', e)
+
+    def switch_to_2d_from_panel(self):
+        """设置面板从 3D 切回 2D 图片角色：先退 3D，再换图"""
+        try:
+            if self.is_3d_role():
+                self.switch_face()   # 退回 2D
+        except Exception as e:
+            print('switch_to_2d_from_panel err:', e)
+
+    def switch_to_3d_for_role(self, role):
+        """给指定 2D 角色切换到它的 3D 形象（设置面板右键「切换 3D 形象」）。
+
+        与普通 3D 切换的区别：先把这个 2D 角色设为当前角色（这样语音/AI 人设
+        跟着走），再进 3D 并加载对应模型。
+        """
+        try:
+            # ① 2D 角色先切过去（语音来源、AI 人设都绑在角色上）
+            if role and role != getattr(self, 'role', None):
+                self.switch_role(role)
+            # ② 进 3D
+            if not self.is_3d_role():
+                self.switch_face()
+            # ③ 加载该角色对应的 3D 模型（等窗口就绪后热切换）
+            model = None
+            try:
+                model = _web3d.role_3d_model(role) if _web3d is not None else None
+            except Exception:
+                model = None
+            if model:
+                self._pending_3d_model = model
+
+                def _apply_model():
+                    w = getattr(self, '_web3d_win', None)
+                    if w is None:
+                        return
+                    if not getattr(self, '_web3d_ready', False):
+                        QTimer.singleShot(300, _apply_model)
+                        return
+                    if w.set_model(model):
+                        print('3d role model ->', model)
+                        QTimer.singleShot(700, lambda: self._mate3d_cmd(
+                            'say', text='我是%s，请多关照～' % model.split('_')[0]))
+
+                QTimer.singleShot(400, _apply_model)
+        except Exception as e:
+            print('switch_to_3d_for_role err:', e)
+
+    def _role_has_3d(self, role) -> bool:
+        """该 2D 角色是否有可用的 3D 形象（设置面板据此决定是否显示右键项）"""
+        try:
+            return bool(_web3d is not None and _web3d.role_3d_model(role))
+        except Exception:
+            return False
 
     def _apply_role_ai_profile(self, role):
         """切换角色时自动更新 AI 配置（TTS 克隆音色 + 系统提示词）：

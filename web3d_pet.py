@@ -52,6 +52,41 @@ MODEL_SOURCES = [
 # 白名单：只有这些模型会被同步到 web3d/models（防止源目录里其他 VRM 被带进来）
 MODEL_ALLOWLIST = {"michelle", "michelle_expr"}
 
+# ---------------------------------------------------------------- 2D 角色 ↔ 3D 模型
+# 设置面板「形象角色」右键菜单据此判断：该 2D 角色有没有对应的 3D 形象。
+#   键 = 2D 角色名（取路径末段，如 '欧泊/米雪儿' → '米雪儿'）
+#   值 = web3d/models 下的模型文件名（不含 .vrm）
+# 以后给别的角色做 3D 模型，在这里加一行即可，右键菜单会自动出现「切换 3D 形象」。
+ROLE_TO_3D = {
+    '米雪儿': 'michelle_expr',
+}
+
+
+def role_3d_model(role_name: str) -> str | None:
+    """2D 角色名 → 对应 3D 模型名（没有则 None）。
+
+    role_name 可以是 '欧泊/米雪儿' 这种带阵营的全路径，也可以是纯 '米雪儿'。
+    """
+    if not role_name:
+        return None
+    leaf = str(role_name).replace('\\', '/').rsplit('/', 1)[-1].strip()
+    name = ROLE_TO_3D.get(leaf)
+    if not name:
+        return None
+    # 再确认模型文件真的存在（避免映射写了但模型被删）
+    if not (MODEL_DIR / (name + '.vrm')).exists():
+        return None
+    return name
+
+
+def roles_with_3d() -> dict[str, str]:
+    """返回 {2D 角色名: 3D 模型名}，只包含模型确实存在的。"""
+    out = {}
+    for leaf, model in ROLE_TO_3D.items():
+        if (MODEL_DIR / (model + '.vrm')).exists():
+            out[leaf] = model
+    return out
+
 DEFAULT_SIZE = (280, 380)
 
 

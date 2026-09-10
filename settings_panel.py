@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QGroupBox, QScrollArea, QFrame, QCheckBox,
     QComboBox, QLineEdit, QSizePolicy, QSlider, QSpinBox, QPlainTextEdit,
-    QDialog, QStackedWidget,
+    QDialog, QStackedWidget, QMenu,
 )
 
 # 无边框窗口缩放：WM_NCHITTEST 命中测试常量（仅 Windows 生效）
@@ -31,6 +31,12 @@ _HTBOTTOM = 15
 _HTBOTTOMLEFT = 16
 _HTBOTTOMRIGHT = 17
 _RESIZE_MARGIN = 6  # 边缘热区像素（拖此区缩放）
+
+# ★「形象角色」列表里的 3D 条目哨兵值。
+# 3D 米雪儿不是图片角色（pet.roles 里没有它），所以用这个特殊标记占位，
+# _on_role_clicked 见到它就切换到 3D，而不是走 load_role 换图。
+_ROLE_3D = '__3d__'
+_ROLE_3D_LABEL = '🎭 3D 米雪儿（立体）'
 
 # 与 pet.py 共享的常量与工具（从 pet import 会造成循环时再调整）
 # 通过模块级注入方式避免循环导入：
@@ -1053,6 +1059,9 @@ class SettingsPanel(QWidget):
         self.role_list = NoWheelList()
         self.role_list.setMinimumHeight(90)
         self.role_list.itemClicked.connect(self._on_role_clicked)
+        # 右键菜单：给有 3D 模型的角色提供「切换 3D 形象」
+        self.role_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.role_list.customContextMenuRequested.connect(self._on_role_context_menu)
         row.addWidget(self.role_list, 1)
         btn_col = QVBoxLayout()
         # 单击角色名即切换（双击/单击均可，无需"切换"按钮）
@@ -2058,8 +2067,121 @@ class SettingsPanel(QWidget):
         role = item.data(Qt.ItemDataRole.UserRole)
         if not role:
             return
-        if role != getattr(self._current_pet(), 'role', None):
+        pet = self._current_pet()
+
+        # ★ 3D 条目：不是图片角色，走 3D 切换而不是 load_role
+        if role == _ROLE_3D:
+            if not getattr(pet, '_in3d', False):
+                # 先退出 3D（若已在）→ 这里是要进入 3D
+                if hasattr(pet, 'switch_to_3d_from_panel'):
+                    pet.switch_to_3d_from_panel()
+                elif hasattr(pet, 'switch_face'):
+                    pet.switch_face()
+                self.refresh_all()
+            return
+
+        # ★ 从 3D 切回普通图片角色：先退出 3D 模式，再换图
+        if getattr(pet, '_in3d', False):
+            try:
+                if hasattr(pet, 'switch_to_2d_from_panel'):
+                    pet.switch_to_2d_from_panel()
+                elif hasattr(pet, 'switch_face'):
+                    pet.switch_face()
+            except Exception:
+                pass
+
+        if role != getattr(pet, 'role', None):
             self._switch_role(role)
+
+    def _on_role_context_menu(self, pos):
+        """角色列表右键菜单。
+
+        核心：只有【存在对应 3D 模型】的角色才出现「切换 3D 形象」，
+        没做 3D 模型的角色右键不显示该项（避免点了没反应）。
+        """
+        pet = self._current_pet()
+        if pet is None:
+            return
+        item = self.role_list.itemAt(pos)
+        role = item.data(Qt.ItemDataRole.UserRole) if item else None
+
+        menu = QMenu(self.role_list)
+        menu.setStyleSheet(
+            "QMenu{background:#fff;border:1px solid #ccc;border-radius:8px;padding:6px;}"
+            "QMenu::item{padding:6px 22px;border-radius:5px;}"
+            "QMenu::item:selected{background:#e8f1ff;}"
+            "QMenu::item:disabled{color:#aaa;}"
+        )
+
+        if not role or role == _ROLE_3D:
+            # 点在标题/空白/3D 条目上：给个通用入口
+            if role == _ROLE_3D:
+                a = menu.addAction("🖼 返回 2D 图片角色")
+                a.triggered.connect(lambda: self._goto_2d_from_menu(pet))
+                menu.exec(self.role_list.viewport().mapToGlobal(pos))
+            return
+
+        label = item.text().replace("  ←当前", "")
+        in3d = bool(getattr(pet, '_in3d', False))
+
+        # ① 有 3D 模型的角色 → 显示切换项
+        if hasattr(pet, '_role_has_3d') and pet._role_has_3d(role):
+            act3d = menu.addAction("🎭 切换 3D 形象（%s）" % label)
+            act3d.setToolTip("把这个角色切换到 3D 立体形象")
+            act3d.triggered.connect(lambda: self._goto_3d_for_role(pet, role))
+            if in3d:
+                act3d.setText("🎭 切换 3D 形象（%s）　● 使用中" % label)
+            menu.addSeparator()
+        else:
+            # 没有 3D 模型：显示灰项说明原因，避免用户以为功能坏了
+            na = menu.addAction("（该角色暂无 3D 形象）")
+            na.setEnabled(False)
+            menu.addSeparator()
+
+        act_use = menu.addAction("✓ 使用该角色（2D）" if not in3d else "🖼 使用该角色（2D）")
+        act_use.triggered.connect(lambda: self._goto_2d_role(pet, role))
+
+        menu.addSeparator()
+        act_dir = menu.addAction("📂 打开角色文件夹")
+        act_dir.triggered.connect(self._open_characters_folder)
+
+        menu.exec(self.role_list.viewport().mapToGlobal(pos))
+
+    def _goto_3d_for_role(self, pet, role):
+        """右键「切换 3D 形象」→ 切到该角色 + 进 3D + 加载对应模型"""
+        try:
+            if hasattr(pet, 'switch_to_3d_for_role'):
+                pet.switch_to_3d_for_role(role)
+            else:
+                pet.switch_role(role)
+                if hasattr(pet, 'switch_face'):
+                    pet.switch_face()
+        except Exception as e:
+            print('goto 3d for role err:', e)
+        # 面板刷新延后（避免在菜单回调栈内重建 UI）
+        QTimer.singleShot(600, self.refresh_all)
+        QTimer.singleShot(2600, self.refresh_all)
+
+    def _goto_2d_role(self, pet, role):
+        """右键「使用该角色（2D）」→ 若在 3D 先退回，再换成该图片角色"""
+        try:
+            if getattr(pet, '_in3d', False) and hasattr(pet, 'switch_to_2d_from_panel'):
+                pet.switch_to_2d_from_panel()
+            if role != getattr(pet, 'role', None):
+                self._switch_role(role)
+            else:
+                QTimer.singleShot(200, self.refresh_all)
+        except Exception as e:
+            print('goto 2d role err:', e)
+
+    def _goto_2d_from_menu(self, pet):
+        """3D 条目右键 → 返回 2D"""
+        try:
+            if hasattr(pet, 'switch_to_2d_from_panel'):
+                pet.switch_to_2d_from_panel()
+        except Exception as e:
+            print('goto 2d err:', e)
+        QTimer.singleShot(600, self.refresh_all)
 
     def _switch_role(self, role):
         pet = self._current_pet()
@@ -2423,6 +2545,25 @@ class SettingsPanel(QWidget):
                 it.setForeground(QColor('#ffd76e'))
             self.role_list.addItem(it)
 
+        # ★ 3D 形象（置顶）：不是图片角色，点击切换到 3D 米雪儿
+        in3d = bool(getattr(pet, '_in3d', False))
+        it3d = QListWidgetItem(_ROLE_3D_LABEL + ("  ←当前" if in3d else ""))
+        it3d.setData(Qt.ItemDataRole.UserRole, _ROLE_3D)
+        it3d.setForeground(QColor('#9fe8ff' if not in3d else '#ffd76e'))
+        f3 = it3d.font()
+        f3.setBold(True)
+        it3d.setFont(f3)
+        it3d.setToolTip("3D 立体形象（three.js 实时渲染）\n点击切换到 3D，再点任意图片角色即可切回 2D")
+        self.role_list.addItem(it3d)
+        # 分组标题：3D 与 2D 图片角色分开，避免混淆
+        _t2d = QListWidgetItem("— 2D 图片角色 —")
+        _t2d.setFlags(Qt.ItemFlag.NoItemFlags)
+        _t2d.setForeground(QColor('#8fa3c8'))
+        _f2 = _t2d.font(); _f2.setBold(True); _f2.setPointSize(_f2.pointSize() + 1)
+        _t2d.setFont(_f2)
+        _t2d.setData(Qt.ItemDataRole.UserRole, None)
+        self.role_list.addItem(_t2d)
+
         # 无阵营（历史平铺）角色排最前
         flats = [r for r in roles if not fac(r)]
         if flats:
@@ -2439,7 +2580,8 @@ class SettingsPanel(QWidget):
             for r in sorted(by_fac[f], key=disp):
                 add_role(r)
         self.role_list.blockSignals(False)
-        self.lbl_cur_role.setText(disp(cur) if cur else '-')
+        self.lbl_cur_role.setText(
+            (_ROLE_3D_LABEL if in3d else disp(cur)) if (in3d or cur) else '-')
 
     def _open_characters_folder(self):
         """打开当前语音来源所在目录（通用语音→common_voice；角色→角色目录）"""
