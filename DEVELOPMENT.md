@@ -96,6 +96,36 @@ pyinstaller --onefile --windowed --noconsole --name DesktopPet `
 
 ## 6. 变更记录
 
+### 2026-09-10（3D 完整体验：角色选择 + 三横浮层 + 悬停对话 + 尺寸同步 + Mate 全功能接入）
+- **需求（用户）**：「新增一个 3D 角色选项，目前那个是米雪儿」+「3D 角色的使用应该直接切换成 3D 角色形象，然后保留原有角色的大小，鼠标移上去右上角三横可以打开设置，并且鼠标移动到上面可以对话，并且新增该插件有的所有功能」
+- **① 3D 角色选择（新增）**：
+  - 新增 `mate_avatar.py` 模块：扫描可用 VRM（米雪儿 + 源码自带 DLC：aldina / Lazuli_VRM / Zome）→ 切换 = 写 `settings.json` 的 selectedModelPath + 注册 avatars.json + 重启 Mate 进程 + 等桥上线
+  - **为什么不用桥直接换模型（重要踩坑）**：`VRMLoader.LoadVRM` 是 `async void`，其 continuation 在线程池执行 Unity API → **Unity 崩溃**（Player.log 栈证实：`VRMLoader/<LoadVRM>d__13:MoveNext` → `UniGLTF.ImporterContext:LoadAsync`）。尝试用 Harmony（BepInEx core 的 0Harmony 2.10.2）挂主线程补丁也失败：`HarmonyLib.AccessTools` 类型初始化崩（Unity 6 精简 mscorlib 缺 `AmbiguousMatchException..ctor(string,Exception)`）。最终采用**官方持久化路径**（改配置+重启），绝对安全
+  - 菜单：「🎭 3D 角色」子菜单列出全部模型（当前 ✓），点击切换（后台线程执行 + 完成后主线程刷新菜单）+「📂 打开模型目录」
+  - 实测：michelle → aldina → michelle 双向切换成功，桥自动恢复在线 ✅
+- **② 三横浮层（新增，对应「右上角三横可以打开设置」）**：
+  - 新增 `MateOverlay` 类：透明置顶小窗（42x42），覆盖在 Mate 窗口右上角，含同款三横按钮绘制
+  - 跟随：`follow_mate()` 用 `GetWindowRect` 取 Mate 窗口位置，400ms 定时跟随（Mate 可被拖动）
+  - 点击 → `_mate_open_menu()` 弹出与 2D 完全相同的菜单（22 项，切角色/语音/设置/退出全保留）
+  - 实测：切到 3D 后浮层出现在 (1438,132)（Mate 窗口右上角）✅；切回 2D 自动隐藏 ✅
+- **③ 悬停对话（新增，对应「鼠标移动到上面可以对话」）**：
+  - 浮层 hover → `_mate_overlay_hover` → `_mate3d_hover_chat()`：优先用 AI 生成一句（若 AI 已启用），否则本地台词池随机；节流 2 秒
+  - 通过桥 `say` 命令显示（注入 AvatarMessage + 调私有 ShowSpecificMessage）
+  - 实测：`hover chat -> 我一直在这里哦`，桥日志 `say OK` ✅
+- **④ 尺寸同步（新增，对应「保留原有角色的大小」）**：
+  - `_mate3d_sync_size()`：按 2D 桌宠尺寸推算 3D 角色 avatarSize（BASE_SIZE=200 → 1.0，范围 0.3~2.0）
+  - 切换时同步 + `set_pet_size` 改动时同步（3D 模式下改 2D 大小 → 3D 跟着变）
+  - 实测：`mate3d size sync -> 1.5`（当前 2D 尺寸 300px）✅
+- **⑤ Mate-Engine 全功能接入（桥新增命令）**：
+  - 桥新增：`chibi.toggle`（Q版）、`bigscreen.toggle`（大屏）、`bubble.toggle`（气泡）、`messages.random`（自动说话开关）、`say`（说话）、`particle.theme`（粒子）、`avatar.list`/`avatar.status`、`mt.test`（主线程自检）
+  - `say` 实现：反射创建 `AvatarMessage` 实例 → 设 text 字段 → 调私有 `ShowSpecificMessage(AvatarMessage)`（注意：公开的无参重载是从预设池随机，不能传文本）
+  - PyQt 菜单新增「🎮 互动」子菜单：Q版模式 / 大屏模式 / 气泡开关 / 让它说句话（输入框）/ 自动说话开关 / 粒子特效
+  - 实测：全部 EXEC OK ✅
+- **⑥ matelink.py 扩展**：新增 say/chibi/bigscreen/bubble/random_messages/particle_theme/avatar_list/avatar_status 方法与 CLI
+- **验证汇总**：`mate3d_full_test.py`（切换+浮层+尺寸+悬停+菜单）、`mate3d_interact_test.py`（互动功能）、`mate3d_avatar_test.py`（角色切换端到端）全部通过
+- 涉及：`strinova-desktop-pet\mate_avatar.py`（新）、`matelink.py`、`pet.py`、`mate3d_*.py`（测试）、`mate-engine\bridge\src\`（桥扩展）
+- 备注：角色切换需重启 Mate 进程（约 5-40s），因 Unity 主线程限制无法运行时热切换；这是 Mate-Engine 官方机制
+
 ### 2026-09-10（3D 一键切换：简易桌宠 ↔ 3D 米雪儿，原有功能全保留）
 - **需求（用户）**：「我需要直接在简易桌宠点 3D 桌宠直接切换过去并且保留原来的所有功能」
 - **实现（`pet.py`）**：主菜单新增顶级切换项（点击即切，不用进子菜单）

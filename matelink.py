@@ -192,6 +192,48 @@ class MateLink:
     def voice_random(self) -> dict:
         return _cmd({"op": "voice.random"})
 
+    # ---------- Mate-Engine 完整功能 ----------
+    def say(self, text: str) -> dict:
+        """让 3D 角色说一句话（气泡显示）"""
+        return _cmd({"op": "say", "text": text})
+
+    def chibi(self) -> dict:
+        """Q 版模式切换"""
+        return _cmd({"op": "chibi.toggle"})
+
+    def bigscreen(self) -> dict:
+        """大屏模式切换"""
+        return _cmd({"op": "bigscreen.toggle"})
+
+    def bubble(self) -> dict:
+        """气泡开关"""
+        return _cmd({"op": "bubble.toggle"})
+
+    def random_messages(self, on: bool) -> dict:
+        """随机消息（自动说话）开关"""
+        return _cmd({"op": "messages.random", "on": on})
+
+    def particle_theme(self, theme: str) -> dict:
+        """粒子主题"""
+        return _cmd({"op": "particle.theme", "theme": theme})
+
+    def avatar_list(self) -> list:
+        """可用 3D 模型列表 → [(文件名, 完整路径)]"""
+        try:
+            r = _cmd({"op": "avatar.list"})
+            out = []
+            for item in (r.get("list") or "").split(";"):
+                if "|" in item:
+                    n, _, p = item.partition("|")
+                    out.append((n, p))
+            return out
+        except Exception:
+            return []
+
+    def avatar_status(self) -> dict:
+        """当前 3D 模型状态"""
+        return _cmd({"op": "avatar.status"})
+
     # ---------- 便捷组合 ----------
     def set_expression(self, name: str, value: float = 100.0):
         """设置表情（自动 reset 其他表情再设指定表情；VRM 表情互斥）"""

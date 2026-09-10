@@ -29,6 +29,12 @@ try:
 except Exception:
     _mate_link = None
 
+# 3D 角色切换（改配置+重启进程，官方持久化路径）
+try:
+    import mate_avatar as _mate_avatar
+except Exception:
+    _mate_avatar = None
+
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QUrl, QEvent, QObject
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie
 from PyQt6.QtWidgets import (
@@ -1636,6 +1642,110 @@ def audio_duration_seconds(path):
         return 0.0
 
 
+class MateOverlay(QWidget):
+    """3D 模式浮层：透明置顶小窗，覆盖在 Mate-Engine 窗口右上角。
+    包含：三横按钮（打开右键菜单）→ 保留原有全部功能入口。
+    （对应用户需求：切到 3D 后右上角仍有三横可开设置/菜单）"""
+
+    def __init__(self, pet):
+        super().__init__(None)
+        self.pet = pet
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._hover = False
+        self._press = False
+        self.setFixedSize(MENU_BTN_SIZE + MENU_BTN_MARGIN * 2,
+                          MENU_BTN_SIZE + MENU_BTN_MARGIN * 2)
+
+    def btn_rect(self):
+        m = MENU_BTN_MARGIN
+        return QRect(m, m, MENU_BTN_SIZE, MENU_BTN_SIZE)
+
+    def follow_mate(self):
+        """跟随 Mate-Engine 窗口右上角定位（找不到则居中屏顶）"""
+        try:
+            hwnd = self.pet._mate3d_hwnd()
+            if hwnd:
+                rc = ctypes.wintypes.RECT()
+                ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rc))
+                x = rc.right - self.width() - 8
+                y = rc.top + 8
+                scr = QApplication.primaryScreen().availableGeometry()
+                x = max(scr.left(), min(x, scr.right() - self.width()))
+                y = max(scr.top(), min(y, scr.bottom() - self.height()))
+                self.move(x, y)
+                return True
+        except Exception:
+            pass
+        # 兜底：屏顶右侧
+        scr = QApplication.primaryScreen().availableGeometry()
+        self.move(scr.right() - self.width() - 20, scr.top() + 20)
+        return False
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.btn_rect()
+        p.setPen(Qt.PenStyle.NoPen)
+        if self._press:
+            p.setBrush(QColor(255, 255, 255, 90))
+        elif self._hover:
+            p.setBrush(QColor(255, 255, 255, 70))
+        else:
+            p.setBrush(QColor(0, 0, 0, 100))
+        p.drawRoundedRect(rect, 9, 9)
+        p.setPen(QPen(QColor(255, 255, 255, 240), 2.2, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        cx = rect.center().x()
+        half = 6
+        for y in (rect.center().y() - 4, rect.center().y(), rect.center().y() + 4):
+            p.drawLine(cx - half, y, cx + half, y)
+        p.end()
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        # 悬停 → 通知桌宠进入"3D 悬停"状态（可触发对话）
+        try:
+            self.pet._mate_overlay_hover(True)
+        except Exception:
+            pass
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self._press = False
+        self.update()
+        try:
+            self.pet._mate_overlay_hover(False)
+        except Exception:
+            pass
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if self.btn_rect().contains(e.position().toPoint()):
+            self._press = True
+            self.update()
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        was = self._press
+        self._press = False
+        self.update()
+        if was and self.btn_rect().contains(e.position().toPoint()):
+            self.pet._mate_open_menu()
+        super().mouseReleaseEvent(e)
+
+    def mouseMoveEvent(self, e):
+        super().mouseMoveEvent(e)
+
+
 class PetWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -1687,6 +1797,10 @@ class PetWindow(QWidget):
         # 自动面向屏幕中央：跨到屏幕左右另一半时平滑翻转朝向（默认开，可在设置关闭）
         self._auto_facing = bool(_cfg.get('auto_facing', True))
         self._in3d = False   # 当前是否处于 3D 米雪儿模式（切换用）
+        self._mate_overlay = None   # 3D 模式浮层（三横按钮）
+        self._mate_overlay_timer = None
+        self._overlay_task = None   # QThread 调度器（浮层跟随 Mate 窗口）
+        self._overlay_worker = None
         self.setFixedSize(self._pet_size, self._pet_size)
 
         # 音频播放（QMediaPlayer 支持 mp3，不阻塞主线程；存 self 防 GC）
@@ -2059,6 +2173,10 @@ class PetWindow(QWidget):
         except Exception:
             pass
         try:
+            self._hide_mate_overlay()
+        except Exception:
+            pass
+        try:
             self._stop_movie()
         except Exception:
             pass
@@ -2218,6 +2336,12 @@ class PetWindow(QWidget):
         save_config(cfg)
         self._clamp_to_screen(self.x(), self.y())
         self._update_facing()
+        # 3D 模式：尺寸同步到 3D 角色（改 2D 大小 → 3D 跟着变）
+        if getattr(self, '_in3d', False):
+            try:
+                self._mate3d_sync_size()
+            except Exception:
+                pass
 
     # ------------- 播放 -------------
     def _target_devices(self):
@@ -2881,6 +3005,28 @@ class PetWindow(QWidget):
         except Exception:
             pass
 
+    def _mate3d_switch_avatar(self, path, name):
+        """切换 3D 角色：改配置 + 重启 Mate 进程（官方持久化路径，安全）。
+        后台线程执行，完成后在主线程刷新菜单。"""
+        if _mate_avatar is None:
+            return
+
+        def _run():
+            try:
+                r = _mate_avatar.set_model(path, restart=True, wait_bridge=True)
+                print('avatar switch:', name, r)
+            except Exception as e:
+                print('avatar switch err:', name, e)
+            finally:
+                try:
+                    from PyQt6.QtCore import QMetaObject, Qt
+                    QMetaObject.invokeMethod(
+                        self, "refresh_tray_menu", Qt.ConnectionType.QueuedConnection)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _mate3d_launch(self):
         """启动 Mate-Engine（若未运行）；需在其目录下启动才能加载 Doorstop"""
         try:
@@ -2921,43 +3067,131 @@ class PetWindow(QWidget):
             print('switch_face err:', e)
 
     def _switch_to_3d(self):
-        """切到 3D：启动 Mate-Engine → 显示其窗口 → 隐藏简易桌宠窗口"""
-        # 1) 确保 Mate 进程与桥在线
-        if not self._mate3d_online():
-            self._mate3d_launch()
-            # 等桥上线（最多 30s），期间先隐藏自己
-            self.hide()
-            self._in3d = True
-            def _wait_bridge():
-                for _ in range(30):
-                    time.sleep(1)
-                    if self._mate3d_online():
-                        # 显示 3D 窗口并置顶
-                        hwnd = self._mate3d_hwnd()
-                        if hwnd:
-                            self._win32_show(hwnd, True)
-                            self._mate3d_raise(hwnd)
-                        try:
-                            _mate_link.topmost(True)
-                        except Exception:
-                            pass
-                        break
-            threading.Thread(target=_wait_bridge, daemon=True).start()
-            return
-        # 2) 已在线：直接显示 3D 窗口，隐藏自己
+        """切到 3D：启动 Mate-Engine → 显示其窗口 → 隐藏自己 → 显示三横浮层 + 同步尺寸"""
         self.hide()
         self._in3d = True
-        hwnd = self._mate3d_hwnd()
-        if hwnd:
-            self._win32_show(hwnd, True)
-            self._mate3d_raise(hwnd)
+
+        def _show_overlay_and_sync():
+            # 等 3D 窗口就绪
+            for _ in range(30):
+                if not self._mate3d_online():
+                    self._mate3d_launch()
+                    time.sleep(1)
+                    continue
+                break
+            hwnd = self._mate3d_hwnd()
+            if hwnd:
+                self._win32_show(hwnd, True)
+                self._mate3d_raise(hwnd)
+            try:
+                _mate_link.topmost(True)
+            except Exception:
+                pass
+            # 尺寸同步：2D 桌宠尺寸 → 3D 角色大小
+            self._mate3d_sync_size()
+            # 显示三横浮层（跟随 Mate 窗口）
+            QTimer.singleShot(600, self._show_mate_overlay)
+
+        threading.Thread(target=_show_overlay_and_sync, daemon=True).start()
+
+    def _mate3d_sync_size(self):
+        """尺寸同步：按 2D 桌宠当前尺寸推算 3D 角色 avatarSize。
+        2D 基准 BASE_SIZE(=200) → 3D 基准 1.0；比例线性映射并限制在 0.3~2.0"""
         try:
-            _mate_link.topmost(True)
+            if _mate_link is None or not self._mate3d_online():
+                return
+            base = float(BASE_SIZE) or 200.0
+            ratio = float(getattr(self, '_pet_size', base)) / base
+            v = max(0.3, min(2.0, round(ratio, 3)))
+            _mate_link.scale(v)
+            print('mate3d size sync ->', v)
+        except Exception as e:
+            print('mate3d sync size err:', e)
+
+    def _show_mate_overlay(self):
+        """显示 3D 模式三横浮层（跟随 Mate 窗口位置）"""
+        try:
+            if self._mate_overlay is None:
+                self._mate_overlay = MateOverlay(self)
+            self._mate_overlay.follow_mate()
+            self._mate_overlay.show()
+            self._mate_overlay.raise_()
+            # 定时跟随（Mate 窗口可被拖动）
+            if self._mate_overlay_timer is None:
+                self._mate_overlay_timer = QTimer(self)
+                self._mate_overlay_timer.timeout.connect(self._tick_overlay)
+            self._mate_overlay_timer.start(400)
+        except Exception as e:
+            print('show overlay err:', e)
+
+    def _tick_overlay(self):
+        """浮层跟随 Mate 窗口（3D 模式下持续生效）"""
+        try:
+            if not getattr(self, '_in3d', False) or self._mate_overlay is None:
+                return
+            if not self._mate_overlay.isVisible():
+                return
+            self._mate_overlay.follow_mate()
         except Exception:
             pass
 
+    def _hide_mate_overlay(self):
+        try:
+            if self._mate_overlay_timer is not None:
+                self._mate_overlay_timer.stop()
+            if self._mate_overlay is not None:
+                self._mate_overlay.hide()
+        except Exception:
+            pass
+
+    def _mate_open_menu(self):
+        """3D 模式点三横 → 弹出与 2D 相同的菜单（功能全保留）"""
+        try:
+            menu = self._build_role_menu(None)
+            self._tray_menu = menu  # 防 GC
+            pos = QCursor.pos()
+            menu.exec(pos)
+        except Exception as e:
+            print('mate open menu err:', e)
+
+    def _mate_overlay_hover(self, on):
+        """浮层悬停 → 触发 3D 角色对话（可开关）"""
+        try:
+            if on and getattr(self, '_mate_hover_chat', True):
+                self._mate3d_hover_chat()
+        except Exception:
+            pass
+
+    def _mate3d_hover_chat(self):
+        """3D 悬停对话：让 3D 角色说一句话（AI 可用则用 AI，否则本地台词）"""
+        # 节流：2 秒内不重复触发
+        now = time.monotonic()
+        if now - getattr(self, '_last_hover_chat', 0.0) < 2.0:
+            return
+        self._last_hover_chat = now
+        text = None
+        # 优先用 AI 生成一句（若 AI 已启用）
+        try:
+            ai = getattr(self, 'ai', None)
+            if ai is not None and hasattr(ai, 'quick_reply'):
+                text = ai.quick_reply("（用户把鼠标移到了你身上，说一句简短的招呼，15 字以内）")
+        except Exception:
+            text = None
+        if not text:
+            import random
+            pool = ["怎么啦？", "在的在的～", "摸摸头！", "有什么事吗？",
+                    "我一直在这里哦", "要不要一起玩？"]
+            text = random.choice(pool)
+        try:
+            if _mate_link is not None and self._mate3d_online():
+                _mate_link.say(text)
+                print('hover chat ->', text)
+        except Exception as e:
+            print('hover chat err:', e)
+
     def _switch_to_2d(self):
-        """切回简易桌宠：隐藏 3D 窗口（桥不关），显示自己"""
+        """切回简易桌宠：隐藏 3D 窗口（桥不关）+ 隐藏浮层 + 显示自己"""
+        self._hide_mate_overlay()
         hwnd = self._mate3d_hwnd()
         if hwnd:
             self._win32_show(hwnd, False)
@@ -2991,6 +3225,34 @@ class PetWindow(QWidget):
             act_go.triggered.connect(lambda: self._mate3d_launch())
             menu.addAction(act_go)
             return menu
+
+        # 🎭 3D 角色切换（列出可用模型，点击切换 → 改配置+重启进程）
+        if _mate_avatar is not None:
+            m_role = QMenu("🎭 3D 角色", menu)
+            m_role.setStyleSheet(MENU_QSS)
+            try:
+                cur_path = (_mate_avatar.current_model() or "").lower()
+                models = _mate_avatar.list_models()
+            except Exception:
+                cur_path, models = "", []
+            if models:
+                for name, path in models:
+                    mark = " ✓" if path.lower() == cur_path else ""
+                    display = os.path.splitext(name)[0]
+                    act = QAction(display + mark, m_role)
+                    act.triggered.connect(
+                        lambda c, p=path, n=name: self._mate3d_switch_avatar(p, n))
+                    m_role.addAction(act)
+            else:
+                na = QAction("（未找到 VRM 模型）", m_role)
+                na.setEnabled(False)
+                m_role.addAction(na)
+            m_role.addSeparator()
+            act_dir = QAction("📂 打开模型目录", m_role)
+            act_dir.triggered.connect(lambda: os.startfile(
+                r"C:\Users\mier\Desktop\deepseek work\mate-engine\michelle_model"))
+            m_role.addAction(act_dir)
+            menu.addMenu(m_role)
 
         # 表情（VRM blendshape，动态读）
         try:
@@ -3069,11 +3331,59 @@ class PetWindow(QWidget):
             m_hide.addAction(act)
         menu.addMenu(m_hide)
 
+        # 🎮 互动（Mate-Engine 原生玩法）
+        m_fun = QMenu("🎮 互动", menu)
+        m_fun.setStyleSheet(MENU_QSS)
+        f1 = QAction("🍼 Q 版模式", m_fun)
+        f1.setToolTip("切换 Q 版（小号）形态")
+        f1.triggered.connect(lambda: self._mate3d_cmd('chibi'))
+        m_fun.addAction(f1)
+        f2 = QAction("🖥 大屏模式", m_fun)
+        f2.setToolTip("角色放大到整屏互动")
+        f2.triggered.connect(lambda: self._mate3d_cmd('bigscreen'))
+        m_fun.addAction(f2)
+        f3 = QAction("💬 气泡开关", m_fun)
+        f3.triggered.connect(lambda: self._mate3d_cmd('bubble'))
+        m_fun.addAction(f3)
+        f4 = QAction("🗣 让它说句话…", m_fun)
+        f4.triggered.connect(lambda: self._mate3d_say_dialog())
+        m_fun.addAction(f4)
+        f5 = QAction("🔁 自动说话（开/关）", m_fun)
+        f5.setToolTip("角色空闲时自动冒出台词")
+        f5.triggered.connect(lambda: self._mate3d_toggle_auto_talk())
+        m_fun.addAction(f5)
+        f6 = QAction("✨ 粒子特效", m_fun)
+        f6.triggered.connect(lambda: self._mate3d_cmd('particle_theme', theme='default'))
+        m_fun.addAction(f6)
+        menu.addMenu(m_fun)
+
         menu.addSeparator()
         act_ref = QAction("🔄 刷新", menu)
         act_ref.triggered.connect(lambda: self.refresh_tray_menu())
         menu.addAction(act_ref)
         return menu
+
+    # ---------- 3D 互动辅助 ----------
+    def _mate3d_say_dialog(self):
+        """弹输入框让 3D 角色说话"""
+        try:
+            from PyQt6.QtWidgets import QInputDialog, QLineEdit
+            text, ok = QInputDialog.getText(
+                self, "让 3D 角色说话", "输入台词：", QLineEdit.EchoMode.Normal)
+            if ok and text.strip():
+                self._mate3d_cmd('say', text=text.strip())
+        except Exception as e:
+            print('say dialog err:', e)
+
+    def _mate3d_toggle_auto_talk(self):
+        """自动说话开关（随机消息）"""
+        try:
+            cur = getattr(self, '_mate_auto_talk', False)
+            self._mate_auto_talk = not cur
+            self._mate3d_cmd('random_messages', on=self._mate_auto_talk)
+            print('auto talk ->', self._mate_auto_talk)
+        except Exception as e:
+            print('auto talk err:', e)
 
     def _audio_key(self, role, path):
         """音频唯一 key：角色名/相对角色根的路径（含子文件夹，跨角色稳定）"""
