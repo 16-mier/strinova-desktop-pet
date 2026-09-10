@@ -128,7 +128,7 @@ def _prefer_expr_models(names):
     return out
 
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QUrl, QEvent, QObject
-from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie
+from PyQt6.QtGui import QPixmap, QIcon, QAction, QActionGroup, QCursor, QPainter, QColor, QPen, QImage, QMovie, QRegion
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMenu,
     QSystemTrayIcon,
@@ -241,20 +241,52 @@ def _pick_writable(candidates):
 
 
 def base_dir():
-    """用户数据根目录（可写持久）：
-    - 打包后 = exe 同目录下的「卡丘简易桌宠数据」子文件夹；exe 目录不可写时
-      依次回落：用户主目录下同名文件夹 → 用户主目录
-    - 未打包 = 脚本目录（开发时资源/配置就在源码仓库里）
-    用户导入的角色/音频/通用语音、pet_config.json、pet_debug.log 都在此。"""
+    """用户数据根目录（可写持久）。
+
+    统一规则（源码运行 / 打包运行【同一个目录】，避免两份数据互相打架）：
+      ① 环境变量 PET_DATA_DIR 指定 → 用它
+      ② 桌面下的「卡丘简易桌宠数据」（用户期望数据在桌面，且打包 exe 就放桌面）
+         —— 桌面不可写时回落
+      ③ 用户主目录下的同名文件夹
+      ④ 脚本/exe 所在目录
+
+    ⚠ 历史坑：以前源码运行用【脚本目录】、打包运行用【exe目录/卡丘简易桌宠数据】，
+      两套数据并存 → 用户改了一份、程序读另一份，出现"设置没生效""数据不见了"。
+      现在源码运行也优先用桌面数据目录，保持单一数据源。
+    """
+    # ① 显式指定
+    env = os.environ.get('PET_DATA_DIR', '').strip()
+    if env:
+        d = _pick_writable([env])
+        if d:
+            return d
+
+    desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    cands = []
     if hasattr(sys, "_MEIPASS"):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        chosen = _pick_writable([
-            os.path.join(exe_dir, USER_DATA_DIR),
-            os.path.join(os.path.expanduser('~'), USER_DATA_DIR),
-            os.path.expanduser('~'),
-        ])
-        return chosen if chosen is not None else os.path.expanduser('~')
-    return os.path.dirname(os.path.abspath(__file__))
+        cands.append(os.path.join(exe_dir, USER_DATA_DIR))
+    else:
+        # 源码运行：桌面数据目录优先（若它已存在），否则脚本目录
+        cands.append(os.path.join(desktop, USER_DATA_DIR))
+    cands += [
+        os.path.join(desktop, USER_DATA_DIR),
+        os.path.join(os.path.expanduser('~'), USER_DATA_DIR),
+        script_dir if not hasattr(sys, "_MEIPASS") else exe_dir,
+        os.path.expanduser('~'),
+    ]
+    # 源码运行时：只有当桌面数据目录【真的存在】才优先它，
+    # 否则保持旧行为（用脚本目录），避免在老环境里凭空造一个新目录
+    if not hasattr(sys, "_MEIPASS"):
+        desk = os.path.join(desktop, USER_DATA_DIR)
+        if not os.path.isdir(desk):
+            cands = [script_dir, os.path.join(os.path.expanduser('~'), USER_DATA_DIR),
+                     os.path.expanduser('~')]
+
+    chosen = _pick_writable(cands)
+    return chosen if chosen is not None else os.path.expanduser('~')
 
 
 def bundle_dir():
@@ -360,36 +392,50 @@ _seeded = False
 
 
 def _seed_default_assets():
-    """打包运行首次启动：把内置默认资源（characters/common_voice）复制到
-    用户数据目录 assets（若还没有），保证开箱即有默认角色/通用语音，且之后可写"""
+    """首次启动：把内置默认资源（characters / common_voice / persona /
+    role_worldbooks / trigger_voice / tts_refs / world_book.json）复制到
+    用户数据目录 assets（若还没有），保证开箱即用，且之后可写。
+
+    ⚠ 现在【源码运行也会执行】：因为数据目录改成了桌面那个
+      「卡丘简易桌宠数据」，首次运行时里面还没有 assets，需要从源码目录播种。
+      已经存在的子目录不覆盖（保护用户自己导入的角色/语音）。
+    """
     global _seeded
     if _seeded:
         return
     _seeded = True
-    if not hasattr(sys, "_MEIPASS"):
-        return  # 未打包：数据目录就是脚本目录，资源本来就在
     try:
         src_a = os.path.join(bundle_dir(), 'assets')
         dst_a = os.path.join(base_dir(), 'assets')
+        if os.path.abspath(src_a) == os.path.abspath(dst_a):
+            return          # 数据目录就是脚本目录，资源本来就在
+        if not os.path.isdir(src_a):
+            return
         os.makedirs(dst_a, exist_ok=True)
-        # characters
-        src_c = os.path.join(src_a, 'characters')
-        dst_c = os.path.join(dst_a, 'characters')
-        if os.path.isdir(src_c) and not os.path.isdir(dst_c):
-            shutil.copytree(src_c, dst_c)
-        # common_voice
-        src_v = os.path.join(src_a, 'common_voice')
-        dst_v = os.path.join(dst_a, 'common_voice')
-        if os.path.isdir(src_v) and not os.path.isdir(dst_v):
-            shutil.copytree(src_v, dst_v)
-        # 旧版本可能拷过角色 → 补充缺失的默认角色
-        if os.path.isdir(src_c) and os.path.isdir(dst_c):
-            for name in os.listdir(src_c):
-                if not os.path.exists(os.path.join(dst_c, name)):
-                    try:
-                        shutil.copytree(os.path.join(src_c, name), os.path.join(dst_c, name))
-                    except Exception:
-                        pass
+        for name in os.listdir(src_a):
+            s = os.path.join(src_a, name)
+            d = os.path.join(dst_a, name)
+            if os.path.exists(d):
+                # 已存在：目录只在缺文件时补（不覆盖用户改动）
+                if os.path.isdir(s) and os.path.isdir(d):
+                    for sub in os.listdir(s):
+                        sd, dd = os.path.join(s, sub), os.path.join(d, sub)
+                        if not os.path.exists(dd):
+                            try:
+                                if os.path.isdir(sd):
+                                    shutil.copytree(sd, dd)
+                                else:
+                                    shutil.copy2(sd, dd)
+                            except Exception:
+                                pass
+                continue
+            try:
+                if os.path.isdir(s):
+                    shutil.copytree(s, d)
+                else:
+                    shutil.copy2(s, d)
+            except Exception as e:
+                print('seed assets fail:', name, e)
     except Exception as e:
         print('seed default assets fail:', e)
 
@@ -1734,6 +1780,36 @@ def audio_duration_seconds(path):
         return 0.0
 
 
+class _GeoProxy:
+    """几何代理：把 frameGeometry()/geometry() 转发给 3D 窗口，其余透传给真桌宠。
+
+    用途：ai_chat 的输入栏用 self._pet.frameGeometry() 定位，而 3D 模式下
+    2D 桌宠窗口是隐藏的（几何无效），输入栏会跑到屏幕别处。用这个代理替换
+    掉 ChatWindow._pet，定位逻辑一行不改就能贴到 3D 角色下方。
+    win=None 时退化为直通真桌宠（等于没代理）。
+    """
+
+    def __init__(self, real_pet, win):
+        object.__setattr__(self, '_real', real_pet)
+        object.__setattr__(self, '_win', win)
+
+    def frameGeometry(self):
+        w = object.__getattribute__(self, '_win')
+        if w is None:
+            return object.__getattribute__(self, '_real').frameGeometry()
+        return w.frameGeometry()
+
+    def geometry(self):
+        w = object.__getattribute__(self, '_win')
+        if w is None:
+            return object.__getattribute__(self, '_real').geometry()
+        return w.geometry()
+
+    def __getattr__(self, name):
+        # 其余属性（_pet_size / ai / 各种状态）全部透传给真正的 PetWindow
+        return getattr(object.__getattribute__(self, '_real'), name)
+
+
 class MateOverlay(QWidget):
     """3D 模式浮层：透明置顶小窗，覆盖在 Mate-Engine 窗口右上角。
     包含：三横按钮（打开右键菜单）→ 保留原有全部功能入口。
@@ -1746,6 +1822,7 @@ class MateOverlay(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus   # 不抢 3D 窗口焦点
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -1754,6 +1831,21 @@ class MateOverlay(QWidget):
         self._press = False
         self.setFixedSize(MENU_BTN_SIZE + MENU_BTN_MARGIN * 2,
                           MENU_BTN_SIZE + MENU_BTN_MARGIN * 2)
+        # ★ 关键：浮层只覆盖右上角一小块，但它是个真实窗口，会挡住下面 3D 窗口的
+        #   鼠标事件（用户反馈：3D 拖动没反应、悬停不出输入栏）。
+        #   这里做「形状遮罩」——只让三横按钮那一小块接收鼠标，其余区域完全穿透，
+        #   鼠标事件直接落到 3D 窗口上。
+        self._apply_input_mask()
+
+    def _apply_input_mask(self):
+        """把窗口的可点击区域限制为三横按钮本身，其余区域鼠标穿透到下层。"""
+        try:
+            m = MENU_BTN_MARGIN
+            s = MENU_BTN_SIZE
+            region = QRegion(m, m, s, s)
+            self.setMask(region)
+        except Exception:
+            pass
 
     def btn_rect(self):
         m = MENU_BTN_MARGIN
@@ -3092,22 +3184,183 @@ class PetWindow(QWidget):
         menu.addAction(st)
 
         menu.addSeparator()
-        # 其余全部 3D 功能复用同一个构建器（角色/表情/动作/尺寸/窗口/引擎）
-        for label, sub in self._mate3d_sections(menu):
-            a = QAction(label, menu)
-            a.setMenu(sub)
-            menu.addAction(a)
+        # ★ 这里【必须自己建】子菜单，不能复用 _build_mate3d_menu 的返回值：
+        #   那个函数是局部变量 full，返回后被 Python GC 回收，挂到它上面的
+        #   子菜单会一起失效（实测报 "wrapped C/C++ object of type QMenu has been
+        #   deleted"）→ 右键菜单变成一片空白/无响应。
+        self._build_role_sub = QMenu("🎭 3D 角色", menu)   # 存引用防 GC
+        self._fill_3d_role_menu(self._build_role_sub)
+        a = QAction("🎭 3D 角色", menu)
+        a.setMenu(self._build_role_sub)
+        menu.addAction(a)
+
+        self._build_expr_sub = QMenu("😊 表情", menu)
+        self._fill_3d_expr_menu(self._build_expr_sub)
+        a = QAction("😊 表情", menu)
+        a.setMenu(self._build_expr_sub)
+        menu.addAction(a)
+
+        self._build_act_sub = QMenu("🎬 动作", menu)
+        self._fill_3d_action_menu(self._build_act_sub)
+        a = QAction("🎬 动作", menu)
+        a.setMenu(self._build_act_sub)
+        menu.addAction(a)
+
+        # 尺寸 / 窗口 / 藏手 / 互动 —— 这些是纯静态项，直接用现成构建器
+        for label, maker in (
+            ("📐 尺寸", self._fill_3d_size_menu),
+            ("🪟 窗口", self._fill_3d_window_menu),
+            ("🙈 藏手", self._fill_3d_hide_menu),
+            ("🎮 互动", self._fill_3d_fun_menu),
+        ):
+            sub = QMenu(label, menu)
+            maker(sub)
+            act = QAction(label, menu)
+            act.setMenu(sub)
+            menu.addAction(act)
+
+        menu.addSeparator()
+        act_dir = QAction("📂 打开模型目录", menu)
+        act_dir.triggered.connect(lambda: self._open_3d_model_dir())
+        menu.addAction(act_dir)
         return menu
 
-    def _mate3d_sections(self, parent):
-        """返回 [(标题, 子菜单)] —— 给「3D桌宠」顶层菜单用。"""
-        out = []
-        full = self._build_mate3d_menu(parent)
-        for a in full.actions():
-            sub = a.menu()
-            if sub is not None and a.text() and a.isEnabled():
-                out.append((a.text(), sub))
-        return out
+    # ---- 以下是「3D桌宠」各分组的内容（自建，避免 GC 问题）----
+    def _fill_3d_role_menu(self, m):
+        """🎭 3D 角色：列出模型（中文名），点击即时热切换"""
+        cur = ''
+        try:
+            w = getattr(self, '_web3d_win', None)
+            cur = (w._model_name if w is not None else 'michelle') or ''
+        except Exception:
+            cur = ''
+        names = []
+        try:
+            w = getattr(self, '_web3d_win', None)
+            names = list(w.models()) if w is not None else []
+        except Exception:
+            names = []
+        if not names:
+            try:
+                names = list(_web3d.sync_models().keys())
+            except Exception:
+                names = []
+        seen = set()
+        for n in _prefer_expr_models(names):
+            role = _MODEL_ALIAS.get(n.lower(), n)
+            if role in seen:
+                continue
+            seen.add(role)
+            label = _MODEL_LABELS.get(n.lower(), n)
+            mark = " ✓" if n.lower() == str(cur).lower() else ""
+            act = QAction(label + mark, m)
+            act.setToolTip("点击即时切换（无需重启，约 0.4 秒）")
+            act.triggered.connect(
+                lambda c, nn=n: self._mate3d_switch_avatar(nn + '.vrm', nn + '.vrm'))
+            m.addAction(act)
+        if not names:
+            na = QAction("（未找到 VRM 模型）", m)
+            na.setEnabled(False)
+            m.addAction(na)
+        # 后端选择
+        m.addSeparator()
+        be = QMenu("⚙ 3D 引擎", m)
+        be.setStyleSheet(MENU_QSS)
+        for label, key, tip in (
+            ("内置引擎（推荐·即时切换）", 'web', "three-vrm 内置渲染：热切换 0.4s，无需外部程序"),
+            ("Mate-Engine（外置）", 'mate', "外置进程：切模型需重启（5~40s）"),
+        ):
+            if key == 'web' and not _WEB3D_OK:
+                continue
+            a = QAction(("● " if key == getattr(self, '_3d_backend', 'web') else "○ ") + label, be)
+            a.setToolTip(tip)
+            a.triggered.connect(lambda c, k=key: self._set_3d_backend(k))
+            be.addAction(a)
+        m.addMenu(be)
+
+    def _fill_3d_expr_menu(self, m):
+        """😊 表情：内置引擎读 VRM 表情表（已实测可见的排前面）"""
+        exprs = []
+        try:
+            w = getattr(self, '_web3d_win', None)
+            if w is not None:
+                exprs = list(getattr(w, '_expressions', []) or [])
+        except Exception:
+            exprs = []
+        if not exprs:
+            exprs = _WEB_DEFAULT_EXPRS
+        for name, label in _WEB_EXPR_LABELS:
+            if name not in exprs:
+                continue
+            act = QAction("%s  %s" % (label, name), m)
+            act.triggered.connect(
+                lambda c, n=name: (self._mate3d_cmd('blend_reset'),
+                                   self._mate3d_cmd('blend_set', name=n, value=100.0)))
+            m.addAction(act)
+        rest = [n for n in exprs
+                if n not in [k for k, _ in _WEB_EXPR_LABELS] and n != 'neutral']
+        if rest:
+            more = QMenu("更多表情", m)
+            more.setStyleSheet(MENU_QSS)
+            for name in rest:
+                act = QAction(name, more)
+                act.triggered.connect(
+                    lambda c, n=name: (self._mate3d_cmd('blend_reset'),
+                                       self._mate3d_cmd('blend_set', name=n, value=100.0)))
+                more.addAction(act)
+            m.addMenu(more)
+        m.addSeparator()
+        act_r = QAction("🔄 重置表情", m)
+        act_r.triggered.connect(lambda: self._mate3d_cmd('blend_reset'))
+        m.addAction(act_r)
+
+    def _fill_3d_action_menu(self, m):
+        for label, op, kw in (
+            ("💤 睡觉", 'sleep', {'on': True}),
+            ("🌞 唤醒", 'sleep', {'on': False}),
+            ("🍰 喂食", 'food_spawn', {'index': 0}),
+            ("🗣 随机语音", 'voice_random', {}),
+        ):
+            act = QAction(label, m)
+            act.triggered.connect(lambda c, o=op, k=kw: self._mate3d_cmd(o, **k))
+            m.addAction(act)
+
+    def _fill_3d_size_menu(self, m):
+        for label, v in (("放大 1.2×", 1.2), ("还原 1.0×", 1.0), ("缩小 0.8×", 0.8)):
+            act = QAction(label, m)
+            act.triggered.connect(lambda c, vv=v: self._mate3d_cmd('scale', value=vv))
+            m.addAction(act)
+
+    def _fill_3d_window_menu(self, m):
+        a = QAction("置顶", m)
+        a.triggered.connect(lambda: self._mate3d_cmd('topmost', on=True))
+        m.addAction(a)
+        a = QAction("取消置顶", m)
+        a.triggered.connect(lambda: self._mate3d_cmd('topmost', on=False))
+        m.addAction(a)
+
+    def _fill_3d_hide_menu(self, m):
+        for label, l, r in (("藏左手", True, False), ("藏右手", False, True),
+                            ("都藏", True, True), ("都放", False, False)):
+            a = QAction(label, m)
+            a.triggered.connect(lambda c, ll=l, rr=r: self._mate3d_cmd('hide_arm', left=ll, right=rr))
+            m.addAction(a)
+
+    def _fill_3d_fun_menu(self, m):
+        for label, op, kw in (
+            ("🍼 Q 版模式", 'chibi', {}),
+            ("🖥 大屏模式", 'bigscreen', {}),
+            ("💬 气泡开关", 'bubble', {}),
+        ):
+            a = QAction(label, m)
+            a.triggered.connect(lambda c, o=op, k=kw: self._mate3d_cmd(o, **k))
+            m.addAction(a)
+        a = QAction("🗣 让它说句话…", m)
+        a.triggered.connect(lambda: self._mate3d_say_dialog())
+        m.addAction(a)
+        a = QAction("🔁 自动说话（开/关）", m)
+        a.triggered.connect(lambda: self._mate3d_toggle_auto_talk())
+        m.addAction(a)
 
     # ============ 3D 联动（双后端：web 内置 / mate 外置） ============
     def _mate3d_online(self):
@@ -3302,10 +3555,32 @@ class PetWindow(QWidget):
                         win.bridge.ready.connect(self._on_web3d_ready)
                     except Exception:
                         pass
+                    # ★ 悬停角色 → 展开输入栏（复用 2D 桌宠那套 AI 对话条）
+                    #   3D 模式下 2D 桌宠是隐藏的，它的 enterEvent 永远不触发，
+                    #   所以必须由 3D 窗口把悬停事件转过来。
+                    try:
+                        win.hoverChanged.connect(self._on_web3d_hover)
+                    except Exception:
+                        pass
+                    try:
+                        win.clicked.connect(self._on_web3d_click)
+                    except Exception:
+                        pass
+                    # 拖动时即时同步三横浮层（否则要等轮询，看起来"延迟很高"）
+                    try:
+                        win.overlay_sync = self._sync_overlay_now
+                    except Exception:
+                        pass
                 # ★ 新建后必须 show（否则窗口存在但不可见）
                 self._web3d_win.show()
                 self._web3d_win.raise_()
                 self._web3d_sync_size()
+                # ★ 把 AI 输入栏的定位锚点切到 3D 窗口
+                #   （否则输入栏会按隐藏的 2D 窗口定位，跑到屏幕别处）
+                try:
+                    self._set_geo_anchor(self._web3d_win)
+                except Exception as _e:
+                    print('anchor 3d err:', _e)
             except Exception as e:
                 print('web3d create err:', e)
 
@@ -3327,6 +3602,117 @@ class PetWindow(QWidget):
         """内置 3D 就绪回调（主线程）"""
         self._web3d_ready = True
         print('web3d ready:', name)
+
+    def _sync_overlay_now(self):
+        """拖动 3D 窗口时即时把三横浮层挪过去（零轮询延迟）"""
+        try:
+            if self._mate_overlay is not None and self._mate_overlay.isVisible():
+                self._mate_overlay.follow_mate()
+        except Exception:
+            pass
+
+    def _on_web3d_hover(self, on):
+        """鼠标进出 3D 角色 → 展开/收起 AI 对话输入栏。
+
+        对应旧版 2D 桌宠的 enterEvent/leaveEvent 行为（3D 模式下 2D 窗口是隐藏的，
+        所以那套不会触发，必须在这里补上）。
+
+        ⚠ 两个坑：
+          ① 输入栏位置原本用 self._pet.frameGeometry() —— 3D 模式下 2D 桌宠是隐藏的，
+             位置不对，输入栏会跑到别处 → 这里临时把 3D 窗口几何喂给它。
+          ② 原来要求 ai.enabled() 才弹输入栏；但很多用户把 AI 关着（只用本地语音/
+             悬停对话），那样鼠标移入就完全没反应 → 改成始终弹，AI 未启用时
+             输入栏本身会给出提示，交互反馈一致。
+        """
+        try:
+            ai = getattr(self, 'ai', None)
+            if ai is None:
+                return
+            if on:
+                self._show_chat_bar_for_3d()
+                # 同时让角色说句话（沿用原有悬停对话，自带 2 秒节流）
+                if getattr(self, '_mate_hover_chat', True):
+                    self._mate3d_hover_chat()
+            else:
+                self._with_3d_geometry(lambda: ai.chat_bar_on_leave())
+        except Exception as e:
+            print('web3d hover err:', e)
+
+    def _show_chat_bar_for_3d(self):
+        """3D 模式下悬停角色 → 显示输入栏。
+
+        chat_bar_on_enter 内部会因 AI 未启用直接 return（2D 模式也是这行为）。
+        但 3D 下用户明确要「鼠标移入显示输入栏」，所以这里在 AI 未启用时
+        直接调 open_chat(focus=False) 把输入栏弹出来（输入栏自己会提示未启用）。
+        """
+        ai = getattr(self, 'ai', None)
+        if ai is None:
+            return
+        try:
+            already = (getattr(ai, '_chat', None) is not None
+                       and ai._chat.isVisible())
+            if already:
+                self._with_3d_geometry(lambda: ai.chat_bar_on_enter())
+                return
+            if ai.enabled():
+                self._with_3d_geometry(lambda: ai.chat_bar_on_enter())
+            else:
+                # AI 未启用：仍然把输入栏弹出来（给用户交互反馈，不静默）
+                self._with_3d_geometry(lambda: ai.open_chat(focus=False))
+        except Exception as e:
+            print('show chat bar for 3d err:', e)
+
+    def _set_geo_anchor(self, win):
+        """把 AI 输入栏的定位锚点永久切到指定窗口（None = 恢复真 2D 桌宠）。
+
+        为什么用「永久切换」而不是「临时替换」：
+          ChatWindow 在 open_chat 里接收 self._pet，并自己缓存 _follow_offset。
+          输入栏的跟随是靠定时器 (_follow) 每 100ms 跑 _follow_pet() 实现的 ——
+          临时替换只在调用瞬间有效，等定时器跑时补丁早还原了，所以位置纹丝不动
+          （实测就是这现象）。改为进 3D 时一次性换锚点、退回 2D 时还原。
+        同时必须清 _follow_offset：它缓存「输入栏相对锚点的偏移」，换锚点要重算。
+        """
+        ai = getattr(self, 'ai', None)
+        if ai is None:
+            return
+        if not hasattr(self, '_geo_anchor_orig'):
+            self._geo_anchor_orig = {'mgr': getattr(ai, '_pet', None), 'chat': None}
+        orig_mgr = self._geo_anchor_orig.get('mgr')
+        anchor = _GeoProxy(self, win) if win is not None else orig_mgr
+
+        try:
+            if orig_mgr is not None:
+                ai._pet = anchor
+        except Exception as e:
+            print('set geo anchor (mgr) err:', e)
+        try:
+            chat = getattr(ai, '_chat', None)
+            if chat is not None:
+                if self._geo_anchor_orig.get('chat') is None:
+                    self._geo_anchor_orig['chat'] = getattr(chat, '_pet', None)
+                if self._geo_anchor_orig.get('chat') is not None:
+                    chat._pet = anchor
+                chat._follow_offset = None
+                chat._user_dragged = False
+        except Exception as e:
+            print('set geo anchor (chat) err:', e)
+
+    def _with_3d_geometry(self, fn):
+        """调用 AI 输入栏方法前确保锚点指向 3D 窗口，然后执行 fn。"""
+        try:
+            w = getattr(self, '_web3d_win', None)
+            if w is not None and w.isVisible() and getattr(self, '_in3d', False):
+                self._set_geo_anchor(w)
+        except Exception as e:
+            print('with 3d geometry err:', e)
+        fn()
+
+    def _on_web3d_click(self):
+        """单击 3D 角色（非拖动）→ 让角色说句话"""
+        try:
+            self._mate3d_hover_chat()
+        except Exception:
+            pass
 
     def _web3d_view_size(self):
         """2D 桌宠尺寸 → 3D 窗口尺寸（等比放大，保证角色完整可见）"""
@@ -3402,18 +3788,19 @@ class PetWindow(QWidget):
             print('mate3d sync size err:', e)
 
     def _show_mate_overlay(self):
-        """显示 3D 模式三横浮层（跟随 Mate 窗口位置）"""
+        """显示 3D 模式三横浮层（跟随 3D 窗口位置）"""
         try:
             if self._mate_overlay is None:
                 self._mate_overlay = MateOverlay(self)
             self._mate_overlay.follow_mate()
             self._mate_overlay.show()
             self._mate_overlay.raise_()
-            # 定时跟随（Mate 窗口可被拖动）
+            # 定时跟随。原来是 400ms，用户反馈「跟随延迟很高」（拖动 3D 窗口时
+            # 三横要过 0.4 秒才挪过去）→ 降到 33ms（约 30fps），肉眼基本感觉不到滞后。
             if self._mate_overlay_timer is None:
                 self._mate_overlay_timer = QTimer(self)
                 self._mate_overlay_timer.timeout.connect(self._tick_overlay)
-            self._mate_overlay_timer.start(400)
+            self._mate_overlay_timer.start(33)
         except Exception as e:
             print('show overlay err:', e)
 
@@ -3495,6 +3882,11 @@ class PetWindow(QWidget):
         if hwnd:
             self._win32_show(hwnd, False)
         self._in3d = False
+        # ★ 输入栏定位锚点还原到真 2D 桌宠（否则输入栏还贴着 3D 窗口位置）
+        try:
+            self._set_geo_anchor(None)
+        except Exception as _e:
+            print('anchor 2d err:', _e)
         self.show()
         self.raise_()
         self.activateWindow()

@@ -30,7 +30,7 @@ os.environ.setdefault(
     "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-unsafe-swiftshader",
 )
 
-from PyQt6.QtCore import QObject, QPoint, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QPoint, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot, QEvent
 from PyQt6.QtGui import QAction, QColor, QCursor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (QApplication, QMenu, QSystemTrayIcon, QWidget)
 from PyQt6.QtWebChannel import QWebChannel
@@ -176,6 +176,8 @@ class Web3DPetWindow(QWidget):
     """纯 3D 桌宠窗口（透明、无边框、置顶、可拖动）"""
 
     modelLoaded = pyqtSignal(str)
+    hoverChanged = pyqtSignal(bool)      # 鼠标进出角色 → 通知 pet.py 展开/收起输入栏
+    clicked = pyqtSignal()               # 单击角色（非拖动）→ 可触发说话/互动
 
     def __init__(self, model: str = "michelle", size: tuple[int, int] = DEFAULT_SIZE,
                  parent=None):
@@ -186,6 +188,10 @@ class Web3DPetWindow(QWidget):
         self._topmost = True
         self._models: dict[str, Path] = {}
         self._drag_pos: QPoint | None = None
+        self._hovering = False
+        self._dragging = False
+        self._moved_during_drag = False
+        self.overlay_sync = None            # pet.py 注入：拖动时即时同步三横浮层
 
         self.setWindowTitle("3D 桌宠")
         self.setWindowFlags(
@@ -196,6 +202,9 @@ class Web3DPetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.resize(*size)
+        # ★ 悬停/拖动都要靠鼠标事件。WebEngineView 的子 widget 默认把事件吃掉，
+        #   所以在窗口和 view 上都开 MouseTracking，并装事件过滤器统一处理拖动。
+        self.setMouseTracking(True)
 
         # --- 模型同步 ---
         self._models = sync_models()
@@ -207,6 +216,8 @@ class Web3DPetWindow(QWidget):
         self.page = WebPage(self)
         self.view.setPage(self.page)
         self.view.setGeometry(0, 0, *size)
+        self.view.setMouseTracking(True)
+        self.view.installEventFilter(self)      # 拖动/悬停统一在 eventFilter 处理
         self.page.setBackgroundColor(QColor(0, 0, 0, 0))
         self._apply_settings()
 
@@ -329,19 +340,70 @@ class Web3DPetWindow(QWidget):
     def set_blink(self, on: bool):
         self.js(f"window.setBlinkEnabled({str(bool(on)).lower()})")
 
-    # ---------------- 拖动（窗口级兜底） ----------------
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            e.accept()
-
-    def mouseMoveEvent(self, e):
-        if self._drag_pos is not None and e.buttons() & Qt.MouseButton.LeftButton:
-            self.move(e.globalPosition().toPoint() - self._drag_pos)
-            e.accept()
-
-    def mouseReleaseEvent(self, e):
-        self._drag_pos = None
+    # ---------------- 拖动 / 悬停（走事件过滤器，覆盖 WebEngineView 子控件）----------------
+    #
+    # 之前的实现有两个问题（用户反馈「拖动没有任何反应很生硬」）：
+    #   ① 只重写了 QWidget 的 mousePressEvent —— 但窗口里铺满 QWebEngineView，
+    #      鼠标事件全被 web 视图吃掉，根本传不到 QWidget，所以拖动"没反应"。
+    #   ② 拖动时用 e.globalPosition() - 偏移量 直接 move()，每来一个 mousemove
+    #      就搬一次窗口，QtWebEngine 渲染跟不上 → 一顿一顿"很生硬"。
+    # 现在：装 eventFilter 统一接管；拖动时按屏幕坐标增量移动并在屏幕内夹紧。
+    def eventFilter(self, obj, ev):
+        try:
+            t = ev.type()
+            if t == QEvent.Type.MouseButtonPress:
+                if ev.button() == Qt.MouseButton.LeftButton:
+                    self._drag_pos = ev.globalPosition().toPoint() - self.pos()
+                    self._dragging = True
+                return False
+            if t == QEvent.Type.MouseMove:
+                gp = ev.globalPosition().toPoint()
+                if self._dragging and self._drag_pos is not None:
+                    target = gp - self._drag_pos
+                    # 夹紧在屏幕可用区域内（避免拖出屏幕找不回来）
+                    scr = self.screen().availableGeometry() if self.screen() else None
+                    if scr is not None:
+                        target.setX(max(scr.left() - 40, min(target.x(), scr.right() - 40)))
+                        target.setY(max(scr.top(), min(target.y(), scr.bottom() - 40)))
+                    self.move(target)
+                    self._moved_during_drag = True
+                    # ★ 拖动时立刻让三横浮层跟上（不等 33ms 轮询）
+                    try:
+                        ov = getattr(self, 'overlay_sync', None)
+                        if callable(ov):
+                            ov()
+                    except Exception:
+                        pass
+                # 悬停状态（用于展开输入栏）
+                inside = self.rect().contains(ev.position().toPoint())
+                if inside != self._hovering:
+                    self._hovering = inside
+                    self.hoverChanged.emit(inside)
+                return False
+            if t == QEvent.Type.MouseButtonRelease:
+                if ev.button() == Qt.MouseButton.LeftButton:
+                    was_drag = getattr(self, '_moved_during_drag', False)
+                    self._dragging = False
+                    self._drag_pos = None
+                    self._moved_during_drag = False
+                    if not was_drag:
+                        # 没拖动 = 单击 → 通知 pet.py（可扩展为说话/互动）
+                        try:
+                            self.clicked.emit()
+                        except Exception:
+                            pass
+                return False
+            if t == QEvent.Type.Enter:
+                if not self._hovering:
+                    self._hovering = True
+                    self.hoverChanged.emit(True)
+            elif t == QEvent.Type.Leave:
+                if self._hovering:
+                    self._hovering = False
+                    self.hoverChanged.emit(False)
+        except Exception as e:
+            print('[3d] eventFilter err:', e)
+        return False
 
     # ---------------- 托盘 ----------------
     def _build_tray(self):

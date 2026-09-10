@@ -72,12 +72,14 @@ const dl2 = new THREE.DirectionalLight(0x99bbff, 0.3); dl2.position.set(-1, 0.5,
 // ---------- 状态 ----------
 let vrm = null, mixer = null;
 let morphDriver = null;      // ★ CPU 顶点烘焙表情驱动（见 vrm_morphs.js）
+// relaxArms 摆好的手臂基准角，待机动画在此基础上叠加（避免每帧覆盖掉姿势）
+let armBase = { L: 0, R: 0 };
 const currentModel = { path: null };
 let lastBlink = performance.now(), autoBlink = true, curBlink = -1;
 let idleMotion = true;       // 待机微动（呼吸+轻摆）。自动化测试需冻结它，否则像素差分全是抖动
 const lookTarget = new THREE.Vector3(0, 0.75, 0.2);
 let idleTime = 0;
-let dragging = false, lastMX = 0, lastMY = 0, lastHoverSay = 0, bubbleTimer = null;
+let dragging = false, dragStartX = 0, dragStartY = 0, lastHoverSay = 0, bubbleTimer = null;
 const clock = new THREE.Clock();
 
 const MODELS = {
@@ -197,7 +199,10 @@ function relaxArms(vrm) {
   const height = box.getSize(new THREE.Vector3()).y || 1.6;
 
   if (sh && hd && Math.abs(hd.y - sh.y) > height * 0.10) {
-    return null;   // 手已经在肩下方，说明本来就是自然站姿，别动它
+    // 本来就是自然站姿：不动它，但仍记下当前角作为待机动画基准
+    armBase.L = L.rotation.z;
+    armBase.R = R.rotation.z;
+    return null;
   }
 
   const D = 1.45;
@@ -208,6 +213,9 @@ function relaxArms(vrm) {
   R.rotation.x = 0.06;
   vrm.humanoid.update();
   vrm.scene.updateMatrixWorld(true);
+  // 记下基准角：待机动画会在此基础上做小幅摆动（不要每帧覆盖成固定值）
+  armBase.L = L.rotation.z;
+  armBase.R = R.rotation.z;
   return { left: -D, right: D };
 }
 
@@ -343,20 +351,26 @@ async function loadModel(path) {
 }
 window.loadModel = loadModel;
 
-// ---------- 拖拽移动窗口 ----------
+// ---------- 鼠标：只做视线跟随，拖动交给 Python ----------
+//
+// ★ 为什么不在 JS 里拖动窗口：
+//   原先这里用 mousemove 算增量 → pyBridge.dragWindow(dx,dy) → Python move()。
+//   但 Python 侧（Web3DPetWindow.eventFilter）也在处理同一批鼠标事件拖动窗口，
+//   两套同时搬窗口 → 抖动、迟滞、手感"很生硬"。
+//   现在统一由 Python 的 eventFilter 拖动（带屏幕夹紧 + 即时同步浮层），
+//   JS 这边只负责视线跟随，避免双重拖动。
 renderer.domElement.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  dragging = true; lastMX = e.screenX; lastMY = e.screenY;
+  // 只用于区分"点击"与"拖动"，不再自己搬窗口
+  dragStartX = e.screenX; dragStartY = e.screenY;
 });
+
 window.addEventListener('mousemove', (e) => {
+  // 视线跟随鼠标（纯视觉，不涉及窗口移动）
   lookTarget.x = (e.clientX / window.innerWidth) * 2 - 1;
   lookTarget.y = 0.75 - (e.clientY / window.innerHeight) * 0.6;
-  if (dragging && window.pyBridge?.dragWindow) {
-    const dx = e.screenX - lastMX, dy = e.screenY - lastMY;
-    lastMX = e.screenX; lastMY = e.screenY;
-    window.pyBridge.dragWindow(dx, dy);
-  }
 });
+
 window.addEventListener('mouseup', () => { dragging = false; });
 
 // 悬停角色 → 说话
@@ -397,14 +411,43 @@ function animate() {
     const dt = Math.min(clock.getDelta(), 0.05);
     idleTime += dt;
     if (vrm) {
-      // 待机微动（呼吸 + 轻摆）。冻结时归零，保证画面完全静止
-      // （自动化测试要做像素差分，任何抖动都会把结果污染成「全都在动」）
+      // 待机动作：呼吸起伏 + 轻微摇摆 + 手臂轻摆 + 偶尔歪头。
+      // ★ 之前幅度只有 0.004m（4 毫米）且没有骨骼动作，用户反馈「没有动作」——
+      //   现在整体幅度放大到肉眼可见，并加上骨骼级的小动作。
+      //   冻结时（idleMotion=false）全部归零，保证自动化测试的像素差分干净。
       if (idleMotion) {
-        vrm.scene.position.y = Math.sin(idleTime * 2.0) * 0.004;
-        vrm.scene.rotation.z = Math.sin(idleTime * 0.8) * 0.01;
+        const t = idleTime;
+        // 呼吸：整体上下 ~1.2cm（0.012），周期约 3.1 秒
+        vrm.scene.position.y = Math.sin(t * 2.0) * 0.012;
+        // 轻盈摇摆：绕 Z 轴 ±1.2°
+        vrm.scene.rotation.z = Math.sin(t * 0.8) * 0.021;
+        // 手臂轻摆（在 relaxArms 设的基准角上叠加，幅度 ±3.5°）
+        const L = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
+        const R = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
+        if (L && R) {
+          const sw = Math.sin(t * 1.3) * 0.06;
+          L.rotation.z = armBase.L - sw;
+          R.rotation.z = armBase.R + sw;
+        }
+        // 偶尔歪头（每 ~7 秒一次，持续 ~2 秒，平滑出入）
+        const cyc = t % 7.0;
+        let tilt = 0;
+        if (cyc > 4.6 && cyc < 6.6) {
+          const k = (cyc - 4.6) / 2.0;              // 0→1
+          tilt = Math.sin(k * Math.PI) * 0.10;      // 平滑淡入淡出
+        }
+        const neck = vrm.humanoid?.getNormalizedBoneNode('neck')
+                  || vrm.humanoid?.getNormalizedBoneNode('head');
+        if (neck) neck.rotation.z = idleMotion ? tilt : 0;
       } else {
         vrm.scene.position.y = 0;
         vrm.scene.rotation.z = 0;
+        const L = vrm.humanoid?.getNormalizedBoneNode('leftUpperArm');
+        const R = vrm.humanoid?.getNormalizedBoneNode('rightUpperArm');
+        if (L && R) { L.rotation.z = armBase.L; R.rotation.z = armBase.R; }
+        const neck = vrm.humanoid?.getNormalizedBoneNode('neck')
+                  || vrm.humanoid?.getNormalizedBoneNode('head');
+        if (neck) neck.rotation.z = 0;
       }
       // 眨眼：只在状态真的需要切换时调用 setBlink（避免每帧重算顶点）
       const t = performance.now() - lastBlink;
